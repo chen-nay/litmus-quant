@@ -5,7 +5,10 @@ description = "选股条件的证伪器：检验选股条件是否真的有效"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "httpx>=0.28.1",
+    "polars>=1.44.2",
+]
 
 [build-system]
 requires = ["hatchling"]
