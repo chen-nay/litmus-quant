@@ -68,7 +68,11 @@ DEFAULT_RATE_LIMIT = 400
 #: 一次 call() 最多翻多少页，纯粹是防止死循环
 MAX_PAGES = 2000
 
-_RATE_LIMIT_HINTS = ("每分钟", "频率", "频次", "太频繁")
+#: 流控提示词。除了按分钟计的频率限制，代理还会限制同时在飞的连接数：
+#: 2026-09-13 实测 12 路并发时返回 code=429 msg=请勿使用过多线程，连接超限
+_RATE_LIMIT_HINTS = ("每分钟", "频率", "频次", "太频繁", "超限", "线程", "连接数")
+#: 流控错误码。按字符串比对，代理返回的可能是数字也可能是字符串
+_RATE_LIMIT_CODES = ("429",)
 _PERMISSION_HINTS = ("积分", "权限", "没有访问", "token")
 
 
@@ -235,7 +239,7 @@ class TushareClient:
     @staticmethod
     def _classify(api_name: str, code: object, msg: str) -> TushareError:
         # 先判频率再判权限：频率提示里也可能出现"访问"字样
-        if any(hint in msg for hint in _RATE_LIMIT_HINTS):
+        if str(code) in _RATE_LIMIT_CODES or any(hint in msg for hint in _RATE_LIMIT_HINTS):
             return TushareRateLimitError(f"{api_name}: {msg}", api_name=api_name, code=code)
         if any(hint in msg for hint in _PERMISSION_HINTS):
             return TushareAuthError(f"{api_name}: {msg}", api_name=api_name, code=code)

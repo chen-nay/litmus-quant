@@ -104,6 +104,23 @@ def test_频率限制会退避后重试():
     assert client.test_sleeps  # 确实等待过
 
 
+def test_并发过高的429被判为流控并重试():
+    """代理实测：12 路并发时返回 code=429，连接超限是暂时的，必须退避重试。"""
+    transport = FakeTransport(err("请勿使用过多线程，连接超限", code=429), ok(["a"], [[1]]))
+    client = make_client(transport)
+
+    assert client.call("daily", page_size=10) == [{"a": 1}]
+    assert len(transport.payloads) == 2
+
+
+def test_错误码认不出但消息说连接超限也算流控():
+    transport = FakeTransport(err("连接数超限，请稍后重试"), ok(["a"], [[1]]))
+    client = make_client(transport)
+
+    assert client.call("daily", page_size=10) == [{"a": 1}]
+    assert len(transport.payloads) == 2
+
+
 def test_网络错误重试耗尽后抛错():
     transport = FakeTransport(*[httpx.ConnectError("boom")] * 4)
     client = make_client(transport)
