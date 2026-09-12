@@ -86,6 +86,18 @@
 ```toml
 [tool.importlinter]
 root_package = "litmus"
+include_external_packages = true
+
+# 只有 llm 模块能接触具体厂商的 SDK：以后加 OpenAI 兼容实现时，
+# 改动被限制在 llm/client.py 内，其余模块不可能悄悄依赖某一家
+[[tool.importlinter.contracts]]
+name = "LLM 厂商 SDK 只能出现在 llm 模块"
+type = "forbidden"
+source_modules = [
+    "litmus.api", "litmus.research", "litmus.data",
+    "litmus.expr", "litmus.spec", "litmus.signals", "litmus.store",
+]
+forbidden_modules = ["anthropic", "openai"]
 
 [[tool.importlinter.contracts]]
 name = "模块单向依赖"
@@ -374,7 +386,7 @@ DataService 只有一个实现（读本地 Parquet），不做抽象接口，也
 | 2 | 复权因子 | 后复权；变化即除权除息日 | `adj_factor` | 按交易日 |
 | 3 | 每日指标 | 换手率、估值、市值 | `daily_basic` | 按交易日 |
 | 4 | 涨跌停价 | 涨跌停状态、开盘买不进 | `stk_limit` | 按交易日（含 B 股与基金，需分页） |
-| 5 | ST 名单 | `$is_st` | `stock_st` | 按日期区间（单次 1000 行，ST 每天一两百只，约 6 天一次调用） |
+| 5 | ST 名单 | `$is_st` | `stock_st` | 按日期区间（单次 1000 行，实测每天约 200 只 ST，约 4 天一次调用） |
 | 6 | 财务指标（含披露日） | `$roe $revenue_yoy $profit_yoy` | `fina_indicator_vip` | 按报告期 |
 | 7 | 财报披露日 | `$is_report_date` | `disclosure_date` | 按报告期（需分页） |
 | 8 | 业绩预告 | `$is_forecast_date` | `forecast_vip` | 按报告期 |
@@ -392,8 +404,8 @@ DataService 只有一个实现（读本地 Parquet），不做抽象接口，也
 
 | 数据 | 接口 | 积分 | 用途 |
 |---|---|---|---|
-| 概念板块清单 | `tdx_index` | 6000 | 板块名清单 |
-| 概念板块日线 | `tdx_daily` | 6000 | 概念板块榜（按板块代码拉，单次 3000 行，约 800 次） |
+| 概念板块清单 | `tdx_index` | 6000 | 板块名清单。实测共 613 个，含概念 / 行业 / 风格 / 地区四类，要按 `idx_type` 过滤出概念板块 |
+| 概念板块日线 | `tdx_daily` | 6000 | 概念板块榜（按板块代码拉，单次 3000 行，约 600 次） |
 | 概念板块成分 | `tdx_member` | 6000 | "某某概念股有哪些"（P0 只取当前快照） |
 
 **不拉取的接口**：`suspend_d`（停牌由 `daily` 缺行推导）、`dividend`（除权除息日由 `adj_factor` 变化推导）、
@@ -438,7 +450,7 @@ DataService 只有一个实现（读本地 Parquet），不做抽象接口，也
 完成后，本地数据即使落后几天也照常查询，页面标注"数据截至 YYYY-MM-DD"并提示同步更新。
 
 **首次同步耗时（粗估，第 1a 步实测）**：按交易日拉的 4 个接口（行情、复权因子、每日指标、涨跌停价）
-约 1.04 万次，ST 名单约 450 次，申万行业 31 次，概念板块约 800 次，财务、事件、指数与基础数据约 600 次，
+约 1.04 万次，ST 名单约 650 次，申万行业 31 次，概念板块约 600 次，财务、事件、指数与基础数据约 600 次，
 合计约 1.2 万次调用，按每分钟 500 次估算约 25~30 分钟。
 
 #### 存储布局
@@ -480,7 +492,7 @@ data/                                  # 默认在仓库根目录（已 gitignor
 | 停牌 | 上市期内的交易日没有 `daily` 记录即为停牌。**面板不补齐**：每只股票只保留有成交的交易日，时序算子窗口按该股票的有效交易日计算（§3.3）。停牌只影响两处：从股票池剔除、买卖顺延 |
 | ST | 按交易日取 `stock_st` 官方名单 |
 | 次新股 | 上市不足 N 个交易日标记 `is_new`，默认排除 |
-| 北交所 | 不纳入股票池 |
+| 北交所 | 不纳入股票池，理由见 §2.5。**Tushare 按日返回的数据里含北交所**（实测某日 `daily_basic` 5550 行中就有 `.BJ` 代码），loader 要按代码后缀显式过滤 |
 | 交易日历 | 所有"N日"一律指**交易日**，不是自然日。这是确认卡必须澄清的项 |
 
 ### 2.7 行业与概念板块
@@ -894,9 +906,17 @@ LLM_TEMPERATURE=0
 
 `LLMClient` 是抽象基类，P1 可加 `OpenAICompatClient` 支持 DeepSeek / 通义 / Ollama。
 
-**强制 tool_use 必须提前验证**：整个结构化输出都押在"火山引擎的兼容端点支持 `tool_choice` 强制调用"上。
-用一条最小请求在第 1a 步之前确认（§9 第 0 步）。不支持的话退路是 JSON 模式加严格解析重试，
-这会影响 §5.2 的整套设计，所以不能等到第 7 步才发现。
+**强制 tool_use 已实测可用**（火山引擎 `ark.cn-beijing.volces.com/api/coding` + `glm-5.3-flash`，2026-09-12）：
+
+- **认证头按端点不同，必须可配**：火山引擎用 `Authorization: Bearer`（SDK 里是 `Anthropic(auth_token=...)`），
+  Anthropic 官方用 `x-api-key`（`Anthropic(api_key=...)`）。写死任何一种，另一边都会 401。
+  由 `LLM_AUTH_STYLE` 控制：默认 `auto`（`api.anthropic.com` 用 x-api-key，其余用 bearer），
+  可显式设为 `bearer` / `x-api-key`；收到 401 时自动换另一种重试一次，并在日志里记下哪种可用
+- `tool_choice={"type":"tool","name":"output"}` 能强制调用，返回 `stop_reason=tool_use`
+- **响应的 `content` 里可能含 `thinking` 块**（实测是 `["thinking", "tool_use"]`）。
+  解析时必须遍历 content 找 `type == "tool_use"` 的块，**不能取 `content[0]`**
+- 实测还确认了一件事：不给字段和算子清单时，模型会自己发明表达式语法（它写出了 `amount[-1] > 2 * mean(amount[-21:-2])`）。
+  这正是 §5.2 防线② 存在的理由——表达式必须过 `expr.validate()`
 
 **分工**：api 决定"什么时候调"，llm 决定"怎么调"（提示词、模型、重试、结果检查）。api 不接触任何提示词。
 
@@ -1247,4 +1267,4 @@ def test_mean():
 | # | 事项 | 何时决定 | 当前倾向 |
 |---|---|---|---|
 | 1 | `spec.DEFAULTS` 里几个阈值的具体取值（"小市值"等） | 第 7 步 | 做确认卡时定，能显示能改 |
-| 2 | 接口实测项 | 第 1a 步 | ① 各接口 2016 年起的数据是否完整；② `fina_indicator_vip` 同一报告期是否返回更正记录，据此确定 PIT 处理；③ `$roe` 用 `roe_yearly` 是否合适；④ 申万 2021 版对 2021 年以前的归属口径；⑤ 沪深300 在 `index_daily` / `index_weight` 中的代码写法；⑥ `tdx_member` 历史成分能回溯多久；⑦ `sw_daily` 与 `tdx_daily` 的历史能回溯到哪一年（东财 `dc_daily` 明确从 2020 年起，通达信的没写）——若回溯不到 2016 年，板块表的可用区间要单独标注 |
+| 2 | 接口实测项 | 第 1a 步 | ① 各接口 2016 年起的数据是否完整；② `fina_indicator_vip` 同一报告期是否返回更正记录，据此确定 PIT 处理；③ `$roe` 用 `roe_yearly` 是否合适；④ 申万 2021 版对 2021 年以前的归属口径；⑤ 沪深300 在 `index_daily` / `index_weight` 中的代码写法；⑥ `tdx_member` 历史成分能回溯多久；⑦ `sw_daily` 与 `tdx_daily` 的历史能回溯到哪一年（东财 `dc_daily` 明确从 2020 年起，通达信的没写）——若回溯不到 2016 年，板块表的可用区间要单独标注；⑧ 能力探测的失败分支：本账号 10000 积分、所有接口都通，需要用一个无权限 token 或不存在的接口名来验证权限错误长什么样<br>**已完成**：HTTP 协议与各积分档接口连通（`trade_cal` / `daily_basic` / `stock_st` / `sw_daily` / `tdx_index` / `hm_detail` 全部返回 `code=0`） |
