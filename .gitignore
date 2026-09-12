@@ -1,0 +1,25 @@
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 本地配置（含密钥）
+.env
+
+# Tushare 接口定义：本地参考资料，含接入地址，不提交
+/api_define/
+
+# 数据目录：只忽略仓库根目录的 data/，不能写成 data/，否则会误伤 litmus/data/ 包
+/data/

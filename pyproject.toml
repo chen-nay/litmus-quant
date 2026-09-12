@@ -1,0 +1,36 @@
+[project]
+name = "litmus-quant"
+dynamic = ["version"]
+description = "选股条件的证伪器：检验选股条件是否真的有效"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "litmus/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["litmus"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["*.md"]  # 设计文档里的示例代码不参与格式化
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.6",
+]
