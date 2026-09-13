@@ -73,6 +73,12 @@ REQUIRED_APIS: tuple[str, ...] = ("daily", "adj_factor", "daily_basic", "stk_lim
 #: 实测的并发上限，理由见模块文档
 DEFAULT_WORKERS = 8
 
+#: 扛不住并发的接口，串行拉。2026-09-13 实测：这两个在 8 路并发下直接返回
+#: 「您请求速度过快」，串行则完全正常。好在串行代价极小——disclosure_date 单次 1.5 秒、
+#: 42 个报告期约 63 秒，share_float 单次 5 秒、11 年约 55 秒。真正需要并发的
+#: fina_indicator_vip（单次 12.3 秒，串行要 8 分半）恰好扛得住 8 路。
+SERIAL_APIS = frozenset({"disclosure_date", "share_float"})
+
 
 def report_periods(start: str, end: str) -> list[str]:
     """[start, end] 覆盖到的报告期（每个季度最后一天），从早到晚。
@@ -247,9 +253,23 @@ class DataSync:
         return written
 
     def _pull_concurrently(self, tasks: Sequence[tuple[str, dict, str | None]]) -> list[list[dict]]:
-        """并发跑一批 (接口, 参数, 字段)，按传入顺序返回。任何一个失败就整体抛错。"""
-        with ThreadPoolExecutor(max_workers=self._workers) as pool:
-            return list(pool.map(lambda task: self._client.call(*task), tasks))
+        """跑一批 (接口, 参数, 字段)，按传入顺序返回。任何一个失败就整体抛错。
+
+        SERIAL_APIS 里的接口单独串行——它们扛不住并发，而串行代价只有一分钟上下。
+        """
+        results: list[list[dict]] = [[] for _ in tasks]
+        parallel = [(i, task) for i, task in enumerate(tasks) if task[0] not in SERIAL_APIS]
+        serial = [(i, task) for i, task in enumerate(tasks) if task[0] in SERIAL_APIS]
+
+        if parallel:
+            with ThreadPoolExecutor(max_workers=self._workers) as pool:
+                rows_iter = pool.map(lambda pair: self._client.call(*pair[1]), parallel)
+                for (index, _), rows in zip(parallel, rows_iter, strict=True):
+                    results[index] = rows
+
+        for index, task in serial:
+            results[index] = self._client.call(*task)
+        return results
 
     def sync_daily(
         self,

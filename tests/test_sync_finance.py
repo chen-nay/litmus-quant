@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -77,10 +79,24 @@ class FakeClient:
     def __init__(self, *, empty: set[str] | None = None):
         self.empty = empty or set()
         self.calls: list[tuple[str, dict, str | None]] = []
+        self.peak: dict[str, int] = {}  # 每个接口同时在飞的最大请求数
+        self._active: dict[str, int] = {}
+        self._lock = threading.Lock()
 
     def call(self, api_name: str, params: dict | None = None, fields: str | None = None):
         params = dict(params or {})
-        self.calls.append((api_name, params, fields))
+        with self._lock:
+            self.calls.append((api_name, params, fields))
+            self._active[api_name] = self._active.get(api_name, 0) + 1
+            self.peak[api_name] = max(self.peak.get(api_name, 0), self._active[api_name])
+        try:
+            time.sleep(0.005)  # 给并发留出重叠的机会，否则峰值永远是 1
+            return self._rows(api_name, params)
+        finally:
+            with self._lock:
+                self._active[api_name] -= 1
+
+    def _rows(self, api_name: str, params: dict):
         if api_name in self.empty:
             return []
         if api_name == "fina_indicator_vip":
@@ -173,6 +189,32 @@ def test_解禁按年份区间拉而不是报告期(store):
     windows = client.params_for("share_float")
     assert [w["start_date"] for w in windows] == ["20240101", "20250101"]
     assert [w["end_date"] for w in windows] == ["20241231", "20251231"]
+
+
+def test_扛不住并发的接口串行拉(store):
+    """实测这两个在 8 路并发下返回「您请求速度过快」，串行则完全正常。"""
+    client = FakeClient()
+    run(store, client)
+
+    assert client.peak["disclosure_date"] == 1
+    assert client.peak["share_float"] == 1
+
+
+def test_扛得住并发的接口照常并发(store):
+    """fina_indicator_vip 单次要十几秒，串行四十多个报告期要八分半，必须并发。"""
+    client = FakeClient()
+    run(store, client)
+
+    assert client.peak["fina_indicator_vip"] > 1
+
+
+def test_串行的接口一次都不少(store):
+    """串行只是改了拉取方式，不该漏掉任何一个请求。"""
+    client = FakeClient()
+    run(store, client)
+
+    assert len(client.params_for("disclosure_date")) == len(report_periods(START, END))
+    assert len(client.params_for("share_float")) == 2
 
 
 def test_财务指标只请求需要的字段(store):
