@@ -134,7 +134,7 @@ api ──→ DataSync.status()：最小可用区间未覆盖 → 直接返回 d
 api ──→ 组装上下文：
         expr.field_catalog()     字段清单（按 manifest 的能力探测结果过滤）
         expr.operator_catalog()  算子清单
-        signals.load_events()    事件库（16 条）
+        signals.load_events()    事件库（15 条）
         ds.list_boards("sw_industry")  申万 31 个一级行业名（概念板块几百个，不进提示词，走 resolve）
         spec.DEFAULTS            默认值表
         ds.latest_trading_day()  最近已收盘交易日
@@ -281,7 +281,6 @@ class DataService:
 | `$profit_yoy` | 归母净利润同比 | % | `fina_indicator_vip.netprofit_yoy` | 按披露日对齐 |
 | `$is_report_date` | 财报实际披露日 | 布尔 | `disclosure_date.actual_date` | — |
 | `$is_forecast_date` | 业绩预告公告日 | 布尔 | `forecast_vip.ann_date` | — |
-| `$is_unlock_date` | 限售解禁日 | 布尔 | `share_float.float_date` | — |
 | `$is_ex_div` | 除权除息日 | 布尔 | 由 `adj_factor` 推导 | 复权因子较前一交易日变化 |
 | `$is_st` | ST / *ST | 布尔 | `stock_st` | 当日在官方 ST 名单中 |
 | `$is_limit_up` | 收盘涨停 | 布尔 | `daily.close` 与 `stk_limit.up_limit` | 收盘价等于涨停价 |
@@ -390,7 +389,7 @@ DataService 只有一个实现（读本地 Parquet），不做抽象接口，也
 | 6 | 财务指标（含披露日） | `$roe $revenue_yoy $profit_yoy` | `fina_indicator_vip` | 按报告期 |
 | 7 | 财报披露日 | `$is_report_date` | `disclosure_date` | 按报告期（需分页） |
 | 8 | 业绩预告 | `$is_forecast_date` | `forecast_vip` | 按报告期 |
-| 9 | 限售解禁 | `$is_unlock_date` | `share_float` | 按解禁日期区间 |
+| 9 | 限售解禁 | `$is_unlock_date` | `share_float` | **P0 不拉**，数据量见 §11 |
 | 10 | 股票列表 | 股票池、上市日期、拼音首字母 | `stock_basic` | L / D / P 三种状态各取一次 |
 | 11 | 曾用名 | 按旧名查股票 | `namechange` | 全量 |
 | 12 | 交易日历 | 所有"N 日"的换算 | `trade_cal` | 全量 |
@@ -479,7 +478,7 @@ DataService 只有一个实现（读本地 Parquet），不做抽象接口，也
 | `fina_indicator_vip` | 12.3s | 42 个报告期约 8.6 分钟 | 正常 |
 | `forecast_vip` | 2.6s | 42 个报告期约 1.8 分钟 | 正常 |
 | `disclosure_date` | 1.5s | 42 个报告期约 63 秒 | **被限流** |
-| `share_float` | 5.0s | 11 年约 55 秒 | **被限流** |
+| `share_float` | 5.0s | 拉不完，见 §11 | **被限流** |
 
 串行时四个接口都不会被限流，所以限流是被并发触发的，不是请求次数。于是按接口区分：
 被限流的两个串行拉（`SERIAL_APIS`），代价合计约两分钟；真正需要并发的
@@ -499,7 +498,7 @@ data/                                  # 默认在仓库根目录（已 gitignor
 │   │                                  #（合并行情、复权因子、每日指标、涨跌停价、ST 状态）
 │   ├── board/                         # 板块日频面板：申万行业、概念板块
 │   ├── fina_indicator.parquet         # 含 ann_date（披露日）
-│   ├── events/                        # 财报披露日、业绩预告、限售解禁
+│   ├── events/                        # 财报披露日、业绩预告（限售解禁见 §11）
 │   ├── index/                         # 指数日线、指数历史成分
 │   ├── meta/                          # 股票列表（含退市）、曾用名、交易日历、申万行业归属、板块清单与成分
 │   └── manifest.json                  # 数据来源、覆盖范围、行数、首末日期、同步时间、能力探测结果
@@ -797,7 +796,7 @@ def evaluate(expr: str, codes: list[str], start: date, end: date,
 
 ### 4.3 个股回看
 
-**事件库（16 个，参数可调）**，定义在 `signals/builtin.yaml`，加载时逐条过 `expr.validate()`：
+**事件库（15 个，参数可调）**，定义在 `signals/builtin.yaml`，加载时逐条过 `expr.validate()`：
 
 | 类别 | 事件 | 表达式（默认参数） |
 |---|---|---|
@@ -815,7 +814,6 @@ def evaluate(expr: str, codes: list[str], start: date, end: date,
 | | 跌停 | `$is_limit_down` |
 | 日历 | 财报披露日 | `$is_report_date` |
 | | 业绩预告日 | `$is_forecast_date` |
-| | 限售解禁日 | `$is_unlock_date` |
 | | 除权除息日 | `$is_ex_div` |
 
 **所有事件只取"由不满足变为满足"的那一天**：计算触发日时，引擎自动给事件表达式包一层
@@ -980,7 +978,7 @@ LLM_TEMPERATURE=0
 |---|---|
 | 字段清单（含中文说明、单位） | `expr.field_catalog()`，按能力探测结果过滤 |
 | 算子清单（含语义） | `expr.operator_catalog()` |
-| 事件库（16 条，含表达式与可调参数） | `signals.load_events()` |
+| 事件库（15 条，含表达式与可调参数） | `signals.load_events()` |
 | 申万 31 个一级行业名 | `ds.list_boards("sw_industry")`。概念板块有几百个，不进提示词：LLM 只填用户原话，由 `ds.resolve_board()` 解析 |
 | 默认值表 | `spec.DEFAULTS` |
 | 当前日期与最近已收盘交易日 | `ds.latest_trading_day()` |
@@ -1208,7 +1206,7 @@ litmus/
 │       └── logic.py
 ├── signals/                # 依赖 expr
 │   ├── loader.py           # load_events()，加载时逐条 expr.validate()
-│   └── builtin.yaml        # 事件库（16 条）
+│   └── builtin.yaml        # 事件库（15 条）
 ├── research/               # 依赖 expr、data、spec
 │   ├── screener.py         # 股票表、板块表
 │   ├── history.py          # 个股回看
@@ -1251,7 +1249,7 @@ Makefile
 | 1b | data：DataService（含按日股票池、板块）+ 合成数据集 + 契约测试 | 契约测试在合成数据集上离线通过；有 token 时再跑一遍真实数据 |
 | 2 | expr：parser / validator / collector / evaluator + 全部算子，支持股票与板块两类标的 | 小表格测试：`Cross`、`Mean`、`Rank` 等逐个验证 |
 | 3 | spec（三种形状 + 默认值表）+ research：股票表、板块表、个股回看 | 手工核对若干笔"之后 N 天涨跌"，含顺延与扣成本 |
-| 4 | signals：事件库 16 条 | YAML 加载，逐条校验通过，都能跑出回看结果 |
+| 4 | signals：事件库 15 条 | YAML 加载，逐条校验通过，都能跑出回看结果 |
 | 5 | store（JSON）+ FastAPI：`/api/run`（先不接 LLM，直接传 QuerySpec）+ `/api/data/sync`、`/api/data/status` | Postman 能跑出三种结果；能触发同步并查看进度 |
 | 6 | 前端：同步页 + 三种结果页 | 页面上能完成同步，并看到三种结果 |
 | 7 | `llm.plan()` + prompt 管理 + `ds.resolve_stock()` / `ds.resolve_board()` + 确认卡 / 澄清卡（说明文字由模板生成） | 自然语言能正确生成三种形状；编造字段被拦截；"平安"返回多个候选；"最近哪个板块最强"先澄清；"现在能买茅台吗"给改写建议；改完参数说明文字跟着变 |
@@ -1311,6 +1309,7 @@ def test_mean():
 | 免费数据源（BaoStock / AKShare） | 一次安装只用一种数据源，需要各自的 loader |
 | 无 LLM key 的降级路径 | P0 必须配 key |
 | `llm.review()`（LLM 审查用户改动） | 已取消，不是推迟：说明文字改由模板生成、参数范围由代码校验后，它的两个目标都有确定性替代，而它本身会带来死锁 |
+| 限售解禁（`share_float` → `$is_unlock_date`） | 数据量与收益不成比例。2026-09-13 实测：单个解禁日 22904 行，一个自然月超过 10 万行——**连一个月都拉不完**，翻到第 18 页就撞上代理的 offset 上限（offset=60000 正常、102000 被拒）。只能按天切，约 2600 个交易日、每天数页，而且这个接口扛不住并发、只能串行，估计十几个小时，只为换回一个布尔字段。归一逻辑 `normalize_share_float` 已经写好并有测试，P1 接上 DataSync 即可 |
 
 ---
 

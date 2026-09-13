@@ -25,11 +25,9 @@ from litmus.data.loaders.finance import (
     DISCLOSURE_FIELDS,
     FINA_INDICATOR_FIELDS,
     FORECAST_FIELDS,
-    SHARE_FLOAT_FIELDS,
     normalize_disclosure,
     normalize_fina_indicator,
     normalize_forecast,
-    normalize_share_float,
 )
 from litmus.data.loaders.meta import (
     LIST_STATUSES,
@@ -65,7 +63,8 @@ NAMECHANGE_TABLE = "meta/namechange"
 FINA_INDICATOR_TABLE = "fina_indicator"
 DISCLOSURE_TABLE = "events/disclosure"
 FORECAST_TABLE = "events/forecast"
-SHARE_FLOAT_TABLE = "events/share_float"
+# 限售解禁（share_float）P0 不同步：单个解禁日就有 2.3 万行、一个月超过 10 万行，
+# 全量按天拉要十几个小时，只换来一个布尔字段。见 ARCHITECTURE §11。
 
 #: 一个交易日的必需接口，缺一不可
 REQUIRED_APIS: tuple[str, ...] = ("daily", "adj_factor", "daily_basic", "stk_limit")
@@ -73,11 +72,10 @@ REQUIRED_APIS: tuple[str, ...] = ("daily", "adj_factor", "daily_basic", "stk_lim
 #: 实测的并发上限，理由见模块文档
 DEFAULT_WORKERS = 8
 
-#: 扛不住并发的接口，串行拉。2026-09-13 实测：这两个在 8 路并发下直接返回
-#: 「您请求速度过快」，串行则完全正常。好在串行代价极小——disclosure_date 单次 1.5 秒、
-#: 42 个报告期约 63 秒，share_float 单次 5 秒、11 年约 55 秒。真正需要并发的
-#: fina_indicator_vip（单次 12.3 秒，串行要 8 分半）恰好扛得住 8 路。
-SERIAL_APIS = frozenset({"disclosure_date", "share_float"})
+#: 扛不住并发的接口，串行拉。2026-09-13 实测：disclosure_date 在 8 路并发下直接返回
+#: 「您请求速度过快」，串行则完全正常，而且代价极小——单次 1.5 秒、42 个报告期约 63 秒。
+#: 真正需要并发的 fina_indicator_vip（单次 12.3 秒，串行要 8 分半）恰好扛得住 8 路。
+SERIAL_APIS = frozenset({"disclosure_date"})
 
 
 def report_periods(start: str, end: str) -> list[str]:
@@ -191,25 +189,19 @@ class DataSync:
     def sync_finance(
         self, start: str, end: str, manifest: Manifest | None = None
     ) -> dict[str, int]:
-        """拉财务指标与三类事件（财报披露、业绩预告、限售解禁）。
+        """拉财务指标与两类事件（财报披露、业绩预告）。
 
         它们都不进日频面板，各自落一张表，读取时再按 PIT 规则拼上去（见 finance.py）。
-        四个接口的所有请求丢进同一个线程池：串行要十几分钟，并发两三分钟。
+        扛得住并发的接口丢进线程池，扛不住的串行（见 SERIAL_APIS）。
+        限售解禁 P0 不拉，数据量的实测见 ARCHITECTURE §11。
         """
         manifest = Manifest.load(self._store) if manifest is None else manifest
         periods = report_periods(start, end)
-        years = range(int(start[:4]), int(end[:4]) + 1)
 
         by_period = [
             ("fina_indicator_vip", FINA_INDICATOR_FIELDS, [{"period": p} for p in periods]),
             ("forecast_vip", FORECAST_FIELDS, [{"period": p} for p in periods]),
             ("disclosure_date", DISCLOSURE_FIELDS, [{"end_date": p} for p in periods]),
-            # 解禁按解禁日期区间拉，不按报告期——解禁日和报告期没关系
-            (
-                "share_float",
-                SHARE_FLOAT_FIELDS,
-                [{"start_date": f"{y}0101", "end_date": f"{y}1231"} for y in years],
-            ),
         ]
         tasks = [
             (api_name, params, fields)
@@ -225,7 +217,7 @@ class DataSync:
             merged = [row for rows in results[cursor : cursor + len(param_list)] for row in rows]
             chunks.append(merged)
             cursor += len(param_list)
-        fina, forecast, disclosure, share_float = chunks
+        fina, forecast, disclosure = chunks
 
         written = {
             FINA_INDICATOR_TABLE: self._write_table(
@@ -239,9 +231,6 @@ class DataSync:
             ),
             DISCLOSURE_TABLE: self._write_table(
                 DISCLOSURE_TABLE, normalize_disclosure(disclosure), manifest
-            ),
-            SHARE_FLOAT_TABLE: self._write_table(
-                SHARE_FLOAT_TABLE, normalize_share_float(share_float), manifest
             ),
         }
         manifest.save(self._store)

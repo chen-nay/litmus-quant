@@ -1,4 +1,7 @@
-"""财务与事件同步的测试：按报告期拉、四张表各自落盘、字段显式请求。不联网。"""
+"""财务与事件同步的测试：按报告期拉、三张表各自落盘、字段显式请求。不联网。
+
+限售解禁（share_float）P0 不同步，原因见 finance.py 的 normalize_share_float。
+"""
 
 from __future__ import annotations
 
@@ -14,7 +17,6 @@ from litmus.data.sync import (
     DISCLOSURE_TABLE,
     FINA_INDICATOR_TABLE,
     FORECAST_TABLE,
-    SHARE_FLOAT_TABLE,
     DataSync,
     SyncError,
     report_periods,
@@ -62,19 +64,6 @@ def disclosure_rows(period: str) -> list[dict]:
     ]
 
 
-def float_rows(start_date: str) -> list[dict]:
-    return [
-        {
-            "ts_code": "600519.SH",
-            "ann_date": start_date,
-            "float_date": f"{start_date[:4]}0315",
-            "float_share": 25076106.0,
-            "float_ratio": 1.9041,
-            "share_type": "定增股份",
-        }
-    ]
-
-
 class FakeClient:
     def __init__(self, *, empty: set[str] | None = None):
         self.empty = empty or set()
@@ -105,8 +94,6 @@ class FakeClient:
             return forecast_rows(params["period"])
         if api_name == "disclosure_date":
             return disclosure_rows(params["end_date"])
-        if api_name == "share_float":
-            return float_rows(params["start_date"])
         raise AssertionError(f"测试没准备 {api_name}")
 
     def params_for(self, api_name: str) -> list[dict]:
@@ -181,23 +168,20 @@ def test_披露计划用报告期作为end_date(store):
     )
 
 
-def test_解禁按年份区间拉而不是报告期(store):
-    """解禁日和报告期没关系，按报告期拉会漏掉季度之间解禁的。"""
+def test_解禁接口P0不拉(store):
+    """share_float 数据量过大，推迟到 P1，同步时一次都不该调到它。"""
     client = FakeClient()
     run(store, client)
 
-    windows = client.params_for("share_float")
-    assert [w["start_date"] for w in windows] == ["20240101", "20250101"]
-    assert [w["end_date"] for w in windows] == ["20241231", "20251231"]
+    assert client.params_for("share_float") == []
 
 
 def test_扛不住并发的接口串行拉(store):
-    """实测这两个在 8 路并发下返回「您请求速度过快」，串行则完全正常。"""
+    """实测 disclosure_date 在 8 路并发下返回「您请求速度过快」，串行则完全正常。"""
     client = FakeClient()
     run(store, client)
 
     assert client.peak["disclosure_date"] == 1
-    assert client.peak["share_float"] == 1
 
 
 def test_扛得住并发的接口照常并发(store):
@@ -214,7 +198,6 @@ def test_串行的接口一次都不少(store):
     run(store, client)
 
     assert len(client.params_for("disclosure_date")) == len(report_periods(START, END))
-    assert len(client.params_for("share_float")) == 2
 
 
 def test_财务指标只请求需要的字段(store):
@@ -231,11 +214,11 @@ def test_财务指标只请求需要的字段(store):
 # ── 落盘与记账 ──────────────────────────────────────────────────
 
 
-def test_四张表各自落盘(store):
+def test_三张表各自落盘(store):
     run(store, FakeClient())
 
     assert store.has_table(FINA_INDICATOR_TABLE)
-    for table in (FORECAST_TABLE, DISCLOSURE_TABLE, SHARE_FLOAT_TABLE):
+    for table in (FORECAST_TABLE, DISCLOSURE_TABLE):
         assert store.has_table(table)
         assert store.table_path(table).is_relative_to(store.market / "events")
 
@@ -255,7 +238,7 @@ def test_记账里有覆盖的报告期区间(store):
     _, manifest = run(store, FakeClient())
 
     assert manifest.tables[FINA_INDICATOR_TABLE].note == "20240331~20250630"
-    assert manifest.tables[SHARE_FLOAT_TABLE].rows == 2  # 两年各一行
+    assert manifest.tables[DISCLOSURE_TABLE].rows == len(report_periods(START, END))
 
 
 def test_某个接口一行都没拉到就停下(store):
