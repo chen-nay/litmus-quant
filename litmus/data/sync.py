@@ -21,6 +21,16 @@ from dataclasses import dataclass
 
 import polars as pl
 
+from litmus.data.loaders.finance import (
+    DISCLOSURE_FIELDS,
+    FINA_INDICATOR_FIELDS,
+    FORECAST_FIELDS,
+    SHARE_FLOAT_FIELDS,
+    normalize_disclosure,
+    normalize_fina_indicator,
+    normalize_forecast,
+    normalize_share_float,
+)
 from litmus.data.loaders.meta import (
     LIST_STATUSES,
     NAMECHANGE_FIELDS,
@@ -51,11 +61,32 @@ STOCK_BASIC_TABLE = "meta/stock_basic"
 TRADE_CAL_TABLE = "meta/trade_cal"
 NAMECHANGE_TABLE = "meta/namechange"
 
+#: 财务与事件的表名。事件是稀疏标记，不进面板，单独放 events/ 下
+FINA_INDICATOR_TABLE = "fina_indicator"
+DISCLOSURE_TABLE = "events/disclosure"
+FORECAST_TABLE = "events/forecast"
+SHARE_FLOAT_TABLE = "events/share_float"
+
 #: 一个交易日的必需接口，缺一不可
 REQUIRED_APIS: tuple[str, ...] = ("daily", "adj_factor", "daily_basic", "stk_limit")
 
 #: 实测的并发上限，理由见模块文档
 DEFAULT_WORKERS = 8
+
+
+def report_periods(start: str, end: str) -> list[str]:
+    """[start, end] 覆盖到的报告期（每个季度最后一天），从早到晚。
+
+    财务和预告都按报告期拉，不按交易日：十年只有四十来个报告期，
+    而交易日有两千多个。还没到的报告期自然落在 end 之后，不会被拉。
+    """
+    periods = []
+    for year in range(int(start[:4]), int(end[:4]) + 1):
+        for quarter_end in ("0331", "0630", "0930", "1231"):
+            period = f"{year}{quarter_end}"
+            if start <= period <= end:
+                periods.append(period)
+    return periods
 
 
 class SyncError(RuntimeError):
@@ -150,6 +181,75 @@ class DataSync:
         self._store.write_table(name, table)
         manifest.record_table(name, table, note)
         return table.height
+
+    def sync_finance(
+        self, start: str, end: str, manifest: Manifest | None = None
+    ) -> dict[str, int]:
+        """拉财务指标与三类事件（财报披露、业绩预告、限售解禁）。
+
+        它们都不进日频面板，各自落一张表，读取时再按 PIT 规则拼上去（见 finance.py）。
+        四个接口的所有请求丢进同一个线程池：串行要十几分钟，并发两三分钟。
+        """
+        manifest = Manifest.load(self._store) if manifest is None else manifest
+        periods = report_periods(start, end)
+        years = range(int(start[:4]), int(end[:4]) + 1)
+
+        by_period = [
+            ("fina_indicator_vip", FINA_INDICATOR_FIELDS, [{"period": p} for p in periods]),
+            ("forecast_vip", FORECAST_FIELDS, [{"period": p} for p in periods]),
+            ("disclosure_date", DISCLOSURE_FIELDS, [{"end_date": p} for p in periods]),
+            # 解禁按解禁日期区间拉，不按报告期——解禁日和报告期没关系
+            (
+                "share_float",
+                SHARE_FLOAT_FIELDS,
+                [{"start_date": f"{y}0101", "end_date": f"{y}1231"} for y in years],
+            ),
+        ]
+        tasks = [
+            (api_name, params, fields)
+            for api_name, fields, param_list in by_period
+            for params in param_list
+        ]
+        results = self._pull_concurrently(tasks)
+
+        # 按各接口的请求条数把结果切回去
+        chunks: list[list[dict]] = []
+        cursor = 0
+        for _, _, param_list in by_period:
+            merged = [row for rows in results[cursor : cursor + len(param_list)] for row in rows]
+            chunks.append(merged)
+            cursor += len(param_list)
+        fina, forecast, disclosure, share_float = chunks
+
+        written = {
+            FINA_INDICATOR_TABLE: self._write_table(
+                FINA_INDICATOR_TABLE,
+                normalize_fina_indicator(fina),
+                manifest,
+                f"{periods[0]}~{periods[-1]}" if periods else "",
+            ),
+            FORECAST_TABLE: self._write_table(
+                FORECAST_TABLE, normalize_forecast(forecast), manifest
+            ),
+            DISCLOSURE_TABLE: self._write_table(
+                DISCLOSURE_TABLE, normalize_disclosure(disclosure), manifest
+            ),
+            SHARE_FLOAT_TABLE: self._write_table(
+                SHARE_FLOAT_TABLE, normalize_share_float(share_float), manifest
+            ),
+        }
+        manifest.save(self._store)
+        logger.info(
+            "财务与事件（%d 个报告期）：%s",
+            len(periods),
+            "，".join(f"{name} {rows} 行" for name, rows in written.items()),
+        )
+        return written
+
+    def _pull_concurrently(self, tasks: Sequence[tuple[str, dict, str | None]]) -> list[list[dict]]:
+        """并发跑一批 (接口, 参数, 字段)，按传入顺序返回。任何一个失败就整体抛错。"""
+        with ThreadPoolExecutor(max_workers=self._workers) as pool:
+            return list(pool.map(lambda task: self._client.call(*task), tasks))
 
     def sync_daily(
         self,
