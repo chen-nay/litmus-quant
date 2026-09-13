@@ -73,8 +73,12 @@ TRANSPORT_BACKOFF = (1.0, 2.0, 4.0)
 #: 整次同步被拖垮；改成按分钟等待才能跨过配额窗口。
 RATE_LIMIT_BACKOFF = (15.0, 30.0, 60.0, 60.0)
 
-#: 一次 call() 最多翻多少页，纯粹是防止死循环
-MAX_PAGES = 2000
+#: 一次 call() 最多翻多少页。
+#: 2026-09-13 实测代理的 offset 上限在 10 万上下：offset=60000 正常，offset=102000 返回
+#: 「参数校验失败, offset」，也就是**第 18 页**就会被拒。阈值必须落在它前面，否则我们这条
+#: 报错永远轮不到触发，用户看到的只有代理那句看不懂的参数校验失败。
+#: 正常请求都在几页以内（最大的 namechange 全量也才 4 页），翻过 16 页就说明区间切得太粗。
+MAX_PAGES = 16
 
 #: 流控提示词。除了按分钟计的频率限制，代理还会限制同时在飞的连接数：
 #: 2026-09-13 实测 12 路并发时返回 code=429 msg=请勿使用过多线程，连接超限
@@ -293,7 +297,12 @@ class TushareClient:
         offset = 0
         previous_first: list | None = None
         for _ in range(MAX_PAGES):
-            page_params = {**(params or {}), "limit": size, "offset": offset}
+            # offset=0 就是默认值，不发白不发；深翻页才带上它。
+            # 代理对 offset 有上限：2026-09-13 实测 share_float 的 offset=60000 正常、
+            # offset=300000 返回「参数校验失败, offset」——翻得太深会被拒。
+            page_params = {**(params or {}), "limit": size}
+            if offset:
+                page_params["offset"] = offset
             field_names, items = self.call_page(api_name, page_params, fields)
             if not items:
                 break
@@ -317,7 +326,10 @@ class TushareClient:
             offset += size
         else:
             raise TushareError(
-                f"{api_name}: 分页超过 {MAX_PAGES} 页，疑似死循环", api_name=api_name
+                f"{api_name}: 翻了 {MAX_PAGES} 页还没取完（已取 {len(rows)} 行），"
+                f"说明查询区间太大。把区间切细再拉，别硬翻——代理的 offset 有上限，"
+                f"硬翻下去只会撞上「参数校验失败」那种看不懂的报错",
+                api_name=api_name,
             )
         return rows
 

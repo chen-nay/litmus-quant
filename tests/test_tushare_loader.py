@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from litmus.data.loaders.tushare import (
+    MAX_PAGES,
     RateLimiter,
     TushareAuthError,
     TushareClient,
@@ -58,7 +59,8 @@ def test_单页取完就不再翻页():
     assert rows == [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
     assert len(transport.payloads) == 1
     assert transport.payloads[0]["params"]["limit"] == 10
-    assert transport.payloads[0]["params"]["offset"] == 0
+    # 第一页不发 offset：它等于默认值，而有的接口会因为多了这个参数直接拒绝请求
+    assert "offset" not in transport.payloads[0]["params"]
 
 
 def test_取满一页就继续翻页_offset依次递增():
@@ -70,7 +72,7 @@ def test_取满一页就继续翻页_offset依次递增():
     rows = make_client(transport).call("daily", page_size=2)
 
     assert [r["a"] for r in rows] == [1, 2, 3, 4, 5]
-    assert [p["params"]["offset"] for p in transport.payloads] == [0, 2, 4]
+    assert [p["params"].get("offset", 0) for p in transport.payloads] == [0, 2, 4]
 
 
 def test_接口不支持offset分页时停下并告警():
@@ -119,6 +121,18 @@ def test_错误码认不出但消息说连接超限也算流控():
 
     assert client.call("daily", page_size=10) == [{"a": 1}]
     assert len(transport.payloads) == 2
+
+
+def test_翻页太多就报错而不是硬翻():
+    """区间切太粗时要停下来提醒切细。硬翻下去会撞上代理的 offset 上限，
+    那时报的是「参数校验失败」，根本看不出真正的原因。"""
+    pages = [ok(["a"], [[i], [i + 100]]) for i in range(MAX_PAGES + 1)]
+    transport = FakeTransport(*pages)
+    client = make_client(transport)
+
+    with pytest.raises(TushareError, match="切细"):
+        client.call("daily", page_size=2)
+    assert len(transport.payloads) == MAX_PAGES
 
 
 def test_限流按分钟退避而不是几秒():
