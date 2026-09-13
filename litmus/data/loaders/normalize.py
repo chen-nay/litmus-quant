@@ -27,7 +27,7 @@ class NormalizeError(ValueError):
     """原始数据与预期不符，宁可报错也不往下算。"""
 
 
-def _frame(
+def frame_from_rows(
     rows: Sequence[Mapping], columns: Mapping[str, pl.DataType], source: str
 ) -> pl.DataFrame:
     """取出需要的列并转成预期类型。缺列直接报错，不静默补空。"""
@@ -49,7 +49,7 @@ def _with_code_and_date(df: pl.DataFrame) -> pl.DataFrame:
 
 def normalize_daily(rows: Sequence[Mapping]) -> pl.DataFrame:
     """`daily`：未复权行情。vol 单位是手，amount 单位是千元。"""
-    df = _frame(
+    df = frame_from_rows(
         rows,
         {
             "ts_code": pl.String,
@@ -79,7 +79,7 @@ def normalize_daily(rows: Sequence[Mapping]) -> pl.DataFrame:
 
 def normalize_adj_factor(rows: Sequence[Mapping]) -> pl.DataFrame:
     """`adj_factor`：复权因子。后复权价 = 原始价 × 复权因子。"""
-    df = _frame(
+    df = frame_from_rows(
         rows,
         {"ts_code": pl.String, "trade_date": pl.String, "adj_factor": pl.Float64},
         "adj_factor",
@@ -89,7 +89,7 @@ def normalize_adj_factor(rows: Sequence[Mapping]) -> pl.DataFrame:
 
 def normalize_daily_basic(rows: Sequence[Mapping]) -> pl.DataFrame:
     """`daily_basic`：每日指标。市值单位是万元。"""
-    df = _frame(
+    df = frame_from_rows(
         rows,
         {
             "ts_code": pl.String,
@@ -119,7 +119,7 @@ def normalize_daily_basic(rows: Sequence[Mapping]) -> pl.DataFrame:
 
 def normalize_stk_limit(rows: Sequence[Mapping]) -> pl.DataFrame:
     """`stk_limit`：当日涨跌停价（不复权）。"""
-    df = _frame(
+    df = frame_from_rows(
         rows,
         {
             "ts_code": pl.String,

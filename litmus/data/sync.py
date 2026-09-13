@@ -21,6 +21,15 @@ from dataclasses import dataclass
 
 import polars as pl
 
+from litmus.data.loaders.meta import (
+    LIST_STATUSES,
+    NAMECHANGE_FIELDS,
+    STOCK_BASIC_FIELDS,
+    TRADE_CAL_FIELDS,
+    normalize_namechange,
+    normalize_stock_basic,
+    normalize_trade_cal,
+)
 from litmus.data.loaders.normalize import (
     build_daily_panel,
     normalize_adj_factor,
@@ -35,6 +44,11 @@ logger = logging.getLogger(__name__)
 
 #: 股票日频面板在 data/market/ 下的数据集名
 DAILY_DATASET = "daily"
+
+#: 基础数据的表名（不按月分片，每次同步整张覆盖）
+STOCK_BASIC_TABLE = "meta/stock_basic"
+TRADE_CAL_TABLE = "meta/trade_cal"
+NAMECHANGE_TABLE = "meta/namechange"
 
 #: 一个交易日的必需接口，缺一不可
 REQUIRED_APIS: tuple[str, ...] = ("daily", "adj_factor", "daily_basic", "stk_limit")
@@ -89,6 +103,52 @@ class DataSync:
         return {month: sorted(days) for month, days in sorted(by_month.items())}
 
     # ── 同步 ────────────────────────────────────────────────────
+
+    def sync_meta(self, start: str, end: str, manifest: Manifest | None = None) -> dict[str, int]:
+        """拉基础数据：股票列表（含退市）、交易日历、曾用名。
+
+        这三张表都很小，每次同步整张覆盖，不做增量——股票会改名、会退市，
+        增量合并反而容易留下过期的行。
+        """
+        manifest = Manifest.load(self._store) if manifest is None else manifest
+
+        # 三种上市状态分别拉：只拉 L 会把退市股排除在外，历史回测就成了幸存者偏差
+        listings: list[dict] = []
+        for status in LIST_STATUSES:
+            listings.extend(
+                self._client.call("stock_basic", {"list_status": status}, STOCK_BASIC_FIELDS)
+            )
+
+        calendar = self._client.call(
+            "trade_cal",
+            {"exchange": "SSE", "start_date": start, "end_date": end},
+            TRADE_CAL_FIELDS,
+        )
+        names = self._client.call("namechange", {}, NAMECHANGE_FIELDS)
+
+        written = {
+            STOCK_BASIC_TABLE: self._write_table(
+                STOCK_BASIC_TABLE, normalize_stock_basic(listings), manifest, "含退市与暂停上市"
+            ),
+            TRADE_CAL_TABLE: self._write_table(
+                TRADE_CAL_TABLE, normalize_trade_cal(calendar), manifest, f"{start}~{end}"
+            ),
+            NAMECHANGE_TABLE: self._write_table(
+                NAMECHANGE_TABLE, normalize_namechange(names), manifest
+            ),
+        }
+        manifest.save(self._store)
+        logger.info("基础数据：%s", "，".join(f"{k} {v} 行" for k, v in written.items()))
+        return written
+
+    def _write_table(
+        self, name: str, table: pl.DataFrame, manifest: Manifest, note: str = ""
+    ) -> int:
+        if table.is_empty():
+            raise SyncError(f"{name} 一行都没拉到，不覆盖已有的表")
+        self._store.write_table(name, table)
+        manifest.record_table(name, table, note)
+        return table.height
 
     def sync_daily(
         self,
