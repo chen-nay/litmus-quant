@@ -107,6 +107,10 @@ DEFAULT_WORKERS = 8
 #: 真正需要并发的 fina_indicator_vip（单次 12.3 秒，串行要 8 分半）恰好扛得住 8 路。
 SERIAL_APIS = frozenset({"disclosure_date"})
 
+#: 同步的五个步骤，**按这个顺序执行**。daily 放最后：前四步加起来几分钟，
+#: 它一个人要一个多小时，先让便宜的都就位。
+SYNC_STEPS: tuple[str, ...] = ("meta", "industry", "index", "finance", "daily")
+
 
 def report_periods(start: str, end: str) -> list[str]:
     """[start, end] 覆盖到的报告期（每个季度最后一天），从早到晚。
@@ -187,6 +191,47 @@ class DataSync:
         return {month: sorted(days) for month, days in sorted(by_month.items())}
 
     # ── 同步 ────────────────────────────────────────────────────
+
+    def sync_all(
+        self,
+        start: str,
+        end: str,
+        manifest: Manifest | None = None,
+        steps: Sequence[str] | None = None,
+        on_month: ProgressFn | None = None,
+    ) -> dict[str, object]:
+        """按固定顺序跑完选中的同步步骤。
+
+        `steps` 只用来**筛选**，不决定顺序——顺序永远是 SYNC_STEPS。
+        传 `["daily", "meta"]` 也会先跑 meta 再跑 daily，因为顺序是有依赖含义的，
+        不该由命令行的打字顺序决定。
+        """
+        manifest = Manifest.load(self._store) if manifest is None else manifest
+        chosen = set(steps) if steps else set(SYNC_STEPS)
+        unknown = chosen - set(SYNC_STEPS)
+        if unknown:
+            raise SyncError(f"不认识的同步步骤：{sorted(unknown)}；可选 {list(SYNC_STEPS)}")
+
+        summary: dict[str, object] = {}
+        for step in SYNC_STEPS:
+            if step not in chosen:
+                continue
+            logger.info("=== %s ===", step)
+            if step == "daily":
+                months = self.sync_daily(start, end, manifest, on_month)
+                summary[step] = {
+                    "months": len(months),
+                    "rows": sum(result.rows for result in months),
+                }
+            elif step == "meta":
+                summary[step] = self.sync_meta(start, end, manifest)
+            elif step == "industry":
+                summary[step] = self.sync_industry(start, end, manifest)
+            elif step == "index":
+                summary[step] = self.sync_index(start, end, manifest)
+            elif step == "finance":
+                summary[step] = self.sync_finance(start, end, manifest)
+        return summary
 
     def sync_meta(self, start: str, end: str, manifest: Manifest | None = None) -> dict[str, int]:
         """拉基础数据：股票列表（含退市）、交易日历、曾用名。
