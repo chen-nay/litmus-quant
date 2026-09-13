@@ -26,6 +26,10 @@ class RecordingSync(DataSync):
         self.called.append("industry")
         return {"meta/sw_industry": 1}
 
+    def sync_concept(self, start, end, manifest=None):
+        self.called.append("concept")
+        return {"meta/tdx_concept": 1}
+
     def sync_index(self, start, end, manifest=None):
         self.called.append("index")
         return {"index/daily": 1}
@@ -47,7 +51,7 @@ def store(tmp_path: Path) -> MarketStore:
 # ── 编排 ────────────────────────────────────────────────────────
 
 
-def test_默认跑全部五步(store):
+def test_默认跑全部步骤(store):
     sync = RecordingSync()
     sync.sync_all("20240101", "20240331", Manifest.load(store))
 

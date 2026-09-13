@@ -19,9 +19,18 @@ import logging
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 import polars as pl
 
+from litmus.data.loaders.concept import DAILY_FIELDS as TDX_DAILY_FIELDS
+from litmus.data.loaders.concept import INDEX_FIELDS as TDX_INDEX_FIELDS
+from litmus.data.loaders.concept import MEMBER_FIELDS as TDX_MEMBER_FIELDS
+from litmus.data.loaders.concept import (
+    normalize_tdx_daily,
+    normalize_tdx_index,
+    normalize_tdx_member,
+)
 from litmus.data.loaders.finance import (
     DISCLOSURE_FIELDS,
     FINA_INDICATOR_FIELDS,
@@ -91,6 +100,15 @@ SW_INDUSTRY_TABLE = "meta/sw_industry"
 SW_MEMBER_TABLE = "meta/sw_member"
 SW_DAILY_TABLE = "board/sw_daily"
 
+#: 通达信概念板块的表名。前缀 tdx_ 标明口径——申万那组是 sw_，以后换同花顺也不会混
+TDX_CONCEPT_TABLE = "meta/tdx_concept"
+TDX_MEMBER_TABLE = "meta/tdx_member"
+TDX_DAILY_TABLE = "board/tdx_daily"
+
+#: 找概念板块清单时最多往回试几个交易日。清单按交易日发布，收盘前同步时当天的还没有，
+#: 往前退一天就有；连续这么多天都是空的，就不是「还没发布」，而是出了别的问题
+SNAPSHOT_LOOKBACK_DAYS = 5
+
 #: 指数的表名，以及 P0 要拉的宽基指数
 INDEX_DAILY_TABLE = "index/daily"
 INDEX_WEIGHT_TABLE = "index/weight"
@@ -107,9 +125,9 @@ DEFAULT_WORKERS = 8
 #: 真正需要并发的 fina_indicator_vip（单次 12.3 秒，串行要 8 分半）恰好扛得住 8 路。
 SERIAL_APIS = frozenset({"disclosure_date"})
 
-#: 同步的五个步骤，**按这个顺序执行**。daily 放最后：前四步加起来几分钟，
-#: 它一个人要一个多小时，先让便宜的都就位。
-SYNC_STEPS: tuple[str, ...] = ("meta", "industry", "index", "finance", "daily")
+#: 同步的六个步骤，**按这个顺序执行**。daily 放最后：前面几步加起来几分钟，
+#: 它一个人要一个多小时，先让便宜的都就位。concept 紧跟 industry，两种板块口径挨着。
+SYNC_STEPS: tuple[str, ...] = ("meta", "industry", "concept", "index", "finance", "daily")
 
 
 def report_periods(start: str, end: str) -> list[str]:
@@ -227,6 +245,8 @@ class DataSync:
                 summary[step] = self.sync_meta(start, end, manifest)
             elif step == "industry":
                 summary[step] = self.sync_industry(start, end, manifest)
+            elif step == "concept":
+                summary[step] = self.sync_concept(start, end, manifest)
             elif step == "index":
                 summary[step] = self.sync_index(start, end, manifest)
             elif step == "finance":
@@ -408,6 +428,87 @@ class DataSync:
             "申万行业：%s", "，".join(f"{name} {rows} 行" for name, rows in written.items())
         )
         return written
+
+    def sync_concept(
+        self, start: str, end: str, manifest: Manifest | None = None
+    ) -> dict[str, int]:
+        """拉通达信概念板块：清单、当前成分、板块日线。三个接口都要 6000 积分。
+
+        形状和 sync_industry 一样：先取清单，再按板块并发拉成分和日线。拉法由
+        2026-09-13 的实测决定：
+
+        - **清单必须带交易日**：不带就是按日往回翻历史，非交易日返回 0 行。所以先定快照日——
+          end 之前最近一个有清单的交易日
+        - **成分只能按板块拉**：一天全部板块的成分约 8.4 万行，按 3000 行一页要 28 页，
+          超过 MAX_PAGES，也逼近代理的 offset 上限；按板块拉，一个板块一页就够
+        - **日线一个板块一次调用覆盖全部历史**：三个接口都从 2025-03-28 才有数据，
+          一个板块才三百多行
+
+        **只拉快照日还在的板块**：已经撤销的概念板块（实测一年半撤了 5 个，如「新冠检测」）
+        的历史不会落盘，历史上某一天的板块排行里没有它们。P0 的概念板块本来就是
+        「当前视角」（成分也只有当前快照），这个限制见 ARCHITECTURE §2.7。
+        """
+        manifest = Manifest.load(self._store) if manifest is None else manifest
+
+        snapshot, index_rows = self._latest_concept_index(end)
+        concepts = normalize_tdx_index(index_rows)
+        codes = concepts.get_column("code").to_list()
+        if not codes:
+            raise SyncError(f"{snapshot} 的通达信板块清单里没有概念板块，成分和日线无从拉起")
+
+        member_tasks = [
+            ("tdx_member", {"ts_code": code, "trade_date": snapshot}, TDX_MEMBER_FIELDS)
+            for code in codes
+        ]
+        daily_tasks = [
+            ("tdx_daily", {"ts_code": code, "start_date": start, "end_date": end}, TDX_DAILY_FIELDS)
+            for code in codes
+        ]
+        results = self._pull_concurrently(member_tasks + daily_tasks)
+        members = [row for rows in results[: len(member_tasks)] for row in rows]
+        dailies = normalize_tdx_daily(
+            [row for rows in results[len(member_tasks) :] for row in rows]
+        )
+        dates = dailies.get_column("date")
+
+        written = {
+            TDX_CONCEPT_TABLE: self._write_table(
+                TDX_CONCEPT_TABLE, concepts, manifest, f"通达信概念板块，{snapshot} 快照"
+            ),
+            TDX_MEMBER_TABLE: self._write_table(
+                TDX_MEMBER_TABLE,
+                normalize_tdx_member(members),
+                manifest,
+                f"{snapshot} 的当前成分，不是历史成分",
+            ),
+            # 备注写实际区间而不是请求区间：请求从 2016 年起，数据其实从 2025-03-28 才有
+            TDX_DAILY_TABLE: self._write_table(
+                TDX_DAILY_TABLE, dailies, manifest, f"{dates.min()}~{dates.max()}"
+            ),
+        }
+        manifest.save(self._store)
+        logger.info(
+            "概念板块（%s 快照）：%s",
+            snapshot,
+            "，".join(f"{name} {rows} 行" for name, rows in written.items()),
+        )
+        return written
+
+    def _latest_concept_index(self, end: str) -> tuple[str, list[dict]]:
+        """end 之前最近一个有概念板块清单的交易日，连同那天的清单一起返回。
+
+        清单按交易日发布：非交易日没有，收盘前同步时当天的也还没有，所以从最近的交易日往回试。
+        """
+        window_start = (datetime.strptime(end, "%Y%m%d") - timedelta(days=31)).strftime("%Y%m%d")
+        recent = sorted(
+            (day for days in self.trading_days(window_start, end).values() for day in days),
+            reverse=True,
+        )
+        for day in recent[:SNAPSHOT_LOOKBACK_DAYS]:
+            rows = self._client.call("tdx_index", {"trade_date": day}, TDX_INDEX_FIELDS)
+            if rows:
+                return day, rows
+        raise SyncError(f"{end} 之前最近 {SNAPSHOT_LOOKBACK_DAYS} 个交易日都没有通达信板块清单")
 
     def sync_index(self, start: str, end: str, manifest: Manifest | None = None) -> dict[str, int]:
         """拉宽基指数的日线与历史成分。
