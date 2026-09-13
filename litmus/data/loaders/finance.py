@@ -109,6 +109,10 @@ def normalize_disclosure(rows: Sequence[Mapping]) -> pl.DataFrame:
 
     `$is_report_date` 只能用 `actual_date`（实际披露日）。`pre_date` 是预计披露日、会被改，
     拿它当事件日就等于用了当时还不知道的信息。
+
+    2026-09-13 实测：19.6 万条两个日期都有的记录里，1152 条（0.6%）实际披露日和预计不符。
+    比例不高，但那 1152 次恰恰是"计划赶不上变化"的时刻——推迟披露往往本身就是信号，
+    正是最不能算错的那一批。
     """
     df = frame_from_rows(rows, _schema(DISCLOSURE_FIELDS), "disclosure_date")
     return (
