@@ -157,7 +157,10 @@ def _httpx_transport(client: httpx.Client) -> Transport:
 
 
 class TushareClient:
-    """一个 Tushare 接入点。线程内顺序使用，不做并发调度。"""
+    """一个 Tushare 接入点。可以多线程共用：httpx.Client 线程安全，限速器带锁。
+
+    并发调度归 DataSync 管，这里不自己开线程。实测代理最多 8 路，再多会返回 429 连接超限。
+    """
 
     def __init__(
         self,
