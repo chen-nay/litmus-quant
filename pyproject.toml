@@ -31,6 +31,9 @@ extend-exclude = ["*.md"]  # 设计文档里的示例代码不参与格式化
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# 不查「行太长」：代码行的长度由 ruff format 自动处理，这条实际只拦得住长注释
+# （中文一个字占两格）。为一行注释多一个字符中断检查、改完再重跑，不值得
+ignore = ["E501"]
 
 [dependency-groups]
 dev = [
