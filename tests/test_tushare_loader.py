@@ -121,6 +121,47 @@ def test_错误码认不出但消息说连接超限也算流控():
     assert len(transport.payloads) == 2
 
 
+def test_限流按分钟退避而不是几秒():
+    """限流是按分钟计的配额，等一两秒再试必然再撞一次，白白烧掉重试预算。"""
+    transport = FakeTransport(err("您请求速度过快", code=429), ok(["a"], [[1]]))
+    client = make_client(transport)
+
+    assert client.call("daily", page_size=10) == [{"a": 1}]
+    assert client.test_sleeps[0] >= 15.0
+
+
+def test_网络错误仍然快速重试():
+    """网络抖动几秒就恢复，不该按分钟等。"""
+    transport = FakeTransport(httpx.ConnectError("boom"), ok(["a"], [[1]]))
+    client = make_client(transport)
+
+    assert client.call("daily", page_size=10) == [{"a": 1}]
+    assert client.test_sleeps[0] < 5.0
+
+
+def test_限流的重试次数比网络错误多():
+    """一次限流可能要等一整个分钟窗口，只重试三次等于没等。"""
+    transport = FakeTransport(*[err("您请求速度过快", code=429)] * 5)
+    client = make_client(transport)
+
+    with pytest.raises(TushareError, match="仍失败"):
+        client.call("daily", page_size=10)
+    assert len(transport.payloads) == 5  # 1 次 + 4 次重试
+
+
+def test_网络抖动不吃掉限流的重试预算():
+    """两种错误各记各的：先抖一次网络，限流的额度应该还是满的。"""
+    transport = FakeTransport(
+        httpx.ConnectError("boom"),
+        *[err("您请求速度过快", code=429)] * 4,
+        ok(["a"], [[1]]),
+    )
+    client = make_client(transport)
+
+    assert client.call("daily", page_size=10) == [{"a": 1}]
+    assert len(transport.payloads) == 6
+
+
 def test_网络错误重试耗尽后抛错():
     transport = FakeTransport(*[httpx.ConnectError("boom")] * 4)
     client = make_client(transport)

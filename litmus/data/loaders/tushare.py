@@ -65,6 +65,14 @@ RATE_LIMITS: Mapping[str, int] = {
 }
 DEFAULT_RATE_LIMIT = 400
 
+#: 退避节奏，两种错误分开对待。
+#: 网络抖动很快就恢复，几秒钟重试就够。
+TRANSPORT_BACKOFF = (1.0, 2.0, 4.0)
+#: 限流是**按分钟计的配额**，等几秒毫无意义——必须等到分钟窗口滚过去。
+#: 2026-09-13 实测：disclosure_date 与 share_float 在 1/2/4 秒的退避下重试四次全部失败，
+#: 整次同步被拖垮；改成按分钟等待才能跨过配额窗口。
+RATE_LIMIT_BACKOFF = (15.0, 30.0, 60.0, 60.0)
+
 #: 一次 call() 最多翻多少页，纯粹是防止死循环
 MAX_PAGES = 2000
 
@@ -201,26 +209,40 @@ class TushareClient:
             "params": dict(params or {}),
             "fields": fields or "",
         }
-        attempts = self._config.max_retries + 1
-        for attempt in range(1, attempts + 1):
+        # 两种错误各记各的次数：网络抖动和配额用尽是两回事，混在一起数会让
+        # 一次网络抖动吃掉限流的重试预算
+        transport_left = self._config.max_retries
+        rate_limit_left = len(RATE_LIMIT_BACKOFF)
+        while True:
             self._limiter.acquire(api_name)
             try:
                 body = self._transport(self._config.base_url, payload, self._config.timeout)
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-                self._backoff_or_raise(api_name, attempt, attempts, exc)
+                transport_left = self._wait_or_raise(
+                    api_name, exc, transport_left, TRANSPORT_BACKOFF
+                )
                 continue
             try:
                 return self._parse(api_name, body)
             except TushareRateLimitError as exc:
-                self._backoff_or_raise(api_name, attempt, attempts, exc)
-        raise TushareError(f"{api_name}: 重试耗尽", api_name=api_name)  # pragma: no cover
+                rate_limit_left = self._wait_or_raise(
+                    api_name, exc, rate_limit_left, RATE_LIMIT_BACKOFF
+                )
 
-    def _backoff_or_raise(self, api_name: str, attempt: int, attempts: int, exc: Exception) -> None:
-        if attempt >= attempts:
-            raise TushareError(f"{api_name}: 重试 {attempts} 次仍失败：{exc}", api_name=api_name)
-        wait = min(2 ** (attempt - 1), 30) + random.uniform(0, 0.5)
-        logger.warning("接口 %s 第 %d 次失败（%s），%.1fs 后重试", api_name, attempt, exc, wait)
+    def _wait_or_raise(
+        self, api_name: str, exc: Exception, left: int, schedule: tuple[float, ...]
+    ) -> int:
+        """按 schedule 退避一次，返回剩余次数；用完了就抛错。"""
+        if left <= 0:
+            raise TushareError(
+                f"{api_name}: 重试 {len(schedule) + 1} 次仍失败：{exc}", api_name=api_name
+            )
+        wait = schedule[len(schedule) - left] + random.uniform(0, 0.5)
+        logger.warning(
+            "接口 %s 失败（%s），%.1fs 后重试（还剩 %d 次）", api_name, exc, wait, left - 1
+        )
         self._sleep(wait)
+        return left - 1
 
     def _parse(self, api_name: str, body: object) -> tuple[list[str], list[list]]:
         if not isinstance(body, dict) or "code" not in body:
