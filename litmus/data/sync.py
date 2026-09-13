@@ -3,8 +3,9 @@
 编排规则（依据 ARCHITECTURE.md §2.5，数字全部来自第 1a 步实测）：
 
 - **倒序**：从今天往 2016 年拉。覆盖到最近两年就够回答日常提问，更早的历史后台慢慢补。
-- **并发 8 路**：代理单次调用 5~10 秒，串行只有 8 次/分钟；8 路能稳到 50 次/分钟且零失败，
-  12 路会收到 `code=429 请勿使用过多线程，连接超限`。8 是实测出来的上限，不要往上调。
+- **自适应并发**：代理单次调用 5~10 秒，串行只有 8 次/分钟，必须并发；但扛得住几路因接口而异，
+  代理和配额也会变。所以不压测、不写死：撞限流减半、连续成功加一（见 tushare.py 的
+  AdaptiveConcurrency）。这里的线程池大小只是天花板。
 - **整月成败**：一个月的交易日全部拉齐才写文件并记账。中途失败就不落盘，下次整月重来——
   这样磁盘上永远不会出现半个月的数据（见 storage.py 的不变量）。
 - **一天要么全有、要么全没有**：4 个必需接口只要有一个有数据，就必须 4 个都有。
@@ -76,7 +77,7 @@ from litmus.data.loaders.normalize import (
     normalize_stk_limit,
     normalize_stock_st,
 )
-from litmus.data.loaders.tushare import TushareAuthError
+from litmus.data.loaders.tushare import MAX_CONCURRENCY, TushareAuthError
 from litmus.data.manifest import Manifest
 from litmus.data.storage import MarketStore
 
@@ -112,21 +113,16 @@ TDX_DAILY_TABLE = "board/tdx_daily"
 #: 往前退一天就有；连续这么多天都是空的，就不是「还没发布」，而是出了别的问题
 SNAPSHOT_LOOKBACK_DAYS = 5
 
-#: 指数的表名，以及 P0 要拉的宽基指数
+#: 指数日线是整张表；成分按月分片记账（和股票日频同一套），增量同步只拉没走完的月份
 INDEX_DAILY_TABLE = "index/daily"
-INDEX_WEIGHT_TABLE = "index/weight"
+INDEX_WEIGHT_DATASET = "index/weight"
 BENCHMARK_INDEXES: tuple[str, ...] = (HS300, ZZ500)
+#: 指数成分有发布滞后：2026-09-13 实测最新快照是 8/31，9 月的窗口返回 0 行，
+#: 月末那期也可能下个月才发。所以最近这几个月每次同步都重拉，更早的月份拉到了才算走完
+INDEX_WEIGHT_UNSETTLED_MONTHS = 2
 
 #: 一个交易日的必需接口，缺一不可
 REQUIRED_APIS: tuple[str, ...] = ("daily", "adj_factor", "daily_basic", "stk_limit")
-
-#: 实测的并发上限，理由见模块文档
-DEFAULT_WORKERS = 8
-
-#: 扛不住并发的接口，串行拉。2026-09-13 实测：disclosure_date 在 8 路并发下直接返回
-#: 「您请求速度过快」，串行则完全正常，而且代价极小——单次 1.5 秒、42 个报告期约 63 秒。
-#: 真正需要并发的 fina_indicator_vip（单次 12.3 秒，串行要 8 分半）恰好扛得住 8 路。
-SERIAL_APIS = frozenset({"disclosure_date"})
 
 #: 同步的六个步骤，**按这个顺序执行**。daily 放最后：前面几步加起来几分钟，
 #: 它一个人要一个多小时，先让便宜的都就位。concept 紧跟 industry，两种板块口径挨着。
@@ -146,6 +142,21 @@ def report_periods(start: str, end: str) -> list[str]:
             if start <= period <= end:
                 periods.append(period)
     return periods
+
+
+def next_report_period(day: str) -> str:
+    """day 之后（不含当天）的第一个报告期。"""
+    year = int(day[:4])
+    for quarter_end in ("0331", "0630", "0930", "1231"):
+        if f"{year}{quarter_end}" > day:
+            return f"{year}{quarter_end}"
+    return f"{year + 1}0331"
+
+
+def month_window(month: str) -> tuple[str, str]:
+    """整月的起止日，形如 "2024-02" → ("20240201", "20240229")。"""
+    year, mon = int(month[:4]), int(month[5:])
+    return f"{year}{mon:02d}01", f"{year}{mon:02d}{calendar.monthrange(year, mon)[1]:02d}"
 
 
 def month_ranges(start: str, end: str) -> list[tuple[str, str]]:
@@ -194,7 +205,7 @@ class DataSync:
         self,
         client,
         store: MarketStore,
-        workers: int = DEFAULT_WORKERS,
+        workers: int = MAX_CONCURRENCY,
     ):
         self._client = client
         self._store = store
@@ -311,15 +322,23 @@ class DataSync:
         """拉财务指标与两类事件（财报披露、业绩预告）。
 
         它们都不进日频面板，各自落一张表，读取时再按 PIT 规则拼上去（见 finance.py）。
-        扛得住并发的接口丢进线程池，扛不住的串行（见 SERIAL_APIS）。
+        三个接口一起丢进线程池，各自能并发几路由 client 的自适应并发决定。
         限售解禁 P0 不拉，数据量的实测见 ARCHITECTURE §11。
+
+        **每次整张重拉，不做增量**：2026-09-13 实测财务指标约 7% 的行是公司上市后补报的
+        历史财务，公告日比报告期末晚一年以上（最长近 4 年）。只重拉最近几个报告期会漏掉它们；
+        按公告日区间拉倒是能收全，但接口文档把这两个参数写成「报告期」，行为和文档对不上，
+        不值得为省两分钟去赌。
         """
         manifest = Manifest.load(self._store) if manifest is None else manifest
         periods = report_periods(start, end)
+        # 业绩预告在报告期结束**之前**就发（三季报预告 9 月就有），所以多拉 end 之后的下一个报告期。
+        # 2026-09-13 实测：8/1~9/13 公告的预告里有 30 条属于 20260930，只拉「报告期 <= end」会全漏
+        forecast_periods = [*periods, next_report_period(end)]
 
         by_period = [
             ("fina_indicator_vip", FINA_INDICATOR_FIELDS, [{"period": p} for p in periods]),
-            ("forecast_vip", FORECAST_FIELDS, [{"period": p} for p in periods]),
+            ("forecast_vip", FORECAST_FIELDS, [{"period": p} for p in forecast_periods]),
             ("disclosure_date", DISCLOSURE_FIELDS, [{"end_date": p} for p in periods]),
         ]
         tasks = [
@@ -363,21 +382,11 @@ class DataSync:
     def _pull_concurrently(self, tasks: Sequence[tuple[str, dict, str | None]]) -> list[list[dict]]:
         """跑一批 (接口, 参数, 字段)，按传入顺序返回。任何一个失败就整体抛错。
 
-        SERIAL_APIS 里的接口单独串行——它们扛不住并发，而串行代价只有一分钟上下。
+        同时在飞几个由 client 的自适应并发决定：扛不住并发的接口（实测 disclosure_date）
+        撞几次限流就自己降到一两路，不用在这里点名串行。
         """
-        results: list[list[dict]] = [[] for _ in tasks]
-        parallel = [(i, task) for i, task in enumerate(tasks) if task[0] not in SERIAL_APIS]
-        serial = [(i, task) for i, task in enumerate(tasks) if task[0] in SERIAL_APIS]
-
-        if parallel:
-            with ThreadPoolExecutor(max_workers=self._workers) as pool:
-                rows_iter = pool.map(lambda pair: self._client.call(*pair[1]), parallel)
-                for (index, _), rows in zip(parallel, rows_iter, strict=True):
-                    results[index] = rows
-
-        for index, task in serial:
-            results[index] = self._client.call(*task)
-        return results
+        with ThreadPoolExecutor(max_workers=self._workers) as pool:
+            return list(pool.map(lambda task: self._client.call(*task), tasks))
 
     def sync_industry(
         self, start: str, end: str, manifest: Manifest | None = None
@@ -551,16 +560,22 @@ class DataSync:
     def sync_index(self, start: str, end: str, manifest: Manifest | None = None) -> dict[str, int]:
         """拉宽基指数的日线与历史成分。
 
-        日线：**一个指数一次调用就覆盖十年**（单次 8000 行，十年才 2600 个交易日）。
+        日线：**一个指数一次调用就覆盖十年**（单次 8000 行，十年才 2600 个交易日），每次整张重拉。
 
-        成分：**按自然月拉**。接口文档自己就建议「开始日期和结束日分别输入当月第一天和
-        最后一天」，而且一个月正好一页装得下（沪深300 约 300 行、中证500 约 500 行，
-        单次上限 1000），这样彻底不需要翻页——这一步在翻页上栽过太多次，能不翻就不翻。
+        成分：**按自然月拉、按月落盘记账**，和股票日频同一套，增量同步只拉没走完的月份。
+        接口文档自己就建议「开始日期和结束日分别输入当月第一天和最后一天」，而且一个月正好
+        一页装得下（沪深300 一个月 1~2 个快照、中证500 一个，单次上限 1000），这样彻底不需要
+        翻页——这一步在翻页上栽过太多次，能不翻就不翻。窗口永远取整月、不按 start / end 裁剪：
+        月文件要么不存在，要么是整月。
 
         历史成分是用来还原「当时的股票池」的：拿今天的沪深300 成分去回测 2018 年，
         等于提前知道了哪些公司会被纳入，是最典型的幸存者偏差。
         """
         manifest = Manifest.load(self._store) if manifest is None else manifest
+
+        months = [f"{first[:4]}-{first[4:6]}" for first, _ in month_ranges(start, end)]
+        unsettled = set(months[-INDEX_WEIGHT_UNSETTLED_MONTHS:])
+        todo = manifest.missing_months(INDEX_WEIGHT_DATASET, months, self._store)
 
         daily_tasks = [
             (
@@ -573,15 +588,29 @@ class DataSync:
         weight_tasks = [
             (
                 "index_weight",
-                {"index_code": code, "start_date": first, "end_date": last},
+                {
+                    "index_code": code,
+                    "start_date": month_window(month)[0],
+                    "end_date": month_window(month)[1],
+                },
                 INDEX_WEIGHT_FIELDS,
             )
+            for month in todo
             for code in BENCHMARK_INDEXES
-            for first, last in month_ranges(start, end)
         ]
         results = self._pull_concurrently(daily_tasks + weight_tasks)
         dailies = [row for rows in results[: len(daily_tasks)] for row in rows]
-        weights = [row for rows in results[len(daily_tasks) :] for row in rows]
+
+        # 先全部检查完再落盘：早就该有快照的月份空了，说明数据源出了问题，一个月都不写
+        by_month: dict[str, list[dict]] = {month: [] for month in todo}
+        for (_, params, _), rows in zip(weight_tasks, results[len(daily_tasks) :], strict=True):
+            month = f"{params['start_date'][:4]}-{params['start_date'][4:6]}"
+            if not rows and month not in unsettled:
+                raise SyncError(
+                    f"{params['index_code']} 在 {month} 一个成分快照都没有，不正常；"
+                    "实测 2016 年以来每个月两个指数都有快照"
+                )
+            by_month[month].extend(rows)
 
         written = {
             INDEX_DAILY_TABLE: self._write_table(
@@ -590,12 +619,25 @@ class DataSync:
                 manifest,
                 "、".join(BENCHMARK_INDEXES),
             ),
-            INDEX_WEIGHT_TABLE: self._write_table(
-                INDEX_WEIGHT_TABLE, normalize_index_weight(weights), manifest, "月度快照"
-            ),
+            INDEX_WEIGHT_DATASET: 0,
         }
+        for month, rows in by_month.items():
+            if not rows:
+                continue  # 最近的月份还没发布：不写空文件、不记账，下次同步再拉
+            table = normalize_index_weight(rows)
+            self._store.write_month(INDEX_WEIGHT_DATASET, month, table)
+            manifest.record_month(
+                INDEX_WEIGHT_DATASET, month, table, complete=month not in unsettled
+            )
+            written[INDEX_WEIGHT_DATASET] += table.height
         manifest.save(self._store)
-        logger.info("指数：%s", "，".join(f"{name} {rows} 行" for name, rows in written.items()))
+        logger.info(
+            "指数：日线 %d 行；成分待拉 %d 个月（共 %d 个月），写入 %d 行",
+            written[INDEX_DAILY_TABLE],
+            len(todo),
+            len(months),
+            written[INDEX_WEIGHT_DATASET],
+        )
         return written
 
     def sync_daily(

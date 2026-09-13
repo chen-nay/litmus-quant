@@ -18,10 +18,10 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from litmus.data.loaders.tushare import TushareClient, TushareConfig
+from litmus.data.loaders.tushare import MAX_CONCURRENCY, TushareClient, TushareConfig
 from litmus.data.manifest import Manifest
 from litmus.data.storage import MarketStore
-from litmus.data.sync import DEFAULT_WORKERS, SYNC_STEPS, DataSync, MonthResult
+from litmus.data.sync import SYNC_STEPS, DataSync, MonthResult
 
 #: 仓库根目录下的 .env
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
@@ -54,7 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"只跑其中几步，可选：{' '.join(SYNC_STEPS)}（默认全跑）",
     )
     parser.add_argument(
-        "--workers", type=int, default=DEFAULT_WORKERS, help=f"并发路数（默认 {DEFAULT_WORKERS}）"
+        "--workers",
+        type=int,
+        default=MAX_CONCURRENCY,
+        help=f"线程数上限（默认 {MAX_CONCURRENCY}）；实际并发由自适应限速自己找",
     )
     parser.add_argument(
         "--data-dir", default=None, help="数据目录（默认取 LITMUS_DATA_DIR 或仓库下的 data/）"

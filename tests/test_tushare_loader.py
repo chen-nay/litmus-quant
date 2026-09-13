@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import threading
+
 import httpx
 import pytest
 
 from litmus.data.loaders.tushare import (
     MAX_PAGES,
+    AdaptiveConcurrency,
+    AimdLimit,
     RateLimiter,
     TushareAuthError,
     TushareClient,
@@ -247,6 +251,113 @@ def test_probe_遇到token错误不吞掉():
     transport = FakeTransport(err("token不对，您传过来的是abc请确认", code=2002))
     with pytest.raises(TushareTokenError):
         make_client(transport).probe("tdx_index")
+
+
+# ── 自适应并发（AIMD）──────────────────────────────────────────
+
+
+def test_撞限流并发上限减半():
+    limit = AimdLimit(initial=8, ceiling=16)
+    limit.release(limit.acquire(), "throttled")
+    assert limit.limit == 4
+
+
+def test_同一批在飞的请求一起撞墙只减一次():
+    """8 个请求同时失败要是连减 8 次，上限会直接掉到 1。"""
+    limit = AimdLimit(initial=8, ceiling=16)
+    tickets = [limit.acquire() for _ in range(8)]
+    for ticket in tickets:
+        limit.release(ticket, "throttled")
+    assert limit.limit == 4
+
+
+def test_减半之后发出的请求再撞墙会接着减():
+    limit = AimdLimit(initial=8, ceiling=16)
+    limit.release(limit.acquire(), "throttled")
+    limit.release(limit.acquire(), "throttled")
+    assert limit.limit == 2
+
+
+def test_最低降到一路():
+    limit = AimdLimit(initial=1, ceiling=16)
+    limit.release(limit.acquire(), "throttled")
+    assert limit.limit == 1
+
+
+def test_连续成功当前上限那么多次才加一():
+    limit = AimdLimit(initial=2, ceiling=16)
+    limit.release(limit.acquire(), "ok")
+    assert limit.limit == 2
+    limit.release(limit.acquire(), "ok")
+    assert limit.limit == 3
+
+
+def test_涨到天花板为止():
+    limit = AimdLimit(initial=3, ceiling=3)
+    for _ in range(10):
+        limit.release(limit.acquire(), "ok")
+    assert limit.limit == 3
+
+
+def test_非限流的失败不涨也不减():
+    limit = AimdLimit(initial=4, ceiling=16)
+    for _ in range(10):
+        limit.release(limit.acquire(), "failed")
+    assert limit.limit == 4
+
+
+def test_名额占满时要等别人归还():
+    limit = AimdLimit(initial=1, ceiling=1)
+    first = limit.acquire()
+    got_second = threading.Event()
+
+    def second() -> None:
+        limit.release(limit.acquire(), "ok")
+        got_second.set()
+
+    threading.Thread(target=second, daemon=True).start()
+    assert not got_second.wait(0.05)  # 名额被占着，拿不到
+    limit.release(first, "ok")
+    assert got_second.wait(1.0)
+
+
+def test_连接超限只收紧全局_配额超限只收紧那个接口():
+    """代理的连接数是全局的，接口的频率配额各管各的；收紧错了层会误伤别的接口。"""
+    concurrency = AdaptiveConcurrency(initial=8, ceiling=16)
+    concurrency.release("tdx_daily", concurrency.acquire("tdx_daily"), "connection")
+    assert concurrency.global_limit == 4
+    assert concurrency.limit_of("tdx_daily") == 8
+
+    concurrency.release("disclosure_date", concurrency.acquire("disclosure_date"), "quota")
+    assert concurrency.limit_of("disclosure_date") == 4
+    assert concurrency.limit_of("fina_indicator_vip") == 8
+    assert concurrency.global_limit == 4
+
+
+def test_两句限流报错分别收紧全局和接口():
+    """两句都是代理的真实报错（2026-09-13），错误码都是 429，只能按内容分。"""
+    connection = FakeTransport(err("请勿使用过多线程，连接超限", code=429), ok(["a"], [[1]]))
+    client = make_client(connection, concurrency=AdaptiveConcurrency(initial=8, ceiling=16))
+    client.call_page("daily")
+    assert client.concurrency.global_limit == 4
+    assert client.concurrency.limit_of("daily") == 8
+
+    quota = FakeTransport(err("您请求速度过快", code=429), ok(["a"], [[1]]))
+    client = make_client(quota, concurrency=AdaptiveConcurrency(initial=8, ceiling=16))
+    client.call_page("tdx_daily")
+    assert client.concurrency.limit_of("tdx_daily") == 4
+    assert client.concurrency.global_limit == 8
+
+
+def test_请求失败也会归还并发名额():
+    """名额漏还一个，上限为 1 时下一个请求就会永远卡住。"""
+    transport = FakeTransport(err("请联系管理员添加此权限", code=403), ok(["a"], [[1]]))
+    client = make_client(transport, concurrency=AdaptiveConcurrency(initial=1, ceiling=1))
+    assert client.probe("tdx_index")[0] is False
+
+    done = threading.Event()
+    threading.Thread(target=lambda: (client.call_page("daily"), done.set()), daemon=True).start()
+    assert done.wait(1.0)
 
 
 def test_限速器到达上限会等待():
