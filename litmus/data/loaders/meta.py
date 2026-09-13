@@ -78,16 +78,30 @@ def normalize_trade_cal(rows: Sequence[Mapping]) -> pl.DataFrame:
 
 
 def normalize_namechange(rows: Sequence[Mapping]) -> pl.DataFrame:
-    """`namechange`：曾用名。`end_date` 为空表示这是现用名。"""
+    """`namechange`：曾用名。整行重复的记录直接去掉。
+
+    **接口本身会返回重复行**，不是我们翻页翻错了。2026-09-13 实测：单独拉 600848.SH 得到 12 行，
+    其中只有 6 行不同——单只股票的请求一共 12 行，远不到 6000 的单页上限，根本没有翻页，
+    照样重复。全量 34749 行里有 14263 行是重复的。整行完全相同的记录不携带任何额外信息。
+
+    **`end_date` 为空不等于现用名**：实测去重后仍有股票存在多行 `end_date` 为空，
+    最多的一只有 8 行。要判断现用名，取 `start_date` 最大的那一行，别用 `end_date` 是否为空。
+    """
     df = frame_from_rows(rows, _as_strings(NAMECHANGE_FIELDS), "namechange")
-    return df.select(
+    table = df.select(
         pl.col("ts_code").alias("code"),
         "name",
         _date("start_date").alias("start_date"),
         _date("end_date").alias("end_date"),
         _date("ann_date").alias("ann_date"),
         "change_reason",
-    ).sort("code", "start_date")
+    )
+    # unique() 不保证顺序，name 作为第三个排序键，让同日多条记录的顺序也是确定的
+    deduped = table.unique().sort("code", "start_date", "name")
+    dropped = table.height - deduped.height
+    if dropped:
+        logger.info("曾用名去掉 %d 行重复（接口会返回完全相同的记录）", dropped)
+    return deduped
 
 
 __all__ = [

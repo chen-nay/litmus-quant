@@ -170,6 +170,36 @@ def test_曾用名按代码和开始日期排序():
     assert table.get_column("name").to_list() == ["深发展A", "自仪股份", "上海临港"]
 
 
+def test_接口返回的整行重复会被去掉():
+    """实测：单独拉一只股票（12 行，根本不翻页）也会重复，是数据源本身的毛病。"""
+    row = name_row()
+    table = normalize_namechange([row, dict(row), dict(row)])
+    assert table.height == 1
+
+
+def test_去重不会误删同一只股票的不同记录():
+    table = normalize_namechange(
+        [
+            name_row(name="上海临港", start_date="20151118"),
+            name_row(name="自仪股份", start_date="20070514", end_date="20151117"),
+        ]
+    )
+    assert table.height == 2
+
+
+def test_同一天的多条记录顺序是确定的():
+    """unique() 不保证顺序，排序键必须能把并列的行也定下来。"""
+    rows = [
+        name_row(name="乙公司", start_date="20200101"),
+        name_row(name="甲公司", start_date="20200101"),
+    ]
+    first = normalize_namechange(rows).get_column("name").to_list()
+    second = normalize_namechange(list(reversed(rows))).get_column("name").to_list()
+    # 按 Unicode 码位排，乙(U+4E59) 在 甲(U+7532) 前面；这里要的是「稳定」，不是某个特定次序
+    assert first == second, "同样的数据换个输入顺序就排出不同结果"
+    assert set(first) == {"甲公司", "乙公司"}
+
+
 def test_曾用名缺字段直接报错():
     broken = name_row()
     del broken["change_reason"]
