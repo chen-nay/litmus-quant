@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from litmus.data.fields import CONCEPT_CAPABILITY
+from litmus.data.loaders.tushare import TushareAuthError, TushareTokenError
 from litmus.data.manifest import Manifest
 from litmus.data.storage import MarketStore
 from litmus.data.sync import (
@@ -77,15 +79,45 @@ def daily_rows(ts_code: str) -> list[dict]:
 class FakeClient:
     """照真接口的语义返回：清单只在已发布的交易日才有，成分必须带板块代码。"""
 
-    def __init__(self, *, published=TRADING_DAYS, concepts=CONCEPTS, empty: set[str] | None = None):
+    def __init__(
+        self,
+        *,
+        published=TRADING_DAYS,
+        concepts=CONCEPTS,
+        empty: set[str] | None = None,
+        denied: set[str] | None = None,
+        bad_token: bool = False,
+    ):
         self.published = set(published)
         self.concepts = concepts
         self.empty = empty or set()
+        self.denied = denied or set()  # 这些接口报没权限
+        self.bad_token = bad_token
         self.calls: list[tuple[str, dict, str | None]] = []
+        self.probed: list[str] = []
+
+    def _check_access(self, api_name: str) -> None:
+        """照代理的真实报错：token 不对是 code=2002，没开权限是 code=403。"""
+        if self.bad_token:
+            raise TushareTokenError(f"{api_name}: token不对，请确认", api_name=api_name, code=2002)
+        if api_name in self.denied:
+            raise TushareAuthError(
+                f"{api_name}: 请联系管理员添加此权限", api_name=api_name, code=403
+            )
+
+    def probe(self, api_name: str, params: dict | None = None) -> tuple[bool, str]:
+        """和 TushareClient.probe 一样：没权限返回 False，其他错误照常抛出。"""
+        self.probed.append(api_name)
+        try:
+            self._check_access(api_name)
+        except TushareAuthError as exc:
+            return False, str(exc)
+        return True, ""
 
     def call(self, api_name: str, params: dict | None = None, fields: str | None = None):
         params = dict(params or {})
         self.calls.append((api_name, params, fields))
+        self._check_access(api_name)
         if api_name in self.empty:
             return []
         if api_name == "trade_cal":
@@ -248,3 +280,85 @@ def test_板块日线为空不覆盖已有的表(store):
         run(store, FakeClient(empty={"tdx_daily"}))
 
     assert store.read_table(TDX_DAILY_TABLE).height == before
+
+
+# ── 能力探测 ────────────────────────────────────────────────────
+
+
+def test_只探测板块清单一个接口(store):
+    """每个概念板块问题都要靠清单把名字认成代码；三个接口同属 6000 积分档，探一个就够。"""
+    client = FakeClient()
+    run(store, client)
+
+    assert client.probed == ["tdx_index"]
+
+
+def test_有权限时记为可用(store):
+    _, manifest = run(store, FakeClient())
+
+    assert manifest.is_available(CONCEPT_CAPABILITY)
+
+
+def test_没权限时跳过_不拉数据也不写表(store):
+    """5000 积分的用户走这里：不报错，只是这一步什么都不做。"""
+    client = FakeClient(denied={"tdx_index"})
+    written, manifest = run(store, client)
+
+    assert "6000 积分" in written["skipped"]
+    assert client.calls == []
+    assert not store.has_table(TDX_CONCEPT_TABLE)
+    assert not manifest.is_available(CONCEPT_CAPABILITY)
+    assert "请联系管理员添加此权限" in manifest.unavailable_reason(CONCEPT_CAPABILITY)
+
+
+def test_不可用的结论马上存盘(store):
+    """后面的步骤要是中断了，这条记录也不能丢——页面要靠它告诉用户为什么没有概念板块。"""
+    run(store, FakeClient(denied={"tdx_index"}))
+
+    saved = Manifest.load(store)
+    assert CONCEPT_CAPABILITY in saved.capabilities
+    assert not saved.is_available(CONCEPT_CAPABILITY)
+
+
+def test_拉数据时别的接口没权限也跳过而不是中断(store):
+    """代理可能按接口单独配权限：清单开了、成分没开。探测发现不了，只能在拉的时候兜住。"""
+    written, manifest = run(store, FakeClient(denied={"tdx_member"}))
+
+    assert "tdx_member" in written["skipped"]
+    assert not manifest.is_available(CONCEPT_CAPABILITY)
+    assert not store.has_table(TDX_MEMBER_TABLE)
+
+
+def test_token不对直接报错_不当成没权限(store):
+    """填错 token 什么都拉不到，记成「概念板块不可用」会把真正的原因藏起来。"""
+    manifest = Manifest.load(store)
+
+    with pytest.raises(TushareTokenError):
+        DataSync(FakeClient(bad_token=True), store, workers=4).sync_concept(START, END, manifest)
+
+    assert CONCEPT_CAPABILITY not in manifest.capabilities
+
+
+def test_权限恢复后再同步自动开启(store):
+    run(store, FakeClient(denied={"tdx_index"}))
+    _, manifest = run(store, FakeClient())
+
+    assert manifest.is_available(CONCEPT_CAPABILITY)
+    assert store.has_table(TDX_DAILY_TABLE)
+
+
+def test_没权限时后面的步骤照常跑(store):
+    """能力探测要解决的正是这个：以前 5000 积分的用户会断在概念板块，后面几步都跑不到。"""
+
+    class Sync(DataSync):
+        index_ran = False
+
+        def sync_index(self, start, end, manifest=None):
+            self.index_ran = True
+            return {}
+
+    sync = Sync(FakeClient(denied={"tdx_index"}), store, workers=4)
+    summary = sync.sync_all(START, END, steps=["concept", "index"])
+
+    assert "skipped" in summary["concept"]
+    assert sync.index_ran

@@ -13,6 +13,7 @@ from litmus.data.loaders.tushare import (
     TushareConfig,
     TushareError,
     TushareRateLimitError,
+    TushareTokenError,
 )
 
 CONFIG = TushareConfig(token="t", base_url="https://example.invalid/")
@@ -220,6 +221,31 @@ def test_probe_可用时返回True():
 def test_probe_遇到非权限错误不吞掉():
     transport = FakeTransport(err("系统内部错误", code=500))
     with pytest.raises(TushareError):
+        make_client(transport).probe("tdx_index")
+
+
+def test_probe_代理的没开权限报错判为不可用():
+    """2026-09-13 实测：代理对没开通的接口返回 code=403。"""
+    transport = FakeTransport(err("请联系管理员添加此权限", code=403))
+    available, reason = make_client(transport).probe("tdx_index")
+
+    assert available is False
+    assert "请联系管理员添加此权限" in reason
+
+
+def test_token不对单独归类_不算没权限也不重试():
+    """实测代理返回 code=2002。归成没权限的话，能力探测会把填错 token 记成「概念板块不可用」。"""
+    transport = FakeTransport(err("token不对，您传过来的是abc请确认", code=2002))
+    with pytest.raises(TushareTokenError) as caught:
+        make_client(transport).call_page("trade_cal")
+
+    assert not isinstance(caught.value, TushareAuthError)
+    assert len(transport.payloads) == 1
+
+
+def test_probe_遇到token错误不吞掉():
+    transport = FakeTransport(err("token不对，您传过来的是abc请确认", code=2002))
+    with pytest.raises(TushareTokenError):
         make_client(transport).probe("tdx_index")
 
 

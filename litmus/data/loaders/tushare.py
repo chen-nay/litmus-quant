@@ -85,7 +85,13 @@ MAX_PAGES = 16
 _RATE_LIMIT_HINTS = ("每分钟", "频率", "频次", "太频繁", "超限", "线程", "连接数")
 #: 流控错误码。按字符串比对，代理返回的可能是数字也可能是字符串
 _RATE_LIMIT_CODES = ("429",)
-_PERMISSION_HINTS = ("积分", "权限", "没有访问", "token")
+#: 没权限。2026-09-13 实测代理对没开通的接口返回 code=403 msg=请联系管理员添加此权限
+_PERMISSION_CODES = ("403",)
+_PERMISSION_HINTS = ("积分", "权限", "没有访问")
+#: token 填错。2026-09-13 实测代理返回 code=2002 msg=token不对，您传过来的是…请确认。
+#: 必须和「没权限」分开：否则能力探测会把填错 token 记成「概念板块不可用」，真正的原因被藏起来
+_TOKEN_CODES = ("2002",)
+_TOKEN_HINTS = ("token不对",)
 
 
 class TushareError(RuntimeError):
@@ -99,6 +105,13 @@ class TushareError(RuntimeError):
 
 class TushareAuthError(TushareError):
     """积分或权限不足。不重试——能力探测据此判定某项数据不可用。"""
+
+
+class TushareTokenError(TushareError):
+    """token 无效。不重试，能力探测也不把它当成「没权限」。
+
+    token 错了什么都拉不到，得直接告诉用户，不能记成「某项数据不可用」。
+    """
 
 
 class TushareRateLimitError(TushareError):
@@ -267,10 +280,12 @@ class TushareClient:
 
     @staticmethod
     def _classify(api_name: str, code: object, msg: str) -> TushareError:
-        # 先判频率再判权限：频率提示里也可能出现"访问"字样
+        # 先判频率再判 token 和权限：频率提示里也可能出现"访问"字样。错误码优先，关键词只作后备
         if str(code) in _RATE_LIMIT_CODES or any(hint in msg for hint in _RATE_LIMIT_HINTS):
             return TushareRateLimitError(f"{api_name}: {msg}", api_name=api_name, code=code)
-        if any(hint in msg for hint in _PERMISSION_HINTS):
+        if str(code) in _TOKEN_CODES or any(hint in msg for hint in _TOKEN_HINTS):
+            return TushareTokenError(f"{api_name}: {msg}", api_name=api_name, code=code)
+        if str(code) in _PERMISSION_CODES or any(hint in msg for hint in _PERMISSION_HINTS):
             return TushareAuthError(f"{api_name}: {msg}", api_name=api_name, code=code)
         return TushareError(f"{api_name}: code={code} msg={msg}", api_name=api_name, code=code)
 
@@ -338,7 +353,7 @@ class TushareClient:
         """试调一次，判断这个接口当前账号能不能用。
 
         返回 (可用, 不可用的原因)。只有权限/积分不足才算"不可用"；
-        网络错误、返回格式异常一律抛出，不静默降级成"没有这项数据"。
+        token 填错、网络错误、返回格式异常一律抛出，不静默降级成"没有这项数据"。
         """
         try:
             self.call_page(api_name, {**(params or {}), "limit": 1})

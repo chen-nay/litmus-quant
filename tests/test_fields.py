@@ -5,7 +5,15 @@ from __future__ import annotations
 import pytest
 
 from litmus.data import fields
-from litmus.data.fields import CONCEPT, FIELDS, INTERNAL_COLUMNS, STOCK, SW_INDUSTRY
+from litmus.data.fields import (
+    CONCEPT,
+    CONCEPT_CAPABILITY,
+    FIELDS,
+    INTERNAL_COLUMNS,
+    STOCK,
+    SW_INDUSTRY,
+)
+from litmus.data.manifest import Manifest
 
 
 def test_按名字取字段():
@@ -66,3 +74,25 @@ def test_每个字段都填了中文名和单位():
         assert f.label, f"{name} 缺中文名"
         assert f.unit, f"{name} 缺单位"
         assert f.targets, f"{name} 没写属于哪类标的"
+
+
+# ── 能力探测决定哪几类标的可用 ──────────────────────────────────
+
+
+def test_没探测过时概念板块不可用():
+    """宁可少给一类标的，也不让上层去读一张可能没同步过的表。"""
+    assert fields.available_targets(Manifest()) == (STOCK, SW_INDUSTRY)
+
+
+def test_概念板块探测通过才可用():
+    manifest = Manifest()
+    manifest.record_capability(CONCEPT_CAPABILITY, True)
+
+    assert fields.available_targets(manifest) == (STOCK, SW_INDUSTRY, CONCEPT)
+
+
+def test_概念板块没权限时不可用_股票和申万行业不受影响():
+    manifest = Manifest()
+    manifest.record_capability(CONCEPT_CAPABILITY, False, "需要 6000 积分")
+
+    assert fields.available_targets(manifest) == (STOCK, SW_INDUSTRY)

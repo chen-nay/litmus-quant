@@ -10,12 +10,20 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from litmus.data.manifest import Manifest
 
 #: 标的类型
 STOCK = "stock"
 SW_INDUSTRY = "sw_industry"
 CONCEPT = "concept"
 BOARD_TARGETS = (SW_INDUSTRY, CONCEPT)
+
+#: 要做能力探测的标的 → manifest 里的能力名。不在表里的（股票、申万行业）只要基础积分，总是可用
+CONCEPT_CAPABILITY = "concept"
+TARGET_CAPABILITIES: dict[str, str] = {CONCEPT: CONCEPT_CAPABILITY}
 
 
 @dataclass(frozen=True)
@@ -116,6 +124,20 @@ def get(name: str) -> Field:
 def names_for(target: str = STOCK) -> tuple[str, ...]:
     """某类标的可用的字段名，按定义顺序。"""
     return tuple(f.name for f in _FIELD_LIST if f.available_for(target))
+
+
+def available_targets(manifest: Manifest) -> tuple[str, ...]:
+    """按能力探测结果，当前可用的标的类型。
+
+    表达式校验、给 LLM 的字段清单、取数都从这里判断，三处才会一致——漏掉一处，
+    就会出现清单里没有、校验器却放行，然后去读一张没同步过的表、结果静默为空。
+    没探测过的能力按不可用算（见 Manifest.is_available）。
+    """
+    return tuple(
+        target
+        for target in (STOCK, *BOARD_TARGETS)
+        if target not in TARGET_CAPABILITIES or manifest.is_available(TARGET_CAPABILITIES[target])
+    )
 
 
 def check_available(names: Iterable[str], target: str = STOCK) -> None:

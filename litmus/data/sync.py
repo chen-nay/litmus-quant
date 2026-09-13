@@ -23,14 +23,16 @@ from datetime import datetime, timedelta
 
 import polars as pl
 
-from litmus.data.loaders.concept import DAILY_FIELDS as TDX_DAILY_FIELDS
-from litmus.data.loaders.concept import INDEX_FIELDS as TDX_INDEX_FIELDS
-from litmus.data.loaders.concept import MEMBER_FIELDS as TDX_MEMBER_FIELDS
+from litmus.data.fields import CONCEPT_CAPABILITY
 from litmus.data.loaders.concept import (
+    CONCEPT_POINTS,
     normalize_tdx_daily,
     normalize_tdx_index,
     normalize_tdx_member,
 )
+from litmus.data.loaders.concept import DAILY_FIELDS as TDX_DAILY_FIELDS
+from litmus.data.loaders.concept import INDEX_FIELDS as TDX_INDEX_FIELDS
+from litmus.data.loaders.concept import MEMBER_FIELDS as TDX_MEMBER_FIELDS
 from litmus.data.loaders.finance import (
     DISCLOSURE_FIELDS,
     FINA_INDICATOR_FIELDS,
@@ -74,6 +76,7 @@ from litmus.data.loaders.normalize import (
     normalize_stk_limit,
     normalize_stock_st,
 )
+from litmus.data.loaders.tushare import TushareAuthError
 from litmus.data.manifest import Manifest
 from litmus.data.storage import MarketStore
 
@@ -182,7 +185,10 @@ ProgressFn = Callable[[MonthResult, int, int], None]
 
 
 class DataSync:
-    """按月同步日频面板。client 只需要有 `call(api_name, params)`。"""
+    """把 Tushare 的数据同步到本地。
+
+    client 要有 `call()`；同步概念板块时还要 `probe()` 做能力探测。
+    """
 
     def __init__(
         self,
@@ -431,8 +437,12 @@ class DataSync:
 
     def sync_concept(
         self, start: str, end: str, manifest: Manifest | None = None
-    ) -> dict[str, int]:
+    ) -> dict[str, object]:
         """拉通达信概念板块：清单、当前成分、板块日线。三个接口都要 6000 积分。
+
+        **先做能力探测**：没权限就记为不可用并跳过，不报错，返回 `{"skipped": 原因}`——
+        5000 积分的用户照样能同步其余数据，概念板块也不会出现在可用标的里
+        （见 fields.available_targets）。token 填错不算没权限，照常报错。
 
         形状和 sync_industry 一样：先取清单，再按板块并发拉成分和日线。拉法由
         2026-09-13 的实测决定：
@@ -450,21 +460,37 @@ class DataSync:
         """
         manifest = Manifest.load(self._store) if manifest is None else manifest
 
-        snapshot, index_rows = self._latest_concept_index(end)
-        concepts = normalize_tdx_index(index_rows)
-        codes = concepts.get_column("code").to_list()
-        if not codes:
-            raise SyncError(f"{snapshot} 的通达信板块清单里没有概念板块，成分和日线无从拉起")
+        # 能力探测只试 tdx_index：每个概念板块问题都要靠清单把「光模块」这种名字认成板块代码，
+        # 而三个接口同属 6000 积分档，有它就有全部
+        available, reason = self._client.probe("tdx_index")
+        if not available:
+            return self._skip_concept(manifest, reason)
+        manifest.record_capability(CONCEPT_CAPABILITY, True)
 
-        member_tasks = [
-            ("tdx_member", {"ts_code": code, "trade_date": snapshot}, TDX_MEMBER_FIELDS)
-            for code in codes
-        ]
-        daily_tasks = [
-            ("tdx_daily", {"ts_code": code, "start_date": start, "end_date": end}, TDX_DAILY_FIELDS)
-            for code in codes
-        ]
-        results = self._pull_concurrently(member_tasks + daily_tasks)
+        try:
+            snapshot, index_rows = self._latest_concept_index(end)
+            concepts = normalize_tdx_index(index_rows)
+            codes = concepts.get_column("code").to_list()
+            if not codes:
+                raise SyncError(f"{snapshot} 的通达信板块清单里没有概念板块，成分和日线无从拉起")
+
+            member_tasks = [
+                ("tdx_member", {"ts_code": code, "trade_date": snapshot}, TDX_MEMBER_FIELDS)
+                for code in codes
+            ]
+            daily_tasks = [
+                (
+                    "tdx_daily",
+                    {"ts_code": code, "start_date": start, "end_date": end},
+                    TDX_DAILY_FIELDS,
+                )
+                for code in codes
+            ]
+            results = self._pull_concurrently(member_tasks + daily_tasks)
+        except TushareAuthError as exc:
+            # 兜底：代理可能按接口单独配权限，清单开了、成分或日线没开，探测发现不了。
+            # 照样记为不可用并跳过，别让整个同步断在这一步
+            return self._skip_concept(manifest, str(exc))
         members = [row for rows in results[: len(member_tasks)] for row in rows]
         dailies = normalize_tdx_daily(
             [row for rows in results[len(member_tasks) :] for row in rows]
@@ -493,6 +519,18 @@ class DataSync:
             "，".join(f"{name} {rows} 行" for name, rows in written.items()),
         )
         return written
+
+    def _skip_concept(self, manifest: Manifest, reason: str) -> dict[str, object]:
+        """没权限：记为不可用、马上存盘，然后跳过。
+
+        马上存盘是因为后面的步骤可能中断，页面要靠这条记录告诉用户为什么没有概念板块。
+        已经落盘的旧表不删——标成不可用，上层就不会读它。
+        """
+        reason = f"需要 {CONCEPT_POINTS} 积分：{reason}"
+        manifest.record_capability(CONCEPT_CAPABILITY, False, reason)
+        manifest.save(self._store)
+        logger.warning("概念板块不可用，跳过：%s", reason)
+        return {"skipped": reason}
 
     def _latest_concept_index(self, end: str) -> tuple[str, list[dict]]:
         """end 之前最近一个有概念板块清单的交易日，连同那天的清单一起返回。
