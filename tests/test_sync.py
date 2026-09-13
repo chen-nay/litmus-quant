@@ -10,7 +10,7 @@ import pytest
 
 from litmus.data.manifest import Manifest
 from litmus.data.storage import MarketStore
-from litmus.data.sync import DAILY_DATASET, DataSync, SyncError
+from litmus.data.sync import DAILY_DATASET, REQUIRED_APIS, DataSync, SyncError
 
 CODES = ("600519.SH", "000001.SZ")
 MONTHS: dict[str, list[str]] = {
@@ -69,10 +69,12 @@ class FakeClient:
         empty: set[tuple[str, str]] | None = None,
         fail_on: tuple[str, str] | None = None,
         delay: float = 0.0,
+        no_st: bool = False,
     ):
         self.empty = empty or set()  # (api, day)：这一格没数据
         self.fail_on = fail_on
         self.delay = delay
+        self.no_st = no_st
         self.calls: list[tuple[str, str]] = []
         self.calendar_params: dict = {}
         self.max_concurrent = 0
@@ -83,6 +85,12 @@ class FakeClient:
         if api_name == "trade_cal":
             self.calendar_params = dict(params or {})
             return [{"cal_date": d} for days in MONTHS.values() for d in days]
+
+        if api_name == "stock_st":
+            start = (params or {})["start_date"]
+            with self._lock:
+                self.calls.append((api_name, start))
+            return [] if self.no_st else [{"ts_code": CODES[0], "trade_date": start}]
 
         day = (params or {})["trade_date"]
         with self._lock:
@@ -137,7 +145,31 @@ def test_每个月都落盘并记账(store):
 def test_每个交易日四个接口都要调(store):
     client = FakeClient()
     run(store, client)
-    assert len(client.calls) == 5 * 4  # 5 个交易日 × 4 个接口
+    per_day = [call for call in client.calls if call[0] in REQUIRED_APIS]
+    assert len(per_day) == 5 * 4  # 5 个交易日 × 4 个接口
+
+
+def test_ST名单按月拉一次而不是按天(store):
+    client = FakeClient()
+    run(store, client)
+
+    st_calls = [call for call in client.calls if call[0] == "stock_st"]
+    assert len(st_calls) == 3  # 三个月，各拉一次
+
+
+def test_面板里带上ST标记(store):
+    run(store, FakeClient())
+
+    panel = store.read_month(DAILY_DATASET, "2026-08")
+    assert panel.get_column("is_st").sum() == 1
+
+
+def test_一个ST都没拉到就停下(store):
+    """全市场一只 ST 都没有不可能，多半是接口出问题，不能把全市场标成非 ST。"""
+    client = FakeClient(no_st=True)
+
+    with pytest.raises(SyncError, match="ST"):
+        DataSync(client, store, workers=2).sync_daily("20260701", "20260930", Manifest.load(store))
 
 
 def test_进度按月回调(store):

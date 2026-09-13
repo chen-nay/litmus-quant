@@ -82,7 +82,6 @@ _FIELD_LIST: tuple[Field, ...] = (
     # ── 事件 ──────────────────────────────────────────────────
     _f("is_report_date", "财报实际披露日", "布尔", "bool", _STOCK_ONLY),
     _f("is_forecast_date", "业绩预告公告日", "布尔", "bool", _STOCK_ONLY),
-    _f("is_unlock_date", "限售解禁日", "布尔", "bool", _STOCK_ONLY),
     _f("is_ex_div", "除权除息日", "布尔", "bool", _STOCK_ONLY, "复权因子较前一交易日发生变化"),
     # ── 状态 ──────────────────────────────────────────────────
     _f("is_st", "ST / *ST", "布尔", "bool", _STOCK_ONLY),

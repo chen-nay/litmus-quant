@@ -65,8 +65,20 @@ RATE_LIMITS: Mapping[str, int] = {
 }
 DEFAULT_RATE_LIMIT = 400
 
-#: 一次 call() 最多翻多少页，纯粹是防止死循环
-MAX_PAGES = 2000
+#: 退避节奏，两种错误分开对待。
+#: 网络抖动很快就恢复，几秒钟重试就够。
+TRANSPORT_BACKOFF = (1.0, 2.0, 4.0)
+#: 限流是**按分钟计的配额**，等几秒毫无意义——必须等到分钟窗口滚过去。
+#: 2026-09-13 实测：disclosure_date 与 share_float 在 1/2/4 秒的退避下重试四次全部失败，
+#: 整次同步被拖垮；改成按分钟等待才能跨过配额窗口。
+RATE_LIMIT_BACKOFF = (15.0, 30.0, 60.0, 60.0)
+
+#: 一次 call() 最多翻多少页。
+#: 2026-09-13 实测代理的 offset 上限在 10 万上下：offset=60000 正常，offset=102000 返回
+#: 「参数校验失败, offset」，也就是**第 18 页**就会被拒。阈值必须落在它前面，否则我们这条
+#: 报错永远轮不到触发，用户看到的只有代理那句看不懂的参数校验失败。
+#: 正常请求都在几页以内（最大的 namechange 全量也才 4 页），翻过 16 页就说明区间切得太粗。
+MAX_PAGES = 16
 
 #: 流控提示词。除了按分钟计的频率限制，代理还会限制同时在飞的连接数：
 #: 2026-09-13 实测 12 路并发时返回 code=429 msg=请勿使用过多线程，连接超限
@@ -201,26 +213,40 @@ class TushareClient:
             "params": dict(params or {}),
             "fields": fields or "",
         }
-        attempts = self._config.max_retries + 1
-        for attempt in range(1, attempts + 1):
+        # 两种错误各记各的次数：网络抖动和配额用尽是两回事，混在一起数会让
+        # 一次网络抖动吃掉限流的重试预算
+        transport_left = self._config.max_retries
+        rate_limit_left = len(RATE_LIMIT_BACKOFF)
+        while True:
             self._limiter.acquire(api_name)
             try:
                 body = self._transport(self._config.base_url, payload, self._config.timeout)
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-                self._backoff_or_raise(api_name, attempt, attempts, exc)
+                transport_left = self._wait_or_raise(
+                    api_name, exc, transport_left, TRANSPORT_BACKOFF
+                )
                 continue
             try:
                 return self._parse(api_name, body)
             except TushareRateLimitError as exc:
-                self._backoff_or_raise(api_name, attempt, attempts, exc)
-        raise TushareError(f"{api_name}: 重试耗尽", api_name=api_name)  # pragma: no cover
+                rate_limit_left = self._wait_or_raise(
+                    api_name, exc, rate_limit_left, RATE_LIMIT_BACKOFF
+                )
 
-    def _backoff_or_raise(self, api_name: str, attempt: int, attempts: int, exc: Exception) -> None:
-        if attempt >= attempts:
-            raise TushareError(f"{api_name}: 重试 {attempts} 次仍失败：{exc}", api_name=api_name)
-        wait = min(2 ** (attempt - 1), 30) + random.uniform(0, 0.5)
-        logger.warning("接口 %s 第 %d 次失败（%s），%.1fs 后重试", api_name, attempt, exc, wait)
+    def _wait_or_raise(
+        self, api_name: str, exc: Exception, left: int, schedule: tuple[float, ...]
+    ) -> int:
+        """按 schedule 退避一次，返回剩余次数；用完了就抛错。"""
+        if left <= 0:
+            raise TushareError(
+                f"{api_name}: 重试 {len(schedule) + 1} 次仍失败：{exc}", api_name=api_name
+            )
+        wait = schedule[len(schedule) - left] + random.uniform(0, 0.5)
+        logger.warning(
+            "接口 %s 失败（%s），%.1fs 后重试（还剩 %d 次）", api_name, exc, wait, left - 1
+        )
         self._sleep(wait)
+        return left - 1
 
     def _parse(self, api_name: str, body: object) -> tuple[list[str], list[list]]:
         if not isinstance(body, dict) or "code" not in body:
@@ -271,7 +297,12 @@ class TushareClient:
         offset = 0
         previous_first: list | None = None
         for _ in range(MAX_PAGES):
-            page_params = {**(params or {}), "limit": size, "offset": offset}
+            # offset=0 就是默认值，不发白不发；深翻页才带上它。
+            # 代理对 offset 有上限：2026-09-13 实测 share_float 的 offset=60000 正常、
+            # offset=300000 返回「参数校验失败, offset」——翻得太深会被拒。
+            page_params = {**(params or {}), "limit": size}
+            if offset:
+                page_params["offset"] = offset
             field_names, items = self.call_page(api_name, page_params, fields)
             if not items:
                 break
@@ -295,7 +326,10 @@ class TushareClient:
             offset += size
         else:
             raise TushareError(
-                f"{api_name}: 分页超过 {MAX_PAGES} 页，疑似死循环", api_name=api_name
+                f"{api_name}: 翻了 {MAX_PAGES} 页还没取完（已取 {len(rows)} 行），"
+                f"说明查询区间太大。把区间切细再拉，别硬翻——代理的 offset 有上限，"
+                f"硬翻下去只会撞上「参数校验失败」那种看不懂的报错",
+                api_name=api_name,
             )
         return rows
 

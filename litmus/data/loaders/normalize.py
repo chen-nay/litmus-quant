@@ -27,7 +27,7 @@ class NormalizeError(ValueError):
     """原始数据与预期不符，宁可报错也不往下算。"""
 
 
-def _frame(
+def frame_from_rows(
     rows: Sequence[Mapping], columns: Mapping[str, pl.DataType], source: str
 ) -> pl.DataFrame:
     """取出需要的列并转成预期类型。缺列直接报错，不静默补空。"""
@@ -49,7 +49,7 @@ def _with_code_and_date(df: pl.DataFrame) -> pl.DataFrame:
 
 def normalize_daily(rows: Sequence[Mapping]) -> pl.DataFrame:
     """`daily`：未复权行情。vol 单位是手，amount 单位是千元。"""
-    df = _frame(
+    df = frame_from_rows(
         rows,
         {
             "ts_code": pl.String,
@@ -79,7 +79,7 @@ def normalize_daily(rows: Sequence[Mapping]) -> pl.DataFrame:
 
 def normalize_adj_factor(rows: Sequence[Mapping]) -> pl.DataFrame:
     """`adj_factor`：复权因子。后复权价 = 原始价 × 复权因子。"""
-    df = _frame(
+    df = frame_from_rows(
         rows,
         {"ts_code": pl.String, "trade_date": pl.String, "adj_factor": pl.Float64},
         "adj_factor",
@@ -89,7 +89,7 @@ def normalize_adj_factor(rows: Sequence[Mapping]) -> pl.DataFrame:
 
 def normalize_daily_basic(rows: Sequence[Mapping]) -> pl.DataFrame:
     """`daily_basic`：每日指标。市值单位是万元。"""
-    df = _frame(
+    df = frame_from_rows(
         rows,
         {
             "ts_code": pl.String,
@@ -119,7 +119,7 @@ def normalize_daily_basic(rows: Sequence[Mapping]) -> pl.DataFrame:
 
 def normalize_stk_limit(rows: Sequence[Mapping]) -> pl.DataFrame:
     """`stk_limit`：当日涨跌停价（不复权）。"""
-    df = _frame(
+    df = frame_from_rows(
         rows,
         {
             "ts_code": pl.String,
@@ -132,6 +132,16 @@ def normalize_stk_limit(rows: Sequence[Mapping]) -> pl.DataFrame:
     return _with_code_and_date(df).select("code", "date", "up_limit", "down_limit")
 
 
+def normalize_stock_st(rows: Sequence[Mapping]) -> pl.DataFrame:
+    """`stock_st`：某个交易日处于 ST / *ST 的股票。
+
+    只取 (code, date)——是不是 ST 按天判定，类型名称用不上。
+    同一天同一只股票可能返回多行，去重。
+    """
+    df = frame_from_rows(rows, {"ts_code": pl.String, "trade_date": pl.String}, "stock_st")
+    return _with_code_and_date(df).select("code", "date").unique().sort("date", "code")
+
+
 def _same_price(left: str, right: str) -> pl.Expr:
     """价格相等的判断：在分位（0.01 元）上取整后比较，避免浮点误差。"""
     return (pl.col(left) * 100).round(0) == (pl.col(right) * 100).round(0)
@@ -142,15 +152,25 @@ def build_daily_panel(
     adj_factor: pl.DataFrame,
     daily_basic: pl.DataFrame,
     stk_limit: pl.DataFrame,
+    st: pl.DataFrame,
 ) -> pl.DataFrame:
-    """把四份归一后的数据拼成一天（或一段）的标准面板。
+    """把五份归一后的数据拼成一天（或一段）的标准面板。
 
     以 `daily` 为准：它有行才算这只股票当天有成交，停牌日自然就没有行。
+
+    `st` 是 ST 名单，允许覆盖比 daily 更长的区间，join 会按 (code, date) 自己对上。
+    它是必传的——传空表可以，省略不行：省略就等于宣称全市场都不是 ST，
+    而这正是那种「跑得通、结果全错」的毛病。
     """
     panel = (
         daily.join(adj_factor, on=("code", "date"), how="left")
         .join(daily_basic, on=("code", "date"), how="left")
         .join(stk_limit, on=("code", "date"), how="left")
+        .join(
+            st.select("code", "date").with_columns(pl.lit(True).alias("is_st")),
+            on=("code", "date"),
+            how="left",
+        )
     )
 
     missing_adj = panel.select(pl.col("adj_factor").is_null().sum()).item()
@@ -172,6 +192,8 @@ def build_daily_panel(
         _same_price("close_raw", "down_limit").alias("is_limit_down"),
         # 内部列：开盘即涨停，用来判断"买不进"
         _same_price("open_raw", "up_limit").alias("open_limit_up"),
+        # 没出现在 ST 名单里就是没被 ST，不是「不知道」
+        pl.col("is_st").fill_null(False),
     )
 
     return panel.select(
@@ -193,6 +215,7 @@ def build_daily_panel(
         "dv_ttm",
         "market_cap",
         "circ_mv",
+        "is_st",
         "is_limit_up",
         "is_limit_down",
         "adj_factor",
