@@ -16,6 +16,7 @@ from litmus.data.loaders.normalize import (
     normalize_daily,
     normalize_daily_basic,
     normalize_stk_limit,
+    normalize_stock_st,
 )
 from litmus.data.loaders.tushare import TushareClient, TushareConfig
 
@@ -36,6 +37,7 @@ def panel() -> pl.DataFrame:
             normalize_adj_factor(client.call("adj_factor", window)),
             normalize_daily_basic(client.call("daily_basic", window)),
             normalize_stk_limit(client.call("stk_limit", window)),
+            normalize_stock_st(client.call("stock_st", window)),
         )
 
 

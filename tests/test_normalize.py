@@ -11,6 +11,7 @@ from litmus.data.loaders.normalize import (
     normalize_daily,
     normalize_daily_basic,
     normalize_stk_limit,
+    normalize_stock_st,
 )
 
 
@@ -53,12 +54,17 @@ def limit_rows(up=11.55, down=9.45, date="20260911"):
     return [{"ts_code": "600519.SH", "trade_date": date, "up_limit": up, "down_limit": down}]
 
 
-def panel_of(daily, adj, basic, limit):
+def st_rows(*codes, date="20260911"):
+    return [{"ts_code": code, "trade_date": date} for code in codes]
+
+
+def panel_of(daily, adj, basic, limit, st=()):
     return build_daily_panel(
         normalize_daily(daily),
         normalize_adj_factor(adj),
         normalize_daily_basic(basic),
         normalize_stk_limit(limit),
+        normalize_stock_st(st),
     )
 
 
@@ -151,6 +157,42 @@ def test_原始返回缺字段直接报错():
     del broken[0]["amount"]
     with pytest.raises(NormalizeError, match="amount"):
         normalize_daily(broken)
+
+
+def test_在ST名单里的股票标记为ST():
+    panel = panel_of(daily_rows(), adj_rows(), basic_rows(), limit_rows(), st_rows("600519.SH"))
+    assert panel.row(0, named=True)["is_st"] is True
+
+
+def test_不在名单里是明确的不是ST而不是空值():
+    """空值会让「排除 ST」这类筛选条件静默失效，必须是 False。"""
+    panel = panel_of(daily_rows(), adj_rows(), basic_rows(), limit_rows(), st_rows("000001.SZ"))
+    assert panel.row(0, named=True)["is_st"] is False
+
+
+def test_ST名单为空时全市场都不是ST():
+    panel = panel_of(daily_rows(), adj_rows(), basic_rows(), limit_rows())
+    assert panel.row(0, named=True)["is_st"] is False
+
+
+def test_ST名单可以覆盖比面板更长的区间():
+    """按月拉的名单包含面板里没有的日期，join 要按 (code, date) 对上，不能串行。"""
+    st = st_rows("600519.SH", date="20260910") + st_rows("600519.SH", date="20260911")
+    panel = panel_of(daily_rows(), adj_rows(), basic_rows(), limit_rows(), st)
+    assert panel.height == 1
+    assert panel.row(0, named=True)["is_st"] is True
+
+
+def test_别的日子是ST不影响今天():
+    st = st_rows("600519.SH", date="20260910")
+    panel = panel_of(daily_rows(), adj_rows(), basic_rows(), limit_rows(), st)
+    assert panel.row(0, named=True)["is_st"] is False
+
+
+def test_ST名单重复不会让面板多出行():
+    st = st_rows("600519.SH") + st_rows("600519.SH")
+    panel = panel_of(daily_rows(), adj_rows(), basic_rows(), limit_rows(), st)
+    assert panel.height == 1
 
 
 def test_停牌日不补行():

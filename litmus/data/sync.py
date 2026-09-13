@@ -36,6 +36,7 @@ from litmus.data.loaders.normalize import (
     normalize_daily,
     normalize_daily_basic,
     normalize_stk_limit,
+    normalize_stock_st,
 )
 from litmus.data.manifest import Manifest
 from litmus.data.storage import MarketStore
@@ -206,6 +207,10 @@ class DataSync:
         这时即使拉全了也不算走完，下次同步会把整月重来一遍。
         """
         pulled = self._pull_days(days)
+        # ST 名单按日期区间拉：一个月一次就够，不必按天，省下二十来倍的调用
+        st = normalize_stock_st(
+            self._client.call("stock_st", {"start_date": days[0], "end_date": days[-1]})
+        )
 
         frames: list[pl.DataFrame] = []
         skipped: list[str] = []
@@ -223,8 +228,12 @@ class DataSync:
                     normalize_adj_factor(per_api["adj_factor"]),
                     normalize_daily_basic(per_api["daily_basic"]),
                     normalize_stk_limit(per_api["stk_limit"]),
+                    st,
                 )
             )
+
+        if frames and st.is_empty():
+            raise SyncError(f"{month} 一个 ST 都没拉到，不正常；宁可停下也不把全市场标成非 ST")
 
         if not frames:
             # 整月都还没数据（比如刚开月、还没开盘），不写空文件
