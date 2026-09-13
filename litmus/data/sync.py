@@ -29,6 +29,16 @@ from litmus.data.loaders.finance import (
     normalize_fina_indicator,
     normalize_forecast,
 )
+from litmus.data.loaders.industry import (
+    CLASSIFY_FIELDS,
+    MEMBER_FIELDS,
+    SW_DAILY_FIELDS,
+    SW_LEVEL,
+    SW_SRC,
+    normalize_index_classify,
+    normalize_industry_member,
+    normalize_sw_daily,
+)
 from litmus.data.loaders.meta import (
     LIST_STATUSES,
     NAMECHANGE_FIELDS,
@@ -63,6 +73,12 @@ NAMECHANGE_TABLE = "meta/namechange"
 FINA_INDICATOR_TABLE = "fina_indicator"
 DISCLOSURE_TABLE = "events/disclosure"
 FORECAST_TABLE = "events/forecast"
+
+#: 申万行业的表名。行业日线整张存不按月分片：31 个行业十年也才 8 万行上下，
+#: 比股票面板一个月（11 万行）还少，分片的复杂度换不来任何好处
+SW_INDUSTRY_TABLE = "meta/sw_industry"
+SW_MEMBER_TABLE = "meta/sw_member"
+SW_DAILY_TABLE = "board/sw_daily"
 # 限售解禁（share_float）P0 不同步：单个解禁日就有 2.3 万行、一个月超过 10 万行，
 # 全量按天拉要十几个小时，只换来一个布尔字段。见 ARCHITECTURE §11。
 
@@ -259,6 +275,57 @@ class DataSync:
         for index, task in serial:
             results[index] = self._client.call(*task)
         return results
+
+    def sync_industry(
+        self, start: str, end: str, manifest: Manifest | None = None
+    ) -> dict[str, int]:
+        """拉申万一级行业：清单、历史归属、行业日线。
+
+        先取清单拿到 31 个行业代码，再按行业并发拉归属和日线。两者都按行业代码取，
+        **一个行业一次调用就覆盖十年**——`sw_daily` 单次 4000 行，而十年只有 2600 个交易日。
+
+        `is_new='N'` 不能省：接口默认只返回当前成分，那样历史回测里所有股票都会用
+        它们今天的行业，换过行业的公司会被算到错误的组里。
+        """
+        manifest = Manifest.load(self._store) if manifest is None else manifest
+
+        classify = normalize_index_classify(
+            self._client.call("index_classify", {"level": SW_LEVEL, "src": SW_SRC}, CLASSIFY_FIELDS)
+        )
+        codes = classify.get_column("code").to_list()
+        if not codes:
+            raise SyncError("申万行业清单是空的，归属和日线无从拉起")
+
+        member_tasks = [
+            ("index_member_all", {"l1_code": code, "is_new": "N"}, MEMBER_FIELDS) for code in codes
+        ]
+        daily_tasks = [
+            ("sw_daily", {"ts_code": code, "start_date": start, "end_date": end}, SW_DAILY_FIELDS)
+            for code in codes
+        ]
+        results = self._pull_concurrently(member_tasks + daily_tasks)
+        members = [row for rows in results[: len(codes)] for row in rows]
+        dailies = [row for rows in results[len(codes) :] for row in rows]
+
+        written = {
+            SW_INDUSTRY_TABLE: self._write_table(
+                SW_INDUSTRY_TABLE, classify, manifest, f"申万 {SW_SRC} 一级"
+            ),
+            SW_MEMBER_TABLE: self._write_table(
+                SW_MEMBER_TABLE,
+                normalize_industry_member(members),
+                manifest,
+                "含已调出的成分（is_new=N）",
+            ),
+            SW_DAILY_TABLE: self._write_table(
+                SW_DAILY_TABLE, normalize_sw_daily(dailies), manifest, f"{start}~{end}"
+            ),
+        }
+        manifest.save(self._store)
+        logger.info(
+            "申万行业：%s", "，".join(f"{name} {rows} 行" for name, rows in written.items())
+        )
+        return written
 
     def sync_daily(
         self,
