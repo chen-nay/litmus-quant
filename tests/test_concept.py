@@ -146,6 +146,12 @@ def test_市净率为空时是空值():
     assert row["pb"] is None
 
 
+def test_市净率带前导空格也能转成数字():
+    """2026 年起接口返回的 pb 前面有 10 个空格，曾经被静默转成空值，丢了半年多的数据。"""
+    row = normalize_tdx_daily([daily_row(pb="          0.82")]).row(0, named=True)
+    assert row["pb"] == pytest.approx(0.82)
+
+
 def test_涨跌幅和换手率改成统一字段名():
     row = normalize_tdx_daily([daily_row()]).row(0, named=True)
     assert row["pct_chg"] == 1.23
