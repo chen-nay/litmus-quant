@@ -44,23 +44,31 @@ def classify_rows() -> list[dict]:
     return rows
 
 
-def member_rows(l1_code: str) -> list[dict]:
+def member_rows(l1_code: str, is_new: str) -> list[dict]:
+    """按 is_new 分流，和真接口一致：Y 只给当前成分，N 只给已经调出的。
+
+    假 client 必须照着真接口的语义分流。之前它不管传什么都返回两种行，
+    结果「只拉 N」这个 bug 在离线测试里完全看不出来，只有真数据才暴露。
+    """
     name = dict(INDUSTRIES)[l1_code]
+    if is_new == "Y":
+        return [
+            {
+                "l1_code": l1_code,
+                "l1_name": name,
+                "ts_code": "600547.SH",
+                "in_date": "20030826",
+                "out_date": None,
+            }
+        ]
     return [
-        {
-            "l1_code": l1_code,
-            "l1_name": name,
-            "ts_code": "600547.SH",
-            "in_date": "20030826",
-            "out_date": None,
-        },
         {
             "l1_code": l1_code,
             "l1_name": name,
             "ts_code": "000001.SZ",
             "in_date": "19910403",
-            "out_date": "20220728",  # 已经调出，靠 is_new=N 才拿得到
-        },
+            "out_date": "20220728",
+        }
     ]
 
 
@@ -97,7 +105,7 @@ class FakeClient:
         if api_name == "index_classify":
             return classify_rows()
         if api_name == "index_member_all":
-            return member_rows(params["l1_code"])
+            return member_rows(params["l1_code"], params["is_new"])
         if api_name == "sw_daily":
             return sw_daily_rows(params["ts_code"])
         raise AssertionError(f"测试没准备 {api_name}")
@@ -125,7 +133,7 @@ def test_先拉清单再按行业拉(store):
     run(store, client)
 
     assert len(client.params_for("index_classify")) == 1
-    assert len(client.params_for("index_member_all")) == len(INDUSTRIES)
+    assert len(client.params_for("index_member_all")) == len(INDUSTRIES) * 2  # 当前 + 已调出
     assert len(client.params_for("sw_daily")) == len(INDUSTRIES)
 
 
@@ -138,14 +146,27 @@ def test_清单只问一级行业(store):
     assert params["src"] == "SW2021"
 
 
-def test_历史归属必须传is_new等于N(store):
-    """接口默认只给当前成分。漏了这个参数，换过行业的公司会被算进今天的行业，
-    十年回测里每只股票都用今天的归属——这是最隐蔽的一类幸存者偏差。"""
+def test_当前成分和已调出的都要拉(store):
+    """is_new 是过滤器不是开关：Y 只给当前、N 只给已调出。缺哪边都是错的——
+    只拉 Y 丢历史（幸存者偏差），只拉 N 丢现在（行业筛选全空）。"""
     client = FakeClient()
     run(store, client)
 
-    for params in client.params_for("index_member_all"):
-        assert params["is_new"] == "N"
+    for code, _ in INDUSTRIES:
+        flags = sorted(
+            p["is_new"] for p in client.params_for("index_member_all") if p["l1_code"] == code
+        )
+        assert flags == ["N", "Y"]
+
+
+def test_归属表里当前和已调出的都有(store):
+    """真数据上踩过的坑：只拉 is_new='N' 时，2011 行全部带 out_date、
+    一条当前成分都没有，而行业筛选恰恰要用当前成分。"""
+    run(store, FakeClient())
+
+    members = store.read_table(SW_MEMBER_TABLE)
+    assert members.filter(members["out_date"].is_null()).height > 0, "一条当前成分都没有"
+    assert members.filter(members["out_date"].is_not_null()).height > 0, "一条历史归属都没有"
 
 
 def test_行业日线一次覆盖整个区间(store):
@@ -162,8 +183,10 @@ def test_按清单里的行业代码逐个拉(store):
     client = FakeClient()
     run(store, client)
 
-    pulled = sorted(p["l1_code"] for p in client.params_for("index_member_all"))
-    assert pulled == sorted(code for code, _ in INDUSTRIES)
+    # 每个行业会被拉两次（is_new 的 Y 和 N），这里只关心「每个行业都拉到了」；
+    # 每个行业拉几次由 test_先拉清单再按行业拉 盯着
+    pulled = {p["l1_code"] for p in client.params_for("index_member_all")}
+    assert pulled == {code for code, _ in INDUSTRIES}
 
 
 # ── 落盘与记账 ──────────────────────────────────────────────────

@@ -284,8 +284,10 @@ class DataSync:
         先取清单拿到 31 个行业代码，再按行业并发拉归属和日线。两者都按行业代码取，
         **一个行业一次调用就覆盖十年**——`sw_daily` 单次 4000 行，而十年只有 2600 个交易日。
 
-        `is_new='N'` 不能省：接口默认只返回当前成分，那样历史回测里所有股票都会用
-        它们今天的行业，换过行业的公司会被算到错误的组里。
+        `is_new` 是**过滤器**，不是「包含历史」的开关：`Y` 只返回当前成分，`N` 只返回
+        已经调出的，所以**两个都要拉**。只拉 Y 会丢掉历史（换过行业的公司全按今天的归属算，
+        是最隐蔽的幸存者偏差）；只拉 N 会丢掉现在——2026-09-13 实测 `is_new='N'` 返回的
+        2011 行**全部带 out_date**，一条当前成分都没有，那样行业筛选会全空。
         """
         manifest = Manifest.load(self._store) if manifest is None else manifest
 
@@ -296,16 +298,19 @@ class DataSync:
         if not codes:
             raise SyncError("申万行业清单是空的，归属和日线无从拉起")
 
+        # Y 只给当前成分、N 只给已调出的，两个都要，缺一边都是错的
         member_tasks = [
-            ("index_member_all", {"l1_code": code, "is_new": "N"}, MEMBER_FIELDS) for code in codes
+            ("index_member_all", {"l1_code": code, "is_new": flag}, MEMBER_FIELDS)
+            for code in codes
+            for flag in ("Y", "N")
         ]
         daily_tasks = [
             ("sw_daily", {"ts_code": code, "start_date": start, "end_date": end}, SW_DAILY_FIELDS)
             for code in codes
         ]
         results = self._pull_concurrently(member_tasks + daily_tasks)
-        members = [row for rows in results[: len(codes)] for row in rows]
-        dailies = [row for rows in results[len(codes) :] for row in rows]
+        members = [row for rows in results[: len(member_tasks)] for row in rows]
+        dailies = [row for rows in results[len(member_tasks) :] for row in rows]
 
         written = {
             SW_INDUSTRY_TABLE: self._write_table(
