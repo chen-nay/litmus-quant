@@ -82,6 +82,8 @@ NAMECHANGE_TABLE = "meta/namechange"
 FINA_INDICATOR_TABLE = "fina_indicator"
 DISCLOSURE_TABLE = "events/disclosure"
 FORECAST_TABLE = "events/forecast"
+# 限售解禁（share_float）P0 不同步：单个解禁日就有 2.3 万行、一个月超过 10 万行，
+# 全量按天拉要十几个小时，只换来一个布尔字段。见 ARCHITECTURE §11。
 
 #: 申万行业的表名。行业日线整张存不按月分片：31 个行业十年也才 8 万行上下，
 #: 比股票面板一个月（11 万行）还少，分片的复杂度换不来任何好处
@@ -93,8 +95,6 @@ SW_DAILY_TABLE = "board/sw_daily"
 INDEX_DAILY_TABLE = "index/daily"
 INDEX_WEIGHT_TABLE = "index/weight"
 BENCHMARK_INDEXES: tuple[str, ...] = (HS300, ZZ500)
-# 限售解禁（share_float）P0 不同步：单个解禁日就有 2.3 万行、一个月超过 10 万行，
-# 全量按天拉要十几个小时，只换来一个布尔字段。见 ARCHITECTURE §11。
 
 #: 一个交易日的必需接口，缺一不可
 REQUIRED_APIS: tuple[str, ...] = ("daily", "adj_factor", "daily_basic", "stk_limit")
