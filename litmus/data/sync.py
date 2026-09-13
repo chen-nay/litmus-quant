@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import calendar
 import logging
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +29,14 @@ from litmus.data.loaders.finance import (
     normalize_disclosure,
     normalize_fina_indicator,
     normalize_forecast,
+)
+from litmus.data.loaders.index import (
+    HS300,
+    INDEX_DAILY_FIELDS,
+    INDEX_WEIGHT_FIELDS,
+    ZZ500,
+    normalize_index_daily,
+    normalize_index_weight,
 )
 from litmus.data.loaders.industry import (
     CLASSIFY_FIELDS,
@@ -79,6 +88,11 @@ FORECAST_TABLE = "events/forecast"
 SW_INDUSTRY_TABLE = "meta/sw_industry"
 SW_MEMBER_TABLE = "meta/sw_member"
 SW_DAILY_TABLE = "board/sw_daily"
+
+#: 指数的表名，以及 P0 要拉的宽基指数
+INDEX_DAILY_TABLE = "index/daily"
+INDEX_WEIGHT_TABLE = "index/weight"
+BENCHMARK_INDEXES: tuple[str, ...] = (HS300, ZZ500)
 # 限售解禁（share_float）P0 不同步：单个解禁日就有 2.3 万行、一个月超过 10 万行，
 # 全量按天拉要十几个小时，只换来一个布尔字段。见 ARCHITECTURE §11。
 
@@ -107,6 +121,24 @@ def report_periods(start: str, end: str) -> list[str]:
             if start <= period <= end:
                 periods.append(period)
     return periods
+
+
+def month_ranges(start: str, end: str) -> list[tuple[str, str]]:
+    """[start, end] 覆盖到的自然月区间，形如 ("20240101", "20240131")。
+
+    首尾两个月按 start / end 裁剪，不会越界。指数成分按月拉就靠它。
+    """
+    ranges: list[tuple[str, str]] = []
+    year, month = int(start[:4]), int(start[4:6])
+    while f"{year}{month:02d}01" <= end:
+        last_day = calendar.monthrange(year, month)[1]
+        first = max(f"{year}{month:02d}01", start)
+        last = min(f"{year}{month:02d}{last_day:02d}", end)
+        ranges.append((first, last))
+        month += 1
+        if month > 12:
+            year, month = year + 1, 1
+    return ranges
 
 
 class SyncError(RuntimeError):
@@ -330,6 +362,56 @@ class DataSync:
         logger.info(
             "申万行业：%s", "，".join(f"{name} {rows} 行" for name, rows in written.items())
         )
+        return written
+
+    def sync_index(self, start: str, end: str, manifest: Manifest | None = None) -> dict[str, int]:
+        """拉宽基指数的日线与历史成分。
+
+        日线：**一个指数一次调用就覆盖十年**（单次 8000 行，十年才 2600 个交易日）。
+
+        成分：**按自然月拉**。接口文档自己就建议「开始日期和结束日分别输入当月第一天和
+        最后一天」，而且一个月正好一页装得下（沪深300 约 300 行、中证500 约 500 行，
+        单次上限 1000），这样彻底不需要翻页——这一步在翻页上栽过太多次，能不翻就不翻。
+
+        历史成分是用来还原「当时的股票池」的：拿今天的沪深300 成分去回测 2018 年，
+        等于提前知道了哪些公司会被纳入，是最典型的幸存者偏差。
+        """
+        manifest = Manifest.load(self._store) if manifest is None else manifest
+
+        daily_tasks = [
+            (
+                "index_daily",
+                {"ts_code": code, "start_date": start, "end_date": end},
+                INDEX_DAILY_FIELDS,
+            )
+            for code in BENCHMARK_INDEXES
+        ]
+        weight_tasks = [
+            (
+                "index_weight",
+                {"index_code": code, "start_date": first, "end_date": last},
+                INDEX_WEIGHT_FIELDS,
+            )
+            for code in BENCHMARK_INDEXES
+            for first, last in month_ranges(start, end)
+        ]
+        results = self._pull_concurrently(daily_tasks + weight_tasks)
+        dailies = [row for rows in results[: len(daily_tasks)] for row in rows]
+        weights = [row for rows in results[len(daily_tasks) :] for row in rows]
+
+        written = {
+            INDEX_DAILY_TABLE: self._write_table(
+                INDEX_DAILY_TABLE,
+                normalize_index_daily(dailies),
+                manifest,
+                "、".join(BENCHMARK_INDEXES),
+            ),
+            INDEX_WEIGHT_TABLE: self._write_table(
+                INDEX_WEIGHT_TABLE, normalize_index_weight(weights), manifest, "月度快照"
+            ),
+        }
+        manifest.save(self._store)
+        logger.info("指数：%s", "，".join(f"{name} {rows} 行" for name, rows in written.items()))
         return written
 
     def sync_daily(
