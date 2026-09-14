@@ -65,6 +65,7 @@ class Event(_Strict):
     params: dict[str, int | float] = Field(default_factory=dict)
     expr: str = Field(min_length=1)  # 由代码从模板渲染，LLM 不写
     label: str = ""
+    library_version: int | None = None  # 生成表达式时的事件库版本；模板改过之后重跑旧记录能发现
 
 
 class TimeRange(_Strict):

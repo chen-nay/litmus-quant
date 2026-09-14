@@ -120,7 +120,7 @@ layers = [
 | data | `DataService`：`ds.get_fields()` / `ds.get_trading_calendar()` / `ds.latest_trading_day()` / `ds.data_range()` / `ds.available_targets()` / `ds.stock_info()` / `ds.get_index_daily()` / `ds.get_universe()` / `ds.get_universe_mask()` / `ds.list_boards()` / `ds.board_members()` / `ds.resolve_stock()` / `ds.resolve_board()`（第 7 步）；`DataSync`：`start()` / `status()`（本地数据状态、能否提问）；字段目录 `data.FIELDS` |
 | spec | `spec.QuerySpec`（三种形状）、`spec.DEFAULTS`（默认值表）、`spec.render_assumptions()`（由 spec 生成确认卡说明） |
 | expr | `expr.parse()` / `expr.validate()` / `expr.collect_fields()` / `expr.collect_lookback()` / `expr.evaluate()`（返回结果与实际统计起点）；`expr.field_catalog()` / `expr.operator_catalog()`（供 llm 组装提示词） |
-| signals | `signals.load_events()`（事件库） |
+| signals | `signals.load_events()` / `signals.render_event()` / `signals.event_catalog()`（事件库） |
 | research | `research.run(spec, ds)` |
 | llm | `llm.plan()` |
 | store | 见 §7 |
@@ -915,7 +915,8 @@ def evaluate(expr: str, purpose: str, universe: pl.DataFrame, start: date, end: 
 - `assumptions` **由代码从 spec 生成**（§5.4），LLM 不写。它是确认卡最有价值的部分：把模糊描述翻译成明确定义
 - `defaults_used` 列出哪些字段用的是默认值，确认卡据此标出"默认值，可修改"
 - `target.code` 由 api 调 `ds.resolve_stock()` 填写，LLM 不填代码
-- `event.preset_id` 必须在事件库（§4.3）之内，`event.expr` 由代码从模板渲染，LLM 只填 `preset_id` 和 `params`
+- `event.preset_id` 必须在事件库（§4.3）之内，`event.expr` 由代码从模板渲染，LLM 只填 `preset_id` 和 `params`；
+  `event.label`、`event.library_version` 同样由代码填。第 5 步的接口按「编号 + 参数」重新生成表达式，忽略请求里带的表达式
 - `benchmark` 默认 `universe_equal_weight`（当日股票池等权平均），可选 `index:000300.SH`，显示在确认卡上
 - `universe.base = all_a` 指沪深 A 股（不含北交所）；`universe.industry` 为申万行业名，按每个交易日当时的归属取成分；
   `universe.board` 形如 `{"type": "concept", "code": "880728.TDX"}`，P0 用当前成分，必须写进 assumptions
@@ -944,25 +945,25 @@ spec 只查结构，表达式对不对由 `expr.validate()` 管。`target.code` 
 
 ### 4.3 个股回看
 
-**事件库（15 个，参数可调）**，定义在 `signals/builtin.yaml`，加载时逐条过 `expr.validate()`：
+**事件库（15 个，参数可调）**，定义在 `signals/builtin.toml`，加载时全部参数组合逐一过 `expr.validate()`：
 
-| 类别 | 事件 | 表达式（默认参数） |
-|---|---|---|
-| 均线 | 突破均线 | `Cross($close, Mean($close, 250))` |
-| | 跌破均线 | `Cross(Mean($close, 250), $close)` |
-| | 均线金叉 | `Cross(Mean($close,5), Mean($close,20))` |
-| | MACD 金叉 | `Cross(EMA($close,12)-EMA($close,26), EMA(EMA($close,12)-EMA($close,26),9))` |
-| 量能 | 单日放量 | `$amount > Mean(Ref($amount,1),20) * 2` |
-| | 放量突破均线 | 突破均线 & 单日放量 |
-| | 缩量回调 | `($close < Ref($close,1)) & ($amount < Mean(Ref($amount,1),20) * 0.5)` |
-| 价格 | 创 N 日新高 | `$close >= Max($close, 250)` |
-| | 创 N 日新低 | `$close <= Min($close, 250)` |
-| 涨跌停 | 涨停 | `$is_limit_up` |
-| | 连板 | `Count($is_limit_up, 2) == 2`（N 可调） |
-| | 跌停 | `$is_limit_down` |
-| 日历 | 财报披露日 | `$is_report_date` |
-| | 业绩预告日 | `$is_forecast_date` |
-| | 除权除息日 | `$is_ex_div` |
+| 类别 | 事件（编号） | 表达式模板 | 参数：默认值（可选范围） |
+|---|---|---|---|
+| 均线 | 突破均线 `breakout_ma` | `Cross($close, Mean($close, {ma}))` | `ma` 均线天数：250（5/10/20/60/120/250） |
+| | 跌破均线 `breakdown_ma` | `Cross(Mean($close, {ma}), $close)` | 同上 |
+| | 均线金叉 `ma_golden_cross` | `Cross(Mean($close, {fast}), Mean($close, {slow}))` | `fast` 短均线天数：5（5/10/20/60）；`slow` 长均线天数：20（10/20/60/120/250）；短必须小于长 |
+| | MACD 金叉 `macd_golden_cross` | `Cross(EMA($close,12)-EMA($close,26), EMA(EMA($close,12)-EMA($close,26),9))` | 固定 12/26/9，不可调（通用标准，放开后 LLM 容易乱填） |
+| 量能 | 单日放量 `volume_surge` | `$amount > Mean(Ref($amount,1),20) * {volume_ratio}` | `volume_ratio` 放量倍数：2（1.2~10）；对比窗口固定为前 20 日 |
+| | 放量突破均线 `breakout_ma_volume` | 突破均线 & 单日放量 | `ma`、`volume_ratio` 同上 |
+| | 缩量回调 `shrink_pullback` | `($close < Ref($close,1)) & ($amount < Mean(Ref($amount,1),20) * {shrink_ratio})` | `shrink_ratio` 缩量倍数：0.5（0.1~0.9） |
+| 价格 | 创 N 日新高 `new_high` | `$close >= Max($close, {days})` | `days` 天数：250（20/60/120/250） |
+| | 创 N 日新低 `new_low` | `$close <= Min($close, {days})` | 同上 |
+| 涨跌停 | 涨停 `limit_up` | `$is_limit_up` | 无 |
+| | 连板 `consecutive_limit_up` | `Count($is_limit_up, {boards}) == {boards}` | `boards` 连板数：2（2~10） |
+| | 跌停 `limit_down` | `$is_limit_down` | 无 |
+| 日历 | 财报披露日 `report_date` | `$is_report_date` | 无 |
+| | 业绩预告日 `forecast_date` | `$is_forecast_date` | 无 |
+| | 除权除息日 `ex_dividend` | `$is_ex_div` | 无 |
 
 **所有事件只取"由不满足变为满足"的那一天**：计算触发日时，引擎自动给事件表达式包一层
 `cond & ~Ref(cond, 1)`。否则像"创 250 日新高""缩量回调""连板"这类会连续多天成立的条件，
@@ -973,8 +974,21 @@ spec 只查结构，表达式对不对由 `expr.validate()` 管。`target.code` 
 **事件表达式由代码渲染，LLM 不写**：`builtin.yaml` 里每个事件是一段带参数占位的模板，`llm.plan()` 只输出
 `preset_id` 和 `params`，表达式由代码渲染。这样"参数和表达式对不上"这种错误从根上不可能发生。
 
-**事件参数要有取值范围**：均线天数 ∈ {5, 10, 20, 60, 120, 250}、放量倍数 1.2~10、连板数 2~10 等，
-在 `builtin.yaml` 里定义，加载时和 `llm.plan()` 输出时都由代码核对。
+**事件参数要有取值范围**，在 `builtin.toml` 里定义，加载时和 `llm.plan()` 输出时都由代码核对（2026-09-14 定）：
+
+- **用 TOML**：Python 自带解析器，不用为此装依赖；支持注释，模板和参数表写得清楚
+- **参数越界不自动改**：报错说明可选范围，由上层让用户改参数；报错带上参数名、传入的值、可选范围，上层不用解析文字
+- **参数统一命名**：`ma`、`fast` / `slow`、`volume_ratio`、`shrink_ratio`、`days`、`boards`；没填的用默认值并记下来，
+  多写了不认识的参数报错。整数参数遇到 60.0 当成 60，60.5 报错；布尔值不收（JSON 的 true 在 Python 里也是整数）
+- **加载时校验所有合法参数组合**：可选值全部、数值参数取最小 / 默认 / 最大，每个组合都生成表达式、过校验，
+  写错了应用启动就报错。预热条数最多的是 MACD 金叉，281 + 事件包装 1 条 = 282 条
+- **事件库带版本号**：改了模板就加一，生成的表达式带上版本号（`event.library_version`）；第 5 步保存研究记录时一起存，
+  重跑旧记录能发现模板变过
+- 每个事件还有标签模板（跟着参数变，如「放量突破 60 日均线（成交额超过前 20 日均额的 3 倍）」）、示例问句和对应参数
+  （给 LLM 当示例，LLM 调用失败时前端展示）。默认值和 `spec.DEFAULTS` 一致，由测试保证
+
+**样本偏少很常见**：2026-09-14 实测十年里，放量突破均线每只股票只有 5~9 次；大盘股涨停 0~13 次、两连板 0 次；
+银行股基本不发业绩预告（平安银行 0 次）。这是事件本身的性质，不是代码的问题，确认卡上可以提前说明（第 7 步）。
 
 **为什么个股回看要用白名单**：回看要回答"每次发生之后怎样"，前提是这个条件确实"在某一天发生"。
 像"市值低于 200 亿"这种会连续成立几百天的状态条件，没有"发生的那一天"。用户用这类条件要求回看时，
@@ -1176,7 +1190,8 @@ LLM 调用本身失败时，前端展示事件库里的固定示例，完全不�
 
 1. **必填项**：股票表必须有 `as_of`；板块表必须有 `board_type` 和排序指标；个股回看必须有 `target.code` 和 `event.preset_id`
 2. **白名单核对**：股票过 `ds.resolve_stock()`；板块过 `ds.resolve_board()`；事件过 `signals.load_events()`
-3. **参数范围**：事件参数必须落在 `builtin.yaml` 定义的取值范围内（均线天数、放量倍数、连板数等）。
+3. **参数范围**：事件参数必须落在 `builtin.toml` 定义的取值范围内（均线天数、放量倍数、连板数等）；
+   `signals.render_event()` 越界时报错并带上参数名、传入的值、可选范围，据此让用户改参数。
    表达式由代码渲染，不存在"参数与表达式对不上"的可能（§4.3）
 
 ### 5.3 澄清与默认值
@@ -1377,8 +1392,8 @@ litmus/
 │       ├── cross_section.py
 │       └── logic.py
 ├── signals/                # 依赖 expr
-│   ├── loader.py           # load_events()，加载时逐条 expr.validate()
-│   └── builtin.yaml        # 事件库（15 条）
+│   ├── library.py          # load_events() / render_event() / event_catalog()，加载时校验全部参数组合
+│   └── builtin.toml        # 事件库（15 条）
 ├── research/               # 依赖 expr、data、spec
 │   ├── screener.py         # 股票表、板块表
 │   ├── history.py          # 个股回看
@@ -1421,7 +1436,7 @@ Makefile
 | 1b | data：DataService（含按日股票池、板块）+ 小表格测试 + 契约测试 | 小表格测试离线通过；契约测试在本地真实数据上通过（合成数据集推迟，见 §11） |
 | 2 | expr：parser / validator / collector / evaluator + 全部算子，支持股票与板块两类标的 | 小表格测试：`Cross`、`Mean`、`Rank` 等逐个验证 |
 | 3 | spec（三种形状 + 默认值表）+ research：股票表、板块表、个股回看 | 手工核对若干笔"之后 N 天涨跌"，含顺延与扣成本 |
-| 4 | signals：事件库 15 条 | YAML 加载，逐条校验通过，都能跑出回看结果 |
+| 4 | signals：事件库 15 条 | TOML 加载，全部参数组合校验通过，都能跑出回看结果 |
 | 5 | store（JSON）+ FastAPI：`/api/run`（先不接 LLM，直接传 QuerySpec）+ `/api/data/sync`、`/api/data/status` | Postman 能跑出三种结果；能触发同步并查看进度 |
 | 6 | 前端：同步页 + 三种结果页 | 页面上能完成同步，并看到三种结果 |
 | 7 | `llm.plan()` + prompt 管理 + `ds.resolve_stock()` / `ds.resolve_board()` + 确认卡 / 澄清卡（说明文字由模板生成） | 自然语言能正确生成三种形状；编造字段被拦截；"平安"返回多个候选；"最近哪个板块最强"先澄清；"现在能买茅台吗"给改写建议；改完参数说明文字跟着变 |
@@ -1456,6 +1471,7 @@ def test_mean():
 | 预热期与股票池 | 停过牌的股票预热期按它自己的行情补够，不会因为行数不够被悄悄剔掉；`Rank` 只在当天池内排，不在池内的日子照样参与时序窗口 |
 | expr 契约 | 在本地真实数据上核对：停牌股预热补够、股票表结果与长历史直接计算一致、MACD 按 8n 预热与完整历史一致、实际统计起点（`tests/contract/test_expr.py`） |
 | research 契约 | 本地真实数据上手工核对：涨停后一字板买入顺延、长期停牌无法成交、持有期内退市按最后价格、MACD 回看的统计起点与自身涨跌、全A等权与沪深300 对照、观察中；股票表的总数、排名范围、空排序值（`tests/contract/test_history.py`、`test_screener.py`） |
+| signals | 15 个事件都能生成；参数越界、不认识、类型不对时报错并说明可选范围；事件库文件写错（占位符、默认值、某个参数组合预热超限）加载就报错；默认值和 `spec.DEFAULTS` 一致；真实数据上 15 个事件各跑一次个股回看（`tests/test_signals.py`、`tests/contract/test_signals_history.py`） |
 | returns | 手工构造 5 个触发点，核对起止价格、买入/卖出顺延、扣成本、无法成交的剔除 |
 | history | 事件只在"由不满足变为满足"那天触发（连续成立不重复计、三连板只算一次）；同期市场平均与这只股票平时平均的计算口径 |
 | screener | 股票表 / 板块表：筛选、排序、取前 N；板块字段正确路由到板块数据表 |
