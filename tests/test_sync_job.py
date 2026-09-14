@@ -109,10 +109,36 @@ def test_出错就停下_记下原因_再点可以接着同步():
     assert job.wait(5)
     progress = job.snapshot()
     assert progress["state"] == FAILED
-    assert progress["error"] == "RuntimeError: 网络炸了"
+    assert progress["error"] == "财务：RuntimeError: 网络炸了"
     assert progress["steps_done"] == list(SYNC_STEPS[: SYNC_STEPS.index("finance")])
     assert job.start()  # 出错之后可以再开
     assert job.wait(5)
+
+
+def test_概念板块出错不拦着后面的步骤_最后标为失败():
+    fake = FakeSync(fail_at="concept")
+    job = job_for(fake)
+    job.start()
+    assert job.wait(5)
+    progress = job.snapshot()
+    assert progress["state"] == FAILED
+    assert progress["error"] == "概念板块：RuntimeError: 网络炸了"
+    assert progress["steps_failed"] == ["concept"]
+    assert progress["steps_done"] == [step for step in SYNC_STEPS if step != "concept"]
+    assert [step for _, _, step in fake.calls] == list(SYNC_STEPS)  # 日频照样跑了
+
+
+def test_最后一个月落盘之后才点停止_算完成():
+    gate = threading.Event()
+    job = job_for(FakeSync(months=1, gate=gate))
+    job.start()
+    wait_until(lambda: job.snapshot()["step"] == "daily")
+    assert job.stop()
+    gate.set()
+    assert job.wait(5)
+    progress = job.snapshot()
+    assert progress["state"] == DONE
+    assert progress["steps_done"] == list(SYNC_STEPS)
 
 
 def test_打不开同步器_比如没配token():

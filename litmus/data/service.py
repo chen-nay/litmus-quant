@@ -489,6 +489,11 @@ class DataService:
         boards = self._scan_table(table).select("code", "name").sort("code").collect()
         return [BoardInfo(code, name, board_type) for code, name in boards.iter_rows()]
 
+    def concept_snapshot_date(self) -> date:
+        """概念板块清单与成分的快照日。P0 概念板块只有这一天的成分（§2.7），需要能力可用。"""
+        self._check_target(CONCEPT, Manifest.load(self._store))
+        return self._scan_table(TDX_CONCEPT_TABLE).select(pl.col("date").max()).collect().item()
+
     def board_members(self, board_code: str, as_of: date | None = None) -> list[str]:
         """板块的成分股代码，从小到大，不含北交所。
 
@@ -507,11 +512,10 @@ class DataService:
             )
             codes = industry_members(pool, sw_member, board_code).get_column("code").to_list()
         else:
-            self._check_target(CONCEPT, Manifest.load(self._store))
-            concepts = self._scan_table(TDX_CONCEPT_TABLE).select("code", "date").collect()
+            snapshot = self.concept_snapshot_date()
+            concepts = self._scan_table(TDX_CONCEPT_TABLE).select("code").collect()
             if board_code not in concepts.get_column("code").to_list():
                 raise ValueError(f"不认识的板块代码 {board_code!r}")
-            snapshot = concepts.get_column("date").max()
             if as_of is not None and as_of < snapshot:
                 raise MissingDataError(
                     f"概念板块只有 {snapshot} 的当前成分，查不了 {as_of} 当时的成分"

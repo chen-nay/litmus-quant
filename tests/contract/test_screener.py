@@ -34,6 +34,22 @@ def sort_values(result) -> list[float]:
     return [row[SORT_VALUE] for row in result.rows]
 
 
+def test_概念板块限定股票池_查询日早于快照日时提示按哪天的成分():
+    if CONCEPT not in _ds.available_targets():
+        pytest.skip("概念板块不可用")
+    snapshot = _ds.concept_snapshot_date()
+    board = {"type": "concept", "code": "880728.TDX"}  # 航运概念
+    count = len(_ds.board_members("880728.TDX"))
+
+    early = stock_list(as_of="2025-06-03", universe={"board": board}, limit=3)
+    assert early.notes[0] == (
+        f"「航运概念」按 {snapshot} 的成分（{count} 只）筛选，不是 2025-06-03 当时的成分："
+        "之后才调入的股票也算在内，当时在、后来调出的不会出现"
+    )
+    same_day = stock_list(as_of=snapshot.isoformat(), universe={"board": board}, limit=3)
+    assert not any("成分" in note for note in same_day.notes)
+
+
 def test_放量突破年线_按放量倍数排():
     """和上一步演示的结果一致：满足 13 只，第一名是鼎信通讯（放量 12 倍）。"""
     result = stock_list(

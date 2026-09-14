@@ -166,3 +166,39 @@ def test_spec不可变():
     spec = parse_spec(STOCK_LIST)
     with pytest.raises(ValidationError):
         spec.limit = 10  # type: ignore[misc]
+
+
+# ── 类型只收明确的写法 ──────────────────────────────────────────
+
+
+@pytest.mark.parametrize("value", [1757548800, 20260911, "2026-09-11T00:00:00", "2026/09/11", True])
+def test_日期只收YYYY_MM_DD_整数不当时间戳(value):
+    with pytest.raises(ValidationError, match="as_of"):
+        parse_spec(with_changes(STOCK_LIST, as_of=value))
+
+
+@pytest.mark.parametrize("value", [True, "50", 50.5])
+def test_整数不收布尔值_字符串_带小数的数(value):
+    with pytest.raises(ValidationError, match="limit"):
+        parse_spec(with_changes(STOCK_LIST, limit=value))
+
+
+def test_没有小数部分的数当整数收():
+    assert parse_spec(with_changes(STOCK_LIST, limit=50.0)).limit == 50
+    assert parse_spec(with_changes(STOCK_HISTORY, horizons=[5.0, 20])).horizons == (5, 20)
+
+
+def test_持有天数不收布尔值():
+    with pytest.raises(ValidationError, match="horizons"):
+        parse_spec(with_changes(STOCK_HISTORY, horizons=[5, True]))
+
+
+@pytest.mark.parametrize("value", [True, "30", float("nan"), float("inf")])
+def test_成本不收布尔值_字符串_NaN_无穷大(value):
+    with pytest.raises(ValidationError, match="cost_bps"):
+        parse_spec(with_changes(STOCK_HISTORY, cost_bps=value))
+
+
+def test_回看区间的日期同样严格():
+    with pytest.raises(ValidationError, match="from"):
+        parse_spec(with_changes(STOCK_HISTORY, time_range={"from": 1735660800, "to": "2026-09-11"}))

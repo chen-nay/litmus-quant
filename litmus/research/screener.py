@@ -6,6 +6,8 @@
 - 排序值为空的不进结果（亏损股按市盈率排时没有值），同分按代码排
 - 展示列：股票是名称、行业、不复权收盘价、涨跌幅、成交额、市值；板块是名称、收盘点位、涨跌幅、成交额。
   再加上条件和排序里用到的字段
+- 用概念板块限定股票池时，概念板块只有快照日的成分（§2.7）。查询日早于快照日，就是拿今天的名单回头看：
+  之后才调入的股票算在内，当时在、后来调出的不出现。结果提示里写明按哪天的成分、几只
 """
 
 from __future__ import annotations
@@ -14,10 +16,10 @@ from datetime import date
 
 import polars as pl
 
-from litmus.data import STOCK, DataService
+from litmus.data import CONCEPT, STOCK, DataService
 from litmus.expr import collect_fields, evaluate, parse
 from litmus.research.results import ListResult
-from litmus.spec import BoardListSpec, Condition, Sort, StockListSpec
+from litmus.spec import BoardListSpec, BoardRef, Condition, Sort, StockListSpec
 
 SORT_VALUE = "sort_value"
 DEFAULT_SORT = Sort(by="$amount", order="desc")
@@ -38,7 +40,8 @@ def run_stock_list(spec: StockListSpec, ds: DataService) -> ListResult:
         board=None if universe.board is None else universe.board.model_dump(),
         exclude=list(universe.exclude),
     )
-    return _run("stock_list", day, pool, spec.filter, spec.sort, spec.limit, STOCK, ds)
+    notes = _board_notes(universe.board, day, ds)
+    return _run("stock_list", day, pool, spec.filter, spec.sort, spec.limit, STOCK, ds, notes)
 
 
 def run_board_list(spec: BoardListSpec, ds: DataService) -> ListResult:
@@ -57,8 +60,9 @@ def _run(
     limit: int,
     target: str,
     ds: DataService,
+    notes: tuple[str, ...] = (),
 ) -> ListResult:
-    notes: list[str] = []
+    notes = list(notes)
     matches = pool
     if condition is not None:
         result = evaluate(condition.expr, "filter", pool, day, day, ds, target=target)
@@ -105,6 +109,22 @@ def _run(
     position = {code: i for i, code in enumerate(codes)}
     rows = sorted(ordered.iter_rows(named=True), key=lambda row: position[row["code"]])
     return ListResult(shape, day, matches.height, columns, tuple(rows), tuple(notes))
+
+
+def _board_notes(board: BoardRef | None, day: date, ds: DataService) -> tuple[str, ...]:
+    if board is None:
+        return ()
+    snapshot = ds.concept_snapshot_date()
+    if day >= snapshot:
+        return ()
+    name = next(
+        (item.name for item in ds.list_boards(CONCEPT) if item.code == board.code), board.code
+    )
+    count = len(ds.board_members(board.code))
+    return (
+        f"「{name}」按 {snapshot} 的成分（{count} 只）筛选，不是 {day} 当时的成分："
+        "之后才调入的股票也算在内，当时在、后来调出的不会出现",
+    )
 
 
 def _require_trading_day(ds: DataService, day: date) -> None:

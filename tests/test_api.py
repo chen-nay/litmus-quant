@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from contextlib import contextmanager
 from dataclasses import replace
@@ -191,6 +192,20 @@ def test_行业名不存在_列出可选的行业(tmp_path):
     assert issues["universe.industry"]["allowed"] == "农林牧渔、银行"
 
 
+def test_可选值用顿号隔开_成本不收NaN(tmp_path):
+    client = make_client(tmp_path, ds=NoData())
+    spec = stock_history({"preset_id": "limit_up"}) | {"benchmark": "hs300"}
+    issues = issues_of(post(client, spec))
+    expected = "只能是 'universe_equal_weight'、'index:000300.SH'、'index:000905.SH'"
+    assert issues["benchmark"]["message"] == expected
+
+    body = json.dumps(
+        {"spec": stock_history({"preset_id": "limit_up"}) | {"cost_bps": float("nan")}}
+    )
+    response = client.post("/api/run", content=body, headers={"content-type": "application/json"})
+    assert issues_of(response)["cost_bps"]["message"] == "要是有限的数字"
+
+
 # ── /api/run：计算与运行记录 ────────────────────────────────────
 
 
@@ -278,7 +293,8 @@ class GatedSync:
     def sync_all(self, start, end, manifest=None, steps=None, on_month=None):
         if steps == ["daily"]:
             self.gate.wait(timeout=5)
-            on_month(MonthResult("2026-09", 100, 8, (), False), 1, 1)
+            on_month(MonthResult("2026-08", 100, 21, (), True), 1, 2)
+            on_month(MonthResult("2026-09", 100, 8, (), False), 2, 2)
         return {}
 
 

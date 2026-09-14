@@ -46,6 +46,7 @@ _MESSAGES = {
     "tuple_type": "要是一个列表",
     "union_tag_invalid": "shape 只能是 {expected_tags}",
     "union_tag_not_found": "缺少 shape，可选 'stock_list'、'board_list'、'stock_history'",
+    "finite_number": "要是有限的数字",
 }
 _PREFIXES = (("date", "日期要写成 YYYY-MM-DD"), ("int", "要是整数"), ("float", "要是数字"))
 
@@ -118,7 +119,10 @@ def _message(error: Mapping[str, Any]) -> str:
     if kind in ("value_error", "assertion_error"):  # 自己写的校验，本来就是中文
         return str(context.get("error", error["msg"]))
     if kind in _MESSAGES:
-        values = {key: str(value).replace(" or ", "、") for key, value in context.items()}
+        values = {
+            key: str(value).replace(" or ", "、").replace(", ", "、")
+            for key, value in context.items()
+        }
         return _MESSAGES[kind].format(**values)
     for prefix, message in _PREFIXES:
         if kind.startswith(prefix):

@@ -8,10 +8,20 @@ spec 只校验**结构**：栏目齐不齐、类型对不对、数值在不在�
 
 from __future__ import annotations
 
-from datetime import date
+import re
+from collections.abc import Callable
+from datetime import date, datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from litmus.spec.defaults import (
     BENCHMARKS,
@@ -25,6 +35,38 @@ from litmus.spec.defaults import (
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+# ── 严格类型 ────────────────────────────────────────────────────
+# pydantic 默认会顺手转换：整数 1757548800 当成时间戳变成 2025-09-11，true 当成 1，"5" 当成 5，NaN 照收。
+# 请求来自前端和大模型，这种转换只会把写错的值悄悄变成另一个意思，所以只收明确的写法（2026-09-14 定）
+
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _day(value: object) -> object:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and _ISO_DAY.fullmatch(value):
+        return value
+    raise ValueError(f"日期要写成 YYYY-MM-DD，收到 {value!r}")
+
+
+def _numeric(kind: str) -> Callable[[object], object]:
+    def check(value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError(f"要是{kind}，收到 {value!r}")
+        return value
+
+    return check
+
+
+#: 日期：只收 "YYYY-MM-DD"
+Day = Annotated[date, BeforeValidator(_day)]
+#: 整数：60.0 这种没有小数部分的也收（和事件参数一致）；60.5、布尔值、字符串不收
+WholeNumber = Annotated[int, BeforeValidator(_numeric("整数"))]
+#: 数字：布尔值、字符串不收；NaN、无穷大由字段上的 allow_inf_nan=False 拦
+Number = Annotated[float, BeforeValidator(_numeric("数字"))]
 
 
 # ── 零件 ────────────────────────────────────────────────────────
@@ -71,8 +113,8 @@ class Event(_Strict):
 class TimeRange(_Strict):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
-    start: date = Field(alias="from")
-    end: date = Field(alias="to")
+    start: Day = Field(alias="from")
+    end: Day = Field(alias="to")
 
     @model_validator(mode="after")
     def _ordered(self) -> TimeRange:
@@ -94,11 +136,11 @@ class StockListSpec(_Common):
     """股票表：某一天的股票池里筛选 → 排序 → 取前 N。筛选、排序都可以为空。"""
 
     shape: Literal["stock_list"]
-    as_of: date
+    as_of: Day
     filter: Condition | None = None
     universe: Universe = Universe()
     sort: Sort | None = None
-    limit: int = Field(DEFAULTS["top_n"], ge=1, le=MAX_LIMIT)
+    limit: WholeNumber = Field(DEFAULTS["top_n"], ge=1, le=MAX_LIMIT)
 
 
 class BoardListSpec(_Common):
@@ -106,10 +148,10 @@ class BoardListSpec(_Common):
 
     shape: Literal["board_list"]
     board_type: Literal["sw_industry", "concept"]
-    as_of: date
+    as_of: Day
     filter: Condition | None = None
     sort: Sort | None = None
-    limit: int = Field(DEFAULTS["top_n"], ge=1, le=MAX_LIMIT)
+    limit: WholeNumber = Field(DEFAULTS["top_n"], ge=1, le=MAX_LIMIT)
 
 
 class StockHistorySpec(_Common):
@@ -119,9 +161,9 @@ class StockHistorySpec(_Common):
     target: Target
     event: Event
     time_range: TimeRange
-    horizons: tuple[int, ...] = DEFAULTS["horizons"]  # type: ignore[assignment]
+    horizons: tuple[WholeNumber, ...] = DEFAULTS["horizons"]  # type: ignore[assignment]
     benchmark: Literal[BENCHMARKS] = DEFAULTS["benchmark"]  # type: ignore[valid-type]
-    cost_bps: float = Field(DEFAULTS["cost_bps"], ge=0, le=MAX_COST_BPS)
+    cost_bps: Number = Field(DEFAULTS["cost_bps"], ge=0, le=MAX_COST_BPS, allow_inf_nan=False)
 
     @field_validator("horizons")
     @classmethod
