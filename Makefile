@@ -9,7 +9,7 @@
 #     - 开发中只检查、不改文件；格式化只在提交前做一次，而且只动这次改过的文件
 #
 # 用法：
-#   make check                            开发中：检查写法 + 跑全部离线测试
+#   make check                            开发中：检查写法与模块依赖 + 跑全部离线测试
 #   make check TESTS=tests/test_sync.py   开发中：只跑指定的测试文件，更快
 #   make ready                            提交前：格式化改过的文件 + 检查 + 全部离线测试
 
@@ -26,10 +26,12 @@ CHANGED_PY = $(shell { git diff --name-only --diff-filter=d HEAD; git ls-files -
 # 开发中用：只检查、不修改任何文件
 check:
 	uv run ruff check litmus tests
+	uv run lint-imports
 	uv run pytest -q $(OFFLINE) $(TESTS)
 
 # 提交前用：格式化改过的文件，再做完整检查和全部离线测试
 ready:
 	@if [ -n "$(strip $(CHANGED_PY))" ]; then uv run ruff format $(CHANGED_PY); fi
 	uv run ruff check litmus tests
+	uv run lint-imports
 	uv run pytest -q $(OFFLINE) tests

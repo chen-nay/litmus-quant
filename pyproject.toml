@@ -35,8 +35,37 @@ select = ["E", "F", "I", "UP", "B"]
 # （中文一个字占两格）。为一行注释多一个字符中断检查、改完再重跑，不值得
 ignore = ["E501"]
 
+[tool.importlinter]
+root_package = "litmus"
+
+# 模块只能向下依赖（ARCHITECTURE §1.2）。还没写的模块（spec、signals、research、llm、store、api）出现时加进来；
+# 「厂商 SDK 只能出现在 llm 模块」那条等 llm 模块出现、装了 SDK 再加
+[[tool.importlinter.contracts]]
+name = "模块单向依赖"
+type = "layers"
+layers = ["litmus.expr", "litmus.data"]
+
+# 上层只能通过 litmus.data 的公开接口取数，不碰内部子模块（§1.2 第 3 条）。
+# 经由 litmus.data 间接用到它们是正常的，所以允许间接引用
+[[tool.importlinter.contracts]]
+name = "expr 只用 data 的公开接口"
+type = "forbidden"
+source_modules = ["litmus.expr"]
+forbidden_modules = [
+    "litmus.data.derive",
+    "litmus.data.fields",
+    "litmus.data.loaders",
+    "litmus.data.manifest",
+    "litmus.data.service",
+    "litmus.data.storage",
+    "litmus.data.sync",
+    "litmus.data.universe",
+]
+allow_indirect_imports = true
+
 [dependency-groups]
 dev = [
+    "import-linter>=2.15",
     "pytest>=9.1.1",
     "ruff>=0.16.6",
 ]
