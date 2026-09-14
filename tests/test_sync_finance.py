@@ -36,6 +36,7 @@ def fina_rows(period: str) -> list[dict]:
             "roe_yearly": 50.0,
             "or_yoy": 18.3,
             "netprofit_yoy": 22.1,
+            "update_flag": "1",
         }
     ]
 
@@ -222,6 +223,7 @@ def test_财务指标只请求需要的字段(store):
     requested = client.fields_for("fina_indicator_vip")
     assert "netprofit_yoy" in requested
     assert "roe_yearly" in requested
+    assert "update_flag" in requested  # 不在默认输出里，不点名就拿不到
     assert "eps" not in requested
 
 

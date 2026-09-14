@@ -26,8 +26,10 @@ from litmus.data.loaders.normalize import NormalizeError, frame_from_rows
 
 logger = logging.getLogger(__name__)
 
-#: 财务指标。输出有上百列，只要这几列——载荷小一个数量级，对慢代理很关键
-FINA_INDICATOR_FIELDS = "ts_code,ann_date,end_date,roe,roe_yearly,or_yoy,netprofit_yoy"
+#: 财务指标。输出有上百列，只要这几列——载荷小一个数量级，对慢代理很关键。
+#: update_flag 不在默认输出里，要点名才给：2026-09-14 实测同一 (股票, 报告期, 公告日) 有 4315 组
+#: 数值不同的行（如 002122.SZ 2023 年报 roe 6.4353 与 6.4077），只有它能区分哪条是最新的
+FINA_INDICATOR_FIELDS = "ts_code,ann_date,end_date,roe,roe_yearly,or_yoy,netprofit_yoy,update_flag"
 FINA_INDICATOR_NUMERIC = ("roe", "roe_yearly", "or_yoy", "netprofit_yoy")
 
 #: 业绩预告
@@ -64,6 +66,9 @@ def normalize_fina_indicator(rows: Sequence[Mapping]) -> pl.DataFrame:
     **不按 (code, period) 去重**：同一个报告期会有更正公告，它们的 `ann_date` 不同，
     是不同的记录。哪一条有效由读取时的 PIT 规则决定（取 `ann_date <= 当日` 里最新的那条），
     在这里去重等于提前替读取方做决定，还会把更正记录抹掉。
+
+    `update_flag` **原样保留成字符串**：同一公告日的几个版本靠它区分，但它的取值在拉到之前
+    没亲眼见过，这里不解释、不校验，免得格式不符让整次同步白跑。怎么用由读取时决定。
     """
     df = frame_from_rows(
         rows, _schema(FINA_INDICATOR_FIELDS, FINA_INDICATOR_NUMERIC), "fina_indicator"
@@ -77,6 +82,7 @@ def normalize_fina_indicator(rows: Sequence[Mapping]) -> pl.DataFrame:
             "roe_yearly",
             pl.col("or_yoy").alias("revenue_yoy"),
             pl.col("netprofit_yoy").alias("profit_yoy"),
+            "update_flag",
         )
         .unique()  # 整行重复才去掉
         .sort("code", "period", "ann_date")
