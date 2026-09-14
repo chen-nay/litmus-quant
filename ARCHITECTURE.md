@@ -116,7 +116,7 @@ layers = [
 
 | 模块 | 对外暴露 |
 |---|---|
-| data | `DataService`：`ds.get_fields()` / `ds.get_trading_calendar()` / `ds.latest_trading_day()` / `ds.get_universe()` / `ds.get_universe_mask()` / `ds.list_boards()` / `ds.board_members()` / `ds.resolve_stock()` / `ds.resolve_board()` / `ds.data_status()`；`DataSync`：`start()` / `status()`；字段目录 `data.FIELDS` |
+| data | `DataService`：`ds.get_fields()` / `ds.get_trading_calendar()` / `ds.latest_trading_day()` / `ds.get_universe()` / `ds.get_universe_mask()` / `ds.list_boards()` / `ds.board_members()` / `ds.resolve_stock()` / `ds.resolve_board()`；`DataSync`：`start()` / `status()`（本地数据状态、能否提问）；字段目录 `data.FIELDS` |
 | spec | `spec.QuerySpec`（三种形状）、`spec.DEFAULTS`（默认值表）、`spec.render_assumptions()`（由 spec 生成确认卡说明） |
 | expr | `expr.parse()` / `expr.validate()` / `expr.collect_fields()` / `expr.collect_lookback()` / `expr.evaluate()`；`expr.field_catalog()` / `expr.operator_catalog()`（供 llm 组装提示词） |
 | signals | `signals.load_events()`（事件库） |
@@ -241,12 +241,10 @@ class DataService:
 
     def resolve_board(self, text: str, board_type: str | None = None) -> list[BoardMatch]:
         """板块提及 → 候选板块列表，用和股票同一套匹配规则。见 §2.3"""
-
-    def data_status(self) -> DataStatus:
-        """本地数据覆盖范围、最近同步时间、各可选数据的可用状态（来自 manifest）"""
 ```
 
-下载由 data 模块内的 `DataSync` 负责，见 §2.5。
+下载由 data 模块内的 `DataSync` 负责，见 §2.5。本地数据的状态（覆盖范围、最近同步时间、可选数据是否可用、能不能提问）
+也由 `DataSync.status()` 回答，DataService 不另设入口。
 
 ### 2.2 字段目录 FIELDS
 
@@ -464,6 +462,22 @@ token 填错返回 `code=2002`「token不对，您传过来的是…请确认」
 这样做的理由：实测全量要一个多小时，让用户装完干等着才能问第一个问题没有必要；而高频问题问的都是"最近"，
 两年数据足够回答。**倒序同步不需要改动存储层**：manifest 按月记账，`missing_months()` 接受任意月份顺序，
 倒着拉只是调用方换个遍历顺序。
+
+**解锁判定（`DataSync.status()`，只读 manifest 和文件，不联网）**，两条同时满足才放行：
+
+- **股票日频从本地最新一天往回两年，经过的每个自然月都已落盘**：最新一天是 2026-09-11，就要 2024-09 ~ 2026-09 共 25 个月。
+  最新那个月可以没走完，其余必须整月，记了账但文件不在的算缺。**锚在数据的最新一天而不是今天**：月初收盘前、
+  国庆春节长假里当月还没有数据，锚在今天会误判；数据旧了照样放行，由页面提示去同步。A 股每个自然月都有交易日，不用查日历
+- **日频之前那几步的表都在**（基础数据、申万行业、指数、财务），概念板块可用时它的三张表也要在。
+  否则只跑过 `--only daily` 的目录也会放行，查询时才发现缺表
+
+跨月那次增量同步**先补完上个月再写新月份**（`sync_daily` 把账上已有、没走完的月份排在前面）。
+否则新月份先落盘，上个月月末那几天就成了夹在中间的缺口，已经放行的状态会退回去。
+
+`status()` 同时给出页面要显示的：数据截至哪天、历史已连续补到哪天、是否已补到 2016-01、两年里还缺哪几个月
+（`data_not_ready` 附带的进度）、各表最近同步时间、不可用的可选数据及原因。**「历史是否补完」从日频月份推导，
+manifest 不另存标记**：标记会和文件对不上（删了某个月的文件，标记还是 True）。同步中的实时进度（正在拉哪个月、
+限流等待）第 5 步有了后台任务再加。命令行 `python -m litmus.data --status` 只打印状态、不同步。
 
 问题的回看窗口超出已覆盖区间时，走确认卡的可用区间提示——这与概念板块只有 2025-03 起的数据是同一套机制，
 不静默给出样本不足的结论。

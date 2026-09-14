@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 
 import polars as pl
 
-from litmus.data.fields import CONCEPT_CAPABILITY
+from litmus.data.fields import CONCEPT_CAPABILITY, TARGET_CAPABILITIES
 from litmus.data.loaders.concept import (
     CONCEPT_POINTS,
     normalize_tdx_daily,
@@ -128,6 +128,28 @@ REQUIRED_APIS: tuple[str, ...] = ("daily", "adj_factor", "daily_basic", "stk_lim
 #: 它一个人要一个多小时，先让便宜的都就位。concept 紧跟 industry，两种板块口径挨着。
 SYNC_STEPS: tuple[str, ...] = ("meta", "industry", "concept", "index", "finance", "daily")
 
+#: 历史数据的起点：ST 名单接口 stock_st 从 2016 年起才有数据（ARCHITECTURE §2.5）
+HISTORY_START = "20160101"
+
+#: 股票日频从本地最新一天往回覆盖满这么多年，就可以开始提问，更早的历史后台接着补
+UNLOCK_YEARS = 2
+
+#: 能提问之前必须就位的表：日频之前那几步写的。指数成分和指数日线同一步落盘、同一次记账，
+#: 有日线就有成分。概念板块是可选数据，可用时才要求 CONCEPT_TABLES
+REQUIRED_TABLES: tuple[str, ...] = (
+    STOCK_BASIC_TABLE,
+    TRADE_CAL_TABLE,
+    NAMECHANGE_TABLE,
+    SW_INDUSTRY_TABLE,
+    SW_MEMBER_TABLE,
+    SW_DAILY_TABLE,
+    INDEX_DAILY_TABLE,
+    FINA_INDICATOR_TABLE,
+    DISCLOSURE_TABLE,
+    FORECAST_TABLE,
+)
+CONCEPT_TABLES: tuple[str, ...] = (TDX_CONCEPT_TABLE, TDX_MEMBER_TABLE, TDX_DAILY_TABLE)
+
 
 def report_periods(start: str, end: str) -> list[str]:
     """[start, end] 覆盖到的报告期（每个季度最后一天），从早到晚。
@@ -177,6 +199,11 @@ def month_ranges(start: str, end: str) -> list[tuple[str, str]]:
     return ranges
 
 
+def months_between(start: str, end: str) -> tuple[str, ...]:
+    """[start, end] 覆盖到的自然月，从早到晚，形如 ("2024-01", "2024-02")。"""
+    return tuple(f"{first[:4]}-{first[4:6]}" for first, _ in month_ranges(start, end))
+
+
 class SyncError(RuntimeError):
     """同步中断。已经落盘的月份不受影响，重跑会从断点继续。"""
 
@@ -195,10 +222,32 @@ class MonthResult:
 ProgressFn = Callable[[MonthResult, int, int], None]
 
 
+@dataclass(frozen=True)
+class DataStatus:
+    """本地数据到了什么程度，全部从 manifest 和文件推导（见 DataSync.status）。"""
+
+    #: 能不能开始提问；不能时 reason 说明缺什么
+    ready: bool
+    reason: str
+    #: 股票日频最新一天，页面上的「数据截至」
+    data_through: str | None
+    #: 从最新一天往回连续覆盖到哪天，页面上的「历史已补到」
+    history_from: str | None
+    #: 是否已经连续补到 HISTORY_START
+    history_done: bool
+    #: 解锁要求落盘的月份，以及其中还缺的——data_not_ready 附带的进度
+    unlock_months: tuple[str, ...]
+    unlock_missing: tuple[str, ...]
+    #: 各表、各按月数据集最近一次同步的时间
+    synced_at: dict[str, str]
+    #: 用不了的可选数据：能力名 → 原因。不在这里的就是可用
+    unavailable: dict[str, str]
+
+
 class DataSync:
     """把 Tushare 的数据同步到本地。
 
-    client 要有 `call()`；同步概念板块时还要 `probe()` 做能力探测。
+    client 要有 `call()`；同步概念板块时还要 `probe()` 做能力探测。只看状态（status）可以传 None。
     """
 
     def __init__(
@@ -210,6 +259,96 @@ class DataSync:
         self._client = client
         self._store = store
         self._workers = workers
+
+    # ── 状态 ────────────────────────────────────────────────────
+
+    def status(self, manifest: Manifest | None = None) -> DataStatus:
+        """本地数据到了什么程度、能不能开始提问。只读 manifest 和文件，不联网。
+
+        能提问要同时满足两条（ARCHITECTURE §2.5「解锁判定」）：
+
+        - **股票日频从本地最新一天往回 UNLOCK_YEARS 年，经过的每个自然月都已落盘**。最新那个月
+          可以没走完，其余必须整月，记了账但文件不在的算缺。锚在数据的最新一天而不是今天：
+          月初收盘前、长假里当月还没有数据，锚在今天会误判；数据旧了照样放行，由页面提示去同步。
+          A 股每个自然月都有交易日，所以不用查日历
+        - **日频之前那几步的表都在**，概念板块可用时它的表也要在。否则只跑过 `--only daily`
+          的目录也会放行，查询时才发现缺表
+
+        「历史是否补完」同样从月份推导，manifest 不另存标记——标记会和文件对不上。
+        同步中的实时进度等第 5 步有了后台任务再加。
+        """
+        manifest = Manifest.load(self._store) if manifest is None else manifest
+        records = manifest.months.get(DAILY_DATASET, {})
+        newest = max(records, default=None)
+
+        def on_disk(month: str) -> bool:
+            record = records.get(month)
+            return (
+                record is not None
+                and (record.complete or month == newest)
+                and self._store.has_month(DAILY_DATASET, month)
+            )
+
+        through = manifest.data_through(DAILY_DATASET)
+        unlock_months: tuple[str, ...] = ()
+        history_from: str | None = None
+        history_done = False
+        if through is not None:
+            through_day = through.replace("-", "")
+            years_ago = f"{int(through_day[:4]) - UNLOCK_YEARS}{through_day[4:6]}01"
+            unlock_months = months_between(years_ago, through_day)
+            # 从最新的月份往回数，数到第一个缺口为止
+            history = months_between(HISTORY_START, through_day)
+            contiguous = 0
+            for month in reversed(history):
+                if not on_disk(month):
+                    break
+                contiguous += 1
+            if contiguous:
+                history_from = records[history[-contiguous]].first_date
+                history_done = contiguous == len(history)
+        unlock_missing = tuple(month for month in unlock_months if not on_disk(month))
+
+        required = REQUIRED_TABLES
+        if manifest.is_available(CONCEPT_CAPABILITY):
+            required += CONCEPT_TABLES
+        missing_tables = [
+            name
+            for name in required
+            if name not in manifest.tables or not self._store.has_table(name)
+        ]
+
+        reasons: list[str] = []
+        if through is None:
+            reasons.append("还没有股票日频数据")
+        elif unlock_missing:
+            shown = "、".join(unlock_missing[:3]) + (" 等" if len(unlock_missing) > 3 else "")
+            reasons.append(
+                f"最近 {UNLOCK_YEARS} 年的股票日频还缺 {len(unlock_missing)} 个月（{shown}）"
+            )
+        if missing_tables:
+            reasons.append(f"缺少 {'、'.join(missing_tables)}")
+
+        synced_at = {name: record.synced_at for name, record in manifest.tables.items()}
+        for dataset, months in manifest.months.items():
+            if months:
+                synced_at[dataset] = max(record.synced_at for record in months.values())
+
+        return DataStatus(
+            ready=not reasons,
+            reason="；".join(reasons),
+            data_through=through,
+            history_from=history_from,
+            history_done=history_done,
+            unlock_months=unlock_months,
+            unlock_missing=unlock_missing,
+            synced_at=synced_at,
+            unavailable={
+                name: manifest.unavailable_reason(name)
+                for name in TARGET_CAPABILITIES.values()
+                if not manifest.is_available(name)
+            },
+        )
 
     # ── 交易日历 ────────────────────────────────────────────────
 
@@ -573,7 +712,7 @@ class DataSync:
         """
         manifest = Manifest.load(self._store) if manifest is None else manifest
 
-        months = [f"{first[:4]}-{first[4:6]}" for first, _ in month_ranges(start, end)]
+        months = months_between(start, end)
         unsettled = set(months[-INDEX_WEIGHT_UNSETTLED_MONTHS:])
         todo = manifest.missing_months(INDEX_WEIGHT_DATASET, months, self._store)
 
@@ -656,6 +795,9 @@ class DataSync:
         by_month = self.trading_days(f"{start[:6]}01", f"{end[:6]}31")
         newest_first = sorted(by_month, reverse=True)
         todo = manifest.missing_months(DAILY_DATASET, newest_first, self._store)
+        # 账上已有、只是没走完（或文件丢了）的月份先补，再拉新月份。跨月那次同步要是先写下 10 月，
+        # 9 月月末那几天在 9 月补完之前就是夹在中间的缺口，status() 会退回「不能提问」
+        todo = sorted(todo, key=lambda month: manifest.month(DAILY_DATASET, month) is None)
 
         # 交易日历是提前发布的，end 之后的交易日还没有数据，不用白调
         plan: list[tuple[str, list[str], bool]] = []

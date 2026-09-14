@@ -297,6 +297,17 @@ def test_没走完的月份下次继续拉(store):
     assert manifest.month(DAILY_DATASET, "2026-08").days == 2
 
 
+def test_跨月时先补完没走完的旧月份再拉新月份(store):
+    """先写 9 月的话，8 月补完之前 8 月月末就是夹在中间的缺口，status() 会退回不能提问。"""
+    DataSync(FakeClient(), store, workers=2).sync_daily(
+        "20260701", "20260803", Manifest.load(store)
+    )
+
+    results, _ = run(store, FakeClient())
+
+    assert [r.month for r in results] == ["2026-08", "2026-09"]
+
+
 def test_失败后重跑只补没完成的月份(store):
     client = FakeClient(fail_on=("daily", "20260702"))
     with pytest.raises(RuntimeError):

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from litmus.data.__main__ import build_parser, load_env
+from litmus.data.__main__ import build_parser, load_env, main
 from litmus.data.manifest import Manifest
 from litmus.data.storage import MarketStore
 from litmus.data.sync import SYNC_STEPS, DataSync, SyncError
@@ -118,6 +118,17 @@ def test_only拼错了会被拦下():
 def test_可以指定区间与并发():
     args = build_parser().parse_args(["--start", "20240101", "--end", "20240331", "--workers", "4"])
     assert (args.start, args.end, args.workers) == ("20240101", "20240331", 4)
+
+
+def test_status只打印状态不联网(tmp_path, monkeypatch, capsys):
+    def no_network(*args, **kwargs):
+        raise AssertionError("--status 不该连 Tushare")
+
+    monkeypatch.setattr("litmus.data.__main__.TushareClient", no_network)
+    monkeypatch.setenv("LITMUS_DATA_DIR", str(tmp_path))
+
+    assert main(["--status"]) == 0
+    assert "还不能提问：还没有股票日频数据" in capsys.readouterr().out
 
 
 # ── .env 加载 ───────────────────────────────────────────────────
