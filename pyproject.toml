@@ -6,9 +6,11 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.141.1",
     "httpx>=0.28.1",
     "polars>=1.44.2",
     "pydantic>=2.13.5",
+    "uvicorn>=0.53.0",
 ]
 
 [build-system]
@@ -39,12 +41,19 @@ ignore = ["E501"]
 [tool.importlinter]
 root_package = "litmus"
 
-# 模块只能向下依赖（ARCHITECTURE §1.2）；data 与 spec 同层、互不依赖。还没写的模块（llm、store、api）
-# 出现时加进来；「厂商 SDK 只能出现在 llm 模块」那条等 llm 模块出现、装了 SDK 再加
+# 模块只能向下依赖（ARCHITECTURE §1.2）；research 与 store、data 与 spec 同层、互不依赖。llm 模块出现时
+# 加进第三层；「厂商 SDK 只能出现在 llm 模块」那条等 llm 模块出现、装了 SDK 再加
 [[tool.importlinter.contracts]]
 name = "模块单向依赖"
 type = "layers"
-layers = ["litmus.research", "litmus.signals", "litmus.expr", "litmus.data | litmus.spec"]
+layers = [
+    "litmus.cli",
+    "litmus.api",
+    "litmus.research | litmus.store",
+    "litmus.signals",
+    "litmus.expr",
+    "litmus.data | litmus.spec",
+]
 
 # 上层只能通过 litmus.data 的公开接口取数，不碰内部子模块（§1.2 第 3 条）。
 # 经由 litmus.data 间接用到它们是正常的，所以允许间接引用
@@ -107,6 +116,37 @@ forbidden_modules = [
     "litmus.expr.operators",
     "litmus.expr.parser",
     "litmus.expr.validator",
+]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "api 只用下层模块的公开接口"
+type = "forbidden"
+source_modules = ["litmus.api"]
+forbidden_modules = [
+    "litmus.data.derive",
+    "litmus.data.fields",
+    "litmus.data.loaders",
+    "litmus.data.manifest",
+    "litmus.data.service",
+    "litmus.data.storage",
+    "litmus.data.sync",
+    "litmus.data.universe",
+    "litmus.expr.catalog",
+    "litmus.expr.collector",
+    "litmus.expr.evaluator",
+    "litmus.expr.operators",
+    "litmus.expr.parser",
+    "litmus.expr.validator",
+    "litmus.research.history",
+    "litmus.research.results",
+    "litmus.research.returns",
+    "litmus.research.screener",
+    "litmus.signals.library",
+    "litmus.spec.defaults",
+    "litmus.spec.query_spec",
+    "litmus.store.base",
+    "litmus.store.json_store",
 ]
 allow_indirect_imports = true
 

@@ -1,0 +1,304 @@
+"""HTTP 接口的离线测试：TestClient + 替身，不读本地数据、不连 Tushare。
+
+真实数据上跑三种结果的见 tests/contract/test_run_api.py。
+"""
+
+from __future__ import annotations
+
+import threading
+from contextlib import contextmanager
+from dataclasses import replace
+from datetime import date
+
+import pytest
+from fastapi.testclient import TestClient
+
+from litmus.api import Services, SyncJob, create_app
+from litmus.data import STOCK, SW_INDUSTRY, BoardInfo, DataStatus, MissingDataError, MonthResult
+from litmus.research import ListResult
+from litmus.signals import load_events
+from litmus.store import JsonStore
+
+EVENTS = load_events()
+DAY = date(2026, 9, 11)  # 星期五
+READY = DataStatus(
+    ready=True,
+    reason="",
+    data_through="2026-09-11",
+    history_from="2016-01-04",
+    history_done=True,
+    unlock_months=(),
+    unlock_missing=(),
+    synced_at={},
+    unavailable={},
+)
+
+
+class FakeData:
+    """只实现检查要用的方法：股票数据 2016-01-04 ~ 2026-09-11，周末不开市，概念板块不可用。"""
+
+    def available_targets(self):
+        return (STOCK, SW_INDUSTRY)
+
+    def data_range(self, target=STOCK):
+        return date(2016, 1, 4), DAY
+
+    def get_trading_calendar(self, start, end):
+        return [start] if start == end and start.weekday() < 5 else []
+
+    def list_boards(self, board_type):
+        if board_type != SW_INDUSTRY:
+            raise MissingDataError("concept 当前不可用：没有权限")
+        return [
+            BoardInfo("801010.SI", "农林牧渔", SW_INDUSTRY),
+            BoardInfo("801780.SI", "银行", SW_INDUSTRY),
+        ]
+
+
+class NoData:
+    """结构、事件检查就该拦下的请求用它：一碰数据就说明检查顺序错了。"""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"这个请求不该读数据（{name}）")
+
+
+def no_sync():
+    raise AssertionError("这个测试不该同步")
+
+
+def make_client(tmp_path, ds=None, status=READY, job=None) -> TestClient:
+    services = Services(
+        ds=ds or FakeData(),
+        store=JsonStore(tmp_path),
+        events=EVENTS,
+        sync_job=job or SyncJob(no_sync),
+        data_status=lambda: status,
+    )
+    return TestClient(create_app(services))
+
+
+def stock_list(**extra) -> dict:
+    return {"shape": "stock_list", "as_of": DAY.isoformat(), **extra}
+
+
+def stock_history(event: dict) -> dict:
+    return {
+        "shape": "stock_history",
+        "target": {"code": "600519.SH"},
+        "event": event,
+        "time_range": {"from": "2025-01-01", "to": "2025-12-31"},
+    }
+
+
+def issues_of(response) -> dict:
+    body = response.json()
+    assert response.status_code == 200 and body["status"] == "needs_revision", body
+    return {issue["path"]: issue for issue in body["issues"]}
+
+
+def post(client: TestClient, spec: dict):
+    return client.post("/api/run", json={"spec": spec})
+
+
+# ── /api/run：先看数据够不够，再做确定性检查 ────────────────────
+
+
+def test_本地数据还不够_返回data_not_ready和同步进度(tmp_path):
+    status = replace(READY, ready=False, reason="还没有股票日频数据", data_through=None)
+    body = post(make_client(tmp_path, ds=NoData(), status=status), stock_list()).json()
+    assert body["status"] == "data_not_ready"
+    assert body["message"] == "还没有股票日频数据"
+    assert body["data"]["status"]["ready"] is False
+    assert body["data"]["sync"]["state"] == "idle"
+
+
+@pytest.mark.parametrize(
+    ("content", "path"),
+    [(b"{oops", None), (b"[1]", None), (b"{}", "spec"), (b'{"spec": {}, "extra": 1}', "extra")],
+)
+def test_请求体写错_返回中文说明而不是422(tmp_path, content, path):
+    client = make_client(tmp_path, ds=NoData())
+    response = client.post(
+        "/api/run", content=content, headers={"content-type": "application/json"}
+    )
+    assert path in issues_of(response)
+
+
+def test_结构问题逐条列出_说明是中文(tmp_path):
+    spec = stock_list(
+        as_of="2026-13-01", limit=0, colour="red", sort={"by": "$amount", "order": "up"}
+    )
+    issues = issues_of(post(make_client(tmp_path, ds=NoData()), spec))
+    assert issues["as_of"]["message"] == "日期要写成 YYYY-MM-DD"
+    assert issues["limit"]["message"] == "不能小于 1"
+    assert issues["colour"]["message"] == "不认识这一项"
+    assert issues["sort.order"]["message"] == "只能是 'asc'、'desc'"
+
+
+def test_不认识的形状(tmp_path):
+    issues = issues_of(post(make_client(tmp_path, ds=NoData()), {"shape": "chart"}))
+    assert "stock_history" in issues[None]["message"]
+
+
+def test_自己写的校验原样给出(tmp_path):
+    spec = stock_history({"preset_id": "limit_up"}) | {
+        "time_range": {"from": "2025-12-31", "to": "2025-01-01"}
+    }
+    issues = issues_of(post(make_client(tmp_path, ds=NoData()), spec))
+    assert issues["time_range"]["message"] == "回看区间的起点 2025-12-31 晚于终点 2025-01-01"
+
+
+def test_个股回看要用事件库里的事件(tmp_path):
+    spec = stock_history({"expr": "$is_limit_up"})
+    assert list(issues_of(post(make_client(tmp_path, ds=NoData()), spec))) == ["event.preset_id"]
+
+
+def test_事件参数越界_说明可选范围_不连带报表达式缺失(tmp_path):
+    spec = stock_history({"preset_id": "breakout_ma", "params": {"ma": 7}})
+    issues = issues_of(post(make_client(tmp_path, ds=NoData()), spec))
+    assert list(issues) == ["event.params.ma"]
+    assert issues["event.params.ma"]["allowed"]
+
+
+def test_不认识的事件编号_列出可选(tmp_path):
+    spec = stock_history({"preset_id": "no_such_event"})
+    issues = issues_of(post(make_client(tmp_path, ds=NoData()), spec))
+    assert "limit_up" in issues["event.preset_id"]["message"]
+
+
+def test_表达式写错_指出栏目和位置(tmp_path):
+    spec = stock_list(filter={"expr": "$close >"}, sort={"by": "$no_such_field"})
+    issues = issues_of(post(make_client(tmp_path), spec))
+    assert issues["filter.expr"]["position"] is not None
+    assert "sort.by" in issues
+
+
+def test_概念板块不可用时_板块表要换口径(tmp_path):
+    spec = {"shape": "board_list", "board_type": "concept", "as_of": DAY.isoformat()}
+    assert "board_type" in issues_of(post(make_client(tmp_path), spec))
+
+
+def test_日期不是交易日_或者超出本地数据(tmp_path):
+    client = make_client(tmp_path)
+    weekend = issues_of(post(client, stock_list(as_of="2026-09-06")))
+    assert weekend["as_of"]["message"] == "2026-09-06 不是交易日"
+    later = issues_of(post(client, stock_list(as_of="2026-09-14")))
+    assert later["as_of"]["message"] == "本地股票数据只覆盖 2016-01-04 ~ 2026-09-11"
+
+
+def test_行业名不存在_列出可选的行业(tmp_path):
+    issues = issues_of(post(make_client(tmp_path), stock_list(universe={"industry": "银行业"})))
+    assert issues["universe.industry"]["allowed"] == "农林牧渔、银行"
+
+
+# ── /api/run：计算与运行记录 ────────────────────────────────────
+
+
+def test_算完存运行记录_按编号取回(tmp_path, monkeypatch):
+    row = {"code": "600519.SH", "sort_value": float("nan")}
+    result = ListResult("stock_list", DAY, 1, ("code", "sort_value"), (row,), ("按成交额排",))
+    monkeypatch.setattr("litmus.api.routes.runs.run_research", lambda spec, ds: result)
+    client = make_client(tmp_path)
+
+    body = client.post("/api/run", json={"spec": stock_list(), "plan_id": "p1"}).json()
+    assert body["status"] == "done"
+    assert body["result"]["as_of"] == "2026-09-11"
+    assert body["result"]["rows"] == [
+        {"code": "600519.SH", "sort_value": None}
+    ]  # NaN 不是合法 JSON
+
+    record = client.get(f"/api/run/{body['run_id']}").json()
+    assert record["result"] == body["result"]
+    assert (record["status"], record["plan_id"], record["data_through"]) == (
+        "done",
+        "p1",
+        "2026-09-11",
+    )
+    assert record["spec"]["shape"] == "stock_list" and record["duration_ms"] >= 0
+
+
+def test_计算出错_存下失败记录_返回编号(tmp_path, monkeypatch):
+    def boom(spec, ds):
+        raise RuntimeError("炸了")
+
+    monkeypatch.setattr("litmus.api.routes.runs.run_research", boom)
+    client = make_client(tmp_path)
+    body = post(client, stock_list()).json()
+    assert body["status"] == "failed" and body["run_id"] in body["message"]
+    record = client.get(f"/api/run/{body['run_id']}").json()
+    assert (record["status"], record["error"], record["result"]) == (
+        "failed",
+        "RuntimeError: 炸了",
+        None,
+    )
+
+
+def test_计算时才发现数据缺口_让用户改条件_不存记录(tmp_path, monkeypatch):
+    def missing(spec, ds):
+        raise MissingDataError("本地股票日频缺 2020-03")
+
+    monkeypatch.setattr("litmus.api.routes.runs.run_research", missing)
+    issues = issues_of(post(make_client(tmp_path), stock_list()))
+    assert issues[None]["message"] == "本地股票日频缺 2020-03"
+    assert not list(tmp_path.rglob("*.json"))
+
+
+def test_取不存在的运行记录返回404(tmp_path):
+    response = make_client(tmp_path, ds=NoData()).get("/api/run/r20260914000000abcdef")
+    assert response.status_code == 404
+
+
+# ── 清单 ────────────────────────────────────────────────────────
+
+
+def test_事件清单带版本号(tmp_path):
+    body = make_client(tmp_path, ds=NoData()).get("/api/events").json()
+    assert body["library_version"] == EVENTS.version
+    assert [event["id"] for event in body["events"]] == [event.id for event in EVENTS.events]
+
+
+def test_板块清单(tmp_path):
+    client = make_client(tmp_path)
+    boards = client.get("/api/boards?type=sw_industry").json()["boards"]
+    assert boards[1] == {"code": "801780.SI", "name": "银行"}
+    assert client.get("/api/boards?type=concept").status_code == 409
+    assert client.get("/api/boards?type=industry").status_code == 400
+    assert client.get("/api/boards").status_code == 400
+
+
+# ── 同步 ────────────────────────────────────────────────────────
+
+
+class GatedSync:
+    """日频那一步等 gate 放行才落盘一个月。"""
+
+    def __init__(self):
+        self.gate = threading.Event()
+
+    def sync_all(self, start, end, manifest=None, steps=None, on_month=None):
+        if steps == ["daily"]:
+            self.gate.wait(timeout=5)
+            on_month(MonthResult("2026-09", 100, 8, (), False), 1, 1)
+        return {}
+
+
+def test_触发同步_不重复开_停止_查看进度(tmp_path):
+    fake = GatedSync()
+
+    @contextmanager
+    def opener():
+        yield fake
+
+    job = SyncJob(opener)
+    client = make_client(tmp_path, ds=NoData(), job=job)
+
+    body = client.post("/api/data/sync").json()
+    assert body["started"] is True and body["sync"]["state"] == "running"
+    assert client.post("/api/data/sync").json()["started"] is False
+    assert client.post("/api/data/sync/stop").json()["stopped"] is True
+    fake.gate.set()
+    assert job.wait(5)
+
+    body = client.get("/api/data/status").json()
+    assert body["sync"]["state"] == "stopped"
+    assert body["status"]["ready"] is True

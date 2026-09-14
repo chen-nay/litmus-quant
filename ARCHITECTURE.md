@@ -82,7 +82,8 @@
    DataService 只有一个实现，expr、research 是纯函数，都直接暴露类或函数
 6. **API 语义靠契约测试保证**。DataService、Store 各有一套契约测试，见 §2.4、§7
 7. **用 import-linter 自动检查**，违反依赖规则时 `lint-imports` 直接报错（第 2 步起接入 `make check`；
-   目前有 data、spec、expr、research 四个模块，下面的完整配置随模块出现逐步补上）：
+   下面的完整配置里和 llm 有关的两处等 llm 模块出现再补上，其余已在 pyproject.toml 里；
+   另有「只用下层模块的公开接口」的禁止规则，逐个模块列出不许碰的内部子模块）：
 
 ```toml
 [tool.importlinter]
@@ -117,14 +118,14 @@ layers = [
 
 | 模块 | 对外暴露 |
 |---|---|
-| data | `DataService`：`ds.get_fields()` / `ds.get_trading_calendar()` / `ds.latest_trading_day()` / `ds.data_range()` / `ds.available_targets()` / `ds.stock_info()` / `ds.get_index_daily()` / `ds.get_universe()` / `ds.get_universe_mask()` / `ds.list_boards()` / `ds.board_members()` / `ds.resolve_stock()` / `ds.resolve_board()`（第 7 步）；`DataSync`：`start()` / `status()`（本地数据状态、能否提问）；字段目录 `data.FIELDS` |
+| data | `DataService`：`ds.get_fields()` / `ds.get_trading_calendar()` / `ds.latest_trading_day()` / `ds.data_range()` / `ds.available_targets()` / `ds.stock_info()` / `ds.get_index_daily()` / `ds.get_universe()` / `ds.get_universe_mask()` / `ds.list_boards()` / `ds.board_members()` / `ds.resolve_stock()` / `ds.resolve_board()`（第 7 步）；`DataSync`：`open()`（按环境变量连上 Tushare，拿到数据目录的同步锁）/ `sync_all()` / `status()`（本地数据状态、能否提问）；字段目录 `data.FIELDS` |
 | spec | `spec.QuerySpec`（三种形状）、`spec.DEFAULTS`（默认值表）、`spec.render_assumptions()`（由 spec 生成确认卡说明） |
 | expr | `expr.parse()` / `expr.validate()` / `expr.collect_fields()` / `expr.collect_lookback()` / `expr.evaluate()`（返回结果与实际统计起点）；`expr.field_catalog()` / `expr.operator_catalog()`（供 llm 组装提示词） |
 | signals | `signals.load_events()` / `signals.render_event()` / `signals.event_catalog()`（事件库） |
 | research | `research.run(spec, ds)` |
 | llm | `llm.plan()` |
 | store | 见 §7 |
-| api | HTTP 接口，见 §6 |
+| api | `create_app()`：HTTP 接口，见 §6 |
 
 ### 1.4 一次查询的完整调用链
 
@@ -179,7 +180,7 @@ api ──→ store.save_run(spec, result) → 返回 {run_id, result}
 | 行情存储 | Parquet + DuckDB | 列式存储 + SQL 直查，用户可自行探索数据 |
 | 应用数据 | JSON 文件（一条记录一个文件） | 本地单用户、数据量小、可直接打开审计；接口保留以后换 SQLite 的能力，见 §7 |
 | LLM | anthropic SDK（base_url 可配） | 见 §5 |
-| 任务 | FastAPI BackgroundTasks | P0 不引入 Celery |
+| 任务 | 服务进程里的后台线程 | 只有同步一种后台任务，同一时间一个（§2.5）；P0 不引入 Celery |
 | 工程 | uv + pytest + ruff + import-linter | import-linter 把 §1.2 的依赖规则变成自动检查 |
 
 **不引入**：LangChain、LangGraph、Claude Agent SDK、Redis、PostgreSQL、SQLite。
@@ -481,10 +482,12 @@ token 填错返回 `code=2002`「token不对，您传过来的是…请确认」
 | 完整日判定 | 一个交易日的必需接口**全部**拉到才纳入当月面板，缺任何一个就中止这个月、不落盘。磁盘上因此不存在半天的数据，不必按天记账 |
 | 原子写入 | Parquet 先写临时文件再改名，避免读到写了一半的文件 |
 | 断点续传 | 以月为单位落盘：整月拉完才写文件并记入 manifest；中途关闭程序，没拉完的月份下次整月重来（一个月约 80 次调用，比维护半截文件划算） |
-| 增量同步 | **按月记账的数据只拉没走完的月份**：股票日频是当月，指数成分是本月和上月（发布有滞后，8/31 的快照 9/13 才看得到）。**其余每次整张重拉**：申万 / 概念 / 指数日线一个标的一次调用就覆盖全部历史，增量省不下调用；清单与成分要的就是最新快照；财务三表见下 |
+| 增量同步 | **按月记账的数据只拉没走完的月份**：股票日频是当月，指数成分是本月和上月（发布有滞后，8/31 的快照 9/13 才看得到）。**其余每次整张重拉**：申万 / 概念 / 指数日线一个标的一次调用就覆盖全部历史，增量省不下调用；清单与成分要的就是最新快照；财务三表见下。数据齐全时点一次同步实测约 6 分钟、1000 次请求（2026-09-14），大头是整张重拉的概念板块和财务，见 §11 |
 | 财务不做增量 | 2026-09-13 实测财务指标约 7% 的行是上市后补报的历史财务，公告日比报告期末晚一年以上（最长近 4 年），只重拉最近几期会漏；按公告日区间拉能收全，但接口文档把参数写成"报告期"，行为与文档不符，不为省两分钟冒险。整张重拉约 2.5 分钟 |
-| 限流与失败 | 按接口限速；失败自动重试，连续失败则暂停并在页面显示原因 |
-| 并发 | 同一时间只运行一个同步任务 |
+| 限流与失败 | 按接口限速；失败自动重试。重试之后仍然失败就停下整个同步，原因显示在同步进度里；用户再点一次同步从断点继续，不自动重来 |
+| 并发 | 同一时间只运行一个同步：服务进程内靠后台任务的状态，跨进程靠数据目录下的锁文件 `market/.sync.lock`（`DataSync.open()` 拿锁，命令行和网页服务都受它管；进程被杀掉时系统自动释放） |
+| 停止 | `POST /api/data/sync/stop`：每一步之间、日频每个月之间检查，已落盘的不受影响，下次同步从断点接着来。正在跑的那一步要先跑完（财务、概念板块一步两三分钟） |
+| 进度 | 只在服务进程的内存里：正在跑哪一步、已完成的步骤、日频第几个月 / 共几个月、开始结束时间、出错原因。服务重启就没了，但同步完的月份记在 manifest 里，数据不丢 |
 
 **同步从今天倒着往 2016 年拉，够用就解锁**：覆盖到最近两年（约 15 分钟）即可开始查询，更早的历史后台继续补。
 `/api/plan`、`/api/run` 先检查 `DataSync.status()`，最小可用区间还没到就返回 `data_not_ready`（附进度），
@@ -507,8 +510,8 @@ token 填错返回 `code=2002`「token不对，您传过来的是…请确认」
 
 `status()` 同时给出页面要显示的：数据截至哪天、历史已连续补到哪天、是否已补到 2016-01、两年里还缺哪几个月
 （`data_not_ready` 附带的进度）、各表最近同步时间、不可用的可选数据及原因。**「历史是否补完」从日频月份推导，
-manifest 不另存标记**：标记会和文件对不上（删了某个月的文件，标记还是 True）。同步中的实时进度（正在拉哪个月、
-限流等待）第 5 步有了后台任务再加。命令行 `python -m litmus.data --status` 只打印状态、不同步。
+manifest 不另存标记**：标记会和文件对不上（删了某个月的文件，标记还是 True）。同步中的实时进度（正在跑哪一步、
+日频第几个月）由 api 的后台同步任务给出，和 `status()` 一起从 `GET /api/data/status` 返回；限流等待暂不显示。命令行 `python -m litmus.data --status` 只打印状态、不同步。
 
 问题的回看窗口超出已覆盖区间时，走确认卡的可用区间提示——这与概念板块只有 2025-03 起的数据是同一套机制，
 不静默给出样本不足的结论。
@@ -1303,26 +1306,79 @@ POST /api/plan
         返回未执行的 QuerySpec，前端渲染成确认卡或澄清卡
 
 POST /api/run
-  body: { "spec": QuerySpec, "plan_id": "..." }
+  body: { "spec": QuerySpec, "plan_id": "..." }                # plan_id 可选
   resp: { "status": "done|needs_revision|data_not_ready|failed",
-          "issues": [...], "run_id": "...", "result": ListResult | HistoryResult }
-  说明：确定性检查（spec 校验、表达式校验、事件参数范围、数值范围）→ research.run()。
-        用户改过参数走同一套检查，不再调 LLM；assumptions 由 spec 重新生成
+          "issues": [{ "path", "message", "allowed", "position" }], "run_id": "...",
+          "result": ListResult | HistoryResult, "message": "...", "data": {...} }
+  说明：本地数据够不够（data_not_ready，data 里附数据状态和同步进度）→ 确定性检查（needs_revision）
+        → research.run() → 存运行记录。用户改过参数走同一套检查，不再调 LLM；assumptions 由 spec 重新生成（第 7 步）
 
 GET  /api/run/{run_id}
-  说明：轮询结果 / 分享链接打开
+  说明：运行记录（spec、结果或错误、数据截至、事件库版本、耗时）；分享链接打开。没有这条记录返回 404
 
 GET  /api/events
-  说明：事件库列表（供 UI 标签与示例展示）
+  resp: { "library_version": 1, "events": [...] }
+  说明：事件库列表（供 UI 标签与示例展示），和生成表达式用的是同一份定义
 
 GET  /api/boards?type=sw_industry|concept
-  说明：可用板块清单
+  resp: { "type": "...", "boards": [{ "code", "name" }] }
+  说明：可用板块清单。type 写错返回 400；概念板块不可用返回 409 和原因
 
 POST /api/data/sync
-  说明：启动后台同步（首次为 2016 年至今全部历史，之后只补缺口）；已在同步中则返回当前进度
+  resp: { "started": true|false, "sync": 同步进度 }
+  说明：启动后台同步（2016 年至今，缺什么补什么）；已在同步中则 started 为 false，照样返回当前进度
+
+POST /api/data/sync/stop
+  resp: { "stopped": true|false, "sync": 同步进度 }
+  说明：停止同步：正在跑的那一步或那个月跑完就停，见 §2.5
 
 GET  /api/data/status
-  说明：同步进度、本地数据覆盖范围、最近同步时间、各可选数据的可用状态、失败原因
+  resp: { "status": DataSync.status(), "sync": 同步进度 }
+  说明：本地数据覆盖范围、能不能提问、最近同步时间、各可选数据的可用状态。同步进度：state（idle / running /
+        stopping / stopped / failed / done）、正在跑的步骤、已完成的步骤、日频第几个月 / 共几个月、开始结束时间、出错原因
+```
+
+**`/api/run` 的检查**（第 5 步定）：
+
+- **请求体自己解析**：写错了也返回 `needs_revision` 和中文说明，不用 FastAPI 默认的 422。每条问题带栏目路径
+  （如 `filter.expr`、`event.params.ma`）、说明、可选范围、表达式里出错的位置
+- **按顺序查，前一类有问题就不往下**：
+  1. 事件：个股回看只能用事件库里的事件，按「编号 + 参数」重新生成表达式和标签，请求里带的不作数；缺编号、编号不存在、参数越界都在这一步
+  2. 结构：spec 的栏目、类型、数值范围，pydantic 的英文错误翻成中文
+  3. 表达式：写法和字段、算子白名单，标的类型当前可用
+  4. 数据：日期是交易日、在本地数据范围里；股票代码、申万行业名、概念板块代码本地查得到
+- 计算时才发现的数据缺口、预热期不够也返回 `needs_revision`：换个日期或区间就能算
+- 其他错误返回 `failed` 和运行记录编号，错误栈打在服务日志里
+- 运行记录成功、失败都存；`needs_revision`、`data_not_ready` 不存
+- 第 7 步之前 `target.code` 要直接填代码（带交易所后缀，如 `600519.SH`）
+
+**启动**：`uv run python -m litmus serve`，读仓库根目录的 `.env`，默认只监听 `127.0.0.1:8000`——接口没有登录，
+不对局域网开放。前端开发服务器的跨域第 6 步再配。
+
+**用 curl 验收**（`tests/contract/test_run_api.py` 用的是同样的请求）：
+
+```bash
+uv run python -m litmus serve        # 另开一个终端
+
+curl -s http://127.0.0.1:8000/api/data/status
+
+# 股票表：2026-09-11 涨幅超过 9% 的，按成交额取前 3
+curl -s http://127.0.0.1:8000/api/run -H 'content-type: application/json' \
+  -d '{"spec":{"shape":"stock_list","as_of":"2026-09-11","filter":{"expr":"$pct_chg > 9"},"sort":{"by":"$amount"},"limit":3}}'
+
+# 板块表：申万行业当天涨跌幅前 3
+curl -s http://127.0.0.1:8000/api/run -H 'content-type: application/json' \
+  -d '{"spec":{"shape":"board_list","board_type":"sw_industry","as_of":"2026-09-11","sort":{"by":"$pct_chg"},"limit":3}}'
+
+# 个股回看：平安银行 2025 年放量 3 倍之后 5 天、20 天
+curl -s http://127.0.0.1:8000/api/run -H 'content-type: application/json' \
+  -d '{"spec":{"shape":"stock_history","target":{"code":"000001.SZ"},"event":{"preset_id":"volume_surge","params":{"volume_ratio":3}},"time_range":{"from":"2025-01-01","to":"2025-12-31"},"horizons":[5,20]}}'
+
+curl -s http://127.0.0.1:8000/api/run/<run_id>
+
+# 触发同步会真实调用 Tushare（数据齐全时实测约 1000 次请求、6 分钟），先想清楚再跑
+curl -s -X POST http://127.0.0.1:8000/api/data/sync
+curl -s -X POST http://127.0.0.1:8000/api/data/sync/stop
 ```
 
 **性能预期**
@@ -1360,6 +1416,12 @@ class Store(Protocol):
 - **只有 store 知道文件在哪**：其他模块一律通过接口读写
 - **store 不认识 research 的类型**：`RunRecord.result` 是 dict，research 结果到 dict 的转换由 api 负责。
   store 与 research 同层，直接引用 `ListResult` / `HistoryResult` 会违反 §1.2 的依赖规则
+- **放在数据目录下**（`LITMUS_DATA_DIR` 或仓库下的 `data/`），和 `market/` 并列，不提交
+- **编号 = 类型字母 + 时间 + 随机后缀**：`p20260914153012a1b2c3`（计划）、`r…`（运行）。按编号排序就是按时间排序（精确到秒），
+  同一秒存几条也不撞。取记录时先核对编号格式，`../` 之类的读不到别的文件
+- **运行记录**（第 5 步定）：spec、状态（done / failed）、结果或错误、plan_id、数据截至日、事件库版本号、耗时、创建时间。
+  同步过新数据、事件库模板改过之后，同一个请求的结果会变，靠数据截至日和版本号对上当时的条件
+- 结果里的日期存成 `2026-09-11`；持有天数作 key 存成字符串 `"5"`（JSON 的限制）；NaN、无穷大存成 null
 
 以后换 SQLite：新增 `SqliteStore` 实现同一接口 → 通过同一套契约测试 → api 换一个类名，上层无需改动。
 
@@ -1408,10 +1470,16 @@ litmus/
 │   ├── base.py             # Store 接口 + PlanRecord / RunRecord
 │   └── json_store.py       # JSON 文件实现
 ├── api/                    # 依赖以上全部
-│   ├── main.py
-│   ├── routes/
+│   ├── main.py             # create_app()
+│   ├── services.py         # 启动时创建一次的依赖：ds、store、事件库、同步任务、数据状态
+│   ├── checks.py           # /api/run 的确定性检查
+│   ├── serialize.py        # 研究结果 → JSON
+│   ├── sync_job.py         # 后台同步：一次一个、可停止、出错停下、进度
+│   ├── routes/             # runs.py / catalog.py / data.py
 │   └── models.py           # HTTP 请求/响应模型
-└── cli.py                  # litmus serve；litmus sync 仅供开发调试
+├── env.py                  # 读 .env，入口调用
+├── __main__.py             # python -m litmus
+└── cli.py                  # litmus serve；同步的开发调试入口是 python -m litmus.data
 
 web/                        # React 前端
 tests/
@@ -1437,7 +1505,7 @@ Makefile
 | 2 | expr：parser / validator / collector / evaluator + 全部算子，支持股票与板块两类标的 | 小表格测试：`Cross`、`Mean`、`Rank` 等逐个验证 |
 | 3 | spec（三种形状 + 默认值表）+ research：股票表、板块表、个股回看 | 手工核对若干笔"之后 N 天涨跌"，含顺延与扣成本 |
 | 4 | signals：事件库 15 条 | TOML 加载，全部参数组合校验通过，都能跑出回看结果 |
-| 5 | store（JSON）+ FastAPI：`/api/run`（先不接 LLM，直接传 QuerySpec）+ `/api/data/sync`、`/api/data/status` | Postman 能跑出三种结果；能触发同步并查看进度 |
+| 5 | store（JSON）+ FastAPI：`/api/run`（先不接 LLM，直接传 QuerySpec）、`/api/run/{run_id}`、`/api/events`、`/api/boards` + `/api/data/sync`、`/api/data/sync/stop`、`/api/data/status` | curl 能跑出三种结果（§6，`tests/contract/test_run_api.py` 用同样的请求）；能触发同步、查看进度、停止（离线用假同步器测；2026-09-14 经接口真实同步一次，从 09-11 补到 09-14，6 分 5 秒） |
 | 6 | 前端：同步页 + 三种结果页 | 页面上能完成同步，并看到三种结果 |
 | 7 | `llm.plan()` + prompt 管理 + `ds.resolve_stock()` / `ds.resolve_board()` + 确认卡 / 澄清卡（说明文字由模板生成） | 自然语言能正确生成三种形状；编造字段被拦截；"平安"返回多个候选；"最近哪个板块最强"先澄清；"现在能买茅台吗"给改写建议；改完参数说明文字跟着变 |
 | 8 | Docker 打包 | 全新环境按 README 能完成部署、同步并正常使用 |
@@ -1463,6 +1531,9 @@ def test_mean():
 | DataService 契约 | 现算字段与股票池的规则用小表格测；契约在本地真实数据上跑，没有数据时跳过，见 §2.4 |
 | loader | 需要 token：单位换算正确；达到单次上限时自动分页；字段名或类型不符时报错 |
 | DataSync | 需要 token：中断后续传不重复不遗漏；增量同步只补缺口；能力探测结果正确写入 manifest |
+| 同步锁与后台同步 | 离线：同一个数据目录同时只能开一个同步，结束或打开失败后锁会放掉；假同步器上按顺序跑完、同一时间一个、月份之间停下、出错停下并记原因、没配 token 打不开（`tests/test_sync_all.py`、`tests/test_sync_job.py`） |
+| store 契约 | 存了能原样取回；编号格式、同一秒不撞；非法编号读不到别的文件；一条记录一个文件、不留临时文件；存不进 JSON 的不留文件（`tests/contract/test_store.py`） |
+| api | TestClient + 替身：请求体写错返回 `needs_revision` 而不是 422；结构、事件有问题时不读数据；中文说明、栏目路径、可选范围；计算出错存失败记录并返回编号；同步启动、不重复开、停止、查进度（`tests/test_api.py`）。本地真实数据上跑三种结果，数据量都很小（`tests/contract/test_run_api.py`） |
 | validator | 未来函数必须被拦截：`Ref($close, -1)` 应抛错；字段不在白名单、能力不可用时报错 |
 | collector | lookback 推导：并列取最大、嵌套累加、EMA 按 4n |
 | operators | 每个算子用小表格验证，特别是 `Cross` 的边界和 `Rank` 的空值处理 |
@@ -1504,6 +1575,7 @@ def test_mean():
 | 限售解禁（`share_float` → `$is_unlock_date`） | 数据量与收益不成比例。2026-09-13 实测：单个解禁日 22904 行，一个自然月超过 10 万行——**连一个月都拉不完**，翻到第 18 页就撞上代理的 offset 上限（offset=60000 正常、102000 被拒）。只能按天切，约 2600 个交易日、每天数页，而且这个接口扛不住并发、只能串行，估计十几个小时，只为换回一个布尔字段。归一逻辑 `normalize_share_float` 已经写好并有测试，P1 接上 DataSync 即可 |
 | 合成数据集（契约测试的离线版） | **待办，接 CI 或有别人参与开发时再做**。作用是让契约测试在没有数据的机器上也能跑：约 20 只股票 × 2 年，送转、停牌、ST、退市、一字涨停、财报更正、周末公告、换行业等各埋一例在已知日期，用假的 Tushare 返回喂给真实的 DataSync 落盘（列名、单位、布局和真实数据走同一段代码，不会对不上）。2026-09-14 决定推迟：单人开发、没有 CI、本机有完整数据，规则已由小表格测试覆盖、契约由本地真实数据覆盖，现在做价值不大 |
 | 排名放进时序算子（如「连续 3 天成交额排名前 10%」） | 要算对得读前几天全市场的截面，包括之后停牌、退市的股票；排名对象带窗口时，它们还要各自往前补行情，和「每只标的往前带够自己的行情」的读法对不上，需要单独一套读法。P0 校验时报错并说明原因；只看当天排名的写法不受影响 |
+| 减少增量同步的请求数 | **待办，要不要做再定**。2026-09-14 实测：经接口同步一次，从 09-11 补到 09-14，用了 6 分 5 秒，发出 1002 次请求，其中 72 次是撞限流后的重试，成功 930 次。按步骤：概念板块 542 次、3 分 17 秒，占一半以上时间（269 个板块的成分、日线各拉一次全量，限流重试 57 次，每次等 30~60 秒）；财务 214 次、1 分 31 秒（每次整张重拉）；申万行业 94 次、30 秒；股票日频 64 次、21 秒（当月 10 个交易日）；基础数据与指数 16 次、20 秒。能省的地方：板块日线改成按交易日增量拉（一次降到 600 次左右）；成分、财务不必每次都拉，但要重新定财务更正多久拉一次 |
 
 ---
 
