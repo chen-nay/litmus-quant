@@ -38,11 +38,14 @@ from litmus.data.fields import (
 from litmus.data.manifest import Manifest
 from litmus.data.storage import MarketStore, MissingDataError
 from litmus.data.sync import (
+    BENCHMARK_INDEXES,
     DAILY_DATASET,
     DISCLOSURE_TABLE,
     FINA_INDICATOR_TABLE,
     FORECAST_TABLE,
+    INDEX_DAILY_TABLE,
     INDEX_WEIGHT_DATASET,
+    NAMECHANGE_TABLE,
     STOCK_BASIC_TABLE,
     SW_DAILY_TABLE,
     SW_INDUSTRY_TABLE,
@@ -54,7 +57,7 @@ from litmus.data.sync import (
     DataSync,
     months_between,
 )
-from litmus.data.universe import BASES, industry_members, universe_mask
+from litmus.data.universe import BASES, industry_members, industry_of, universe_mask
 
 #: 读的时候现算、不在日频面板里的股票字段（规则见 derive.py）
 DERIVED_FIELDS = frozenset(
@@ -123,6 +126,78 @@ class DataService:
         能力只针对整类标的，所以表达式校验可以保持纯函数，调用方先用它判断标的能不能用（§3.4）。
         """
         return available_targets(Manifest.load(self._store))
+
+    # ── 股票信息与指数 ──────────────────────────────────────────
+
+    def stock_info(self, codes: Collection[str], as_of: date) -> pl.DataFrame:
+        """股票在 as_of 那天的名称、申万一级行业，以及上市日、退市日。
+
+        返回 (code, name, industry, list_date, delist_date)，按代码排序，每个代码一行；查不到的字段为空值，不报错。
+
+        - **名称取当天的**：曾用名表里 as_of 之后还有改名记录，说明 as_of 那天的名字已经收录，
+          就用当天生效的那条（开始日期最大的一条，§2.6）；否则用股票列表里的现用名。
+          曾用名表有滞后——2026-09-14 实测 688189.SH 已改名「ST南新」、000595.SZ 已改名「新能股份」，
+          曾用名表都还没收录——所以最近一次改名还没收录时，显示的是现用名
+        - 行业按当天的归属，规则同按行业选股（universe.industry_of）
+        """
+        chosen = sorted(set(codes))
+        frame = pl.DataFrame({"code": chosen}, schema={"code": pl.String})
+        basic = (
+            self._scan_table(STOCK_BASIC_TABLE)
+            .select("code", "name", "list_date", "delist_date")
+            .collect()
+        )
+        renames = (
+            self._scan_table(NAMECHANGE_TABLE)
+            .filter(pl.col("code").is_in(chosen))
+            .select("code", "name", "start_date")
+            .collect()
+            .unique()
+        )
+        renamed_later = renames.filter(pl.col("start_date") > as_of).select("code").unique()
+        name_then = (
+            renames.filter(pl.col("start_date") <= as_of)
+            .join(renamed_later, on="code", how="semi")
+            .sort("code", "start_date", "name")
+            .group_by("code", maintain_order=True)
+            .agg(pl.col("name").last().alias("_name_then"))
+        )
+        sw_member = self._scan_table(SW_MEMBER_TABLE).filter(pl.col("code").is_in(chosen)).collect()
+        industry_names = (
+            self._scan_table(SW_INDUSTRY_TABLE)
+            .select(pl.col("code").alias("industry_code"), pl.col("name").alias("industry"))
+            .collect()
+        )
+        belongs = (
+            industry_of(frame.with_columns(pl.lit(as_of).alias("date")), sw_member)
+            .join(industry_names, on="industry_code", how="left")
+            .select("code", "industry")
+        )
+        return (
+            frame.join(basic, on="code", how="left")
+            .join(name_then, on="code", how="left")
+            .with_columns(pl.coalesce("_name_then", "name").alias("name"))
+            .join(belongs, on="code", how="left")
+            .select("code", "name", "industry", "list_date", "delist_date")
+            .sort("code")
+        )
+
+    def get_index_daily(self, code: str, start: date, end: date) -> pl.DataFrame:
+        """宽基指数日线：(date, code, open, close)，按日期排序。个股回看把对照换成指数时用。
+
+        本地只同步了沪深300（000300.SH）和中证500（000905.SH）。
+        """
+        if code not in BENCHMARK_INDEXES:
+            raise ValueError(f"本地没有指数 {code} 的日线，可选 {list(BENCHMARK_INDEXES)}")
+        if start > end:
+            raise ValueError(f"起始日 {start} 晚于结束日 {end}")
+        return (
+            self._scan_table(INDEX_DAILY_TABLE)
+            .filter((pl.col("code") == code) & pl.col("date").is_between(start, end))
+            .select("date", "code", "open", "close")
+            .sort("date")
+            .collect()
+        )
 
     # ── 覆盖范围与交易日历 ──────────────────────────────────────
 

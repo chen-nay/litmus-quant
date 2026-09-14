@@ -329,3 +329,32 @@ def test_板块也能往前带(ds):
     table = ds.get_fields(["801010.SI"], day, day, ["close"], target="sw_industry", lookback=5)
     assert table.height == 6
     assert table.get_column("date").max() == day
+
+
+# ── 股票信息与指数 ──────────────────────────────────────────────
+
+
+def test_股票信息_名称和行业都按当天(ds):
+    """000595.SZ：2026-06-30 叫 *ST宝实、属于机械设备；2026-09-11 叫新能股份、属于公用事业。"""
+    before = ds.stock_info(["000595.SZ"], D(2026, 6, 30)).row(0, named=True)
+    after = ds.stock_info(["000595.SZ"], D(2026, 9, 11)).row(0, named=True)
+    assert (before["name"], before["industry"]) == ("*ST宝实", "机械设备")
+    assert (after["name"], after["industry"]) == ("新能股份", "公用事业")
+
+
+def test_股票信息_退市日_查不到的老代码照样返回(ds):
+    info = ds.stock_info(["600290.SH", "000022.SZ", "000001.SZ"], D(2018, 12, 19))
+    rows = {row["code"]: row for row in info.iter_rows(named=True)}
+    assert list(rows) == ["000001.SZ", "000022.SZ", "600290.SH"]
+    assert rows["600290.SH"]["delist_date"] == D(2024, 1, 16)
+    assert rows["000001.SZ"]["industry"] == "银行"
+    assert rows["000022.SZ"]["list_date"] is None  # 股票列表里没有这个老代码
+
+
+def test_指数日线(ds):
+    table = ds.get_index_daily("000300.SH", D(2026, 9, 10), D(2026, 9, 11))
+    assert table.columns == ["date", "code", "open", "close"]
+    assert table.height == 2
+    assert table.get_column("open").min() > 0
+    with pytest.raises(ValueError, match="000300.SH"):
+        ds.get_index_daily("000016.SH", D(2026, 9, 10), D(2026, 9, 11))

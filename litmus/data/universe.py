@@ -74,10 +74,8 @@ def index_members(days: pl.DataFrame, weights: pl.DataFrame, index_code: str) ->
     )
 
 
-def industry_members(
-    pool: pl.DataFrame, sw_member: pl.DataFrame, industry_code: str
-) -> pl.DataFrame:
-    """pool 里每一天属于这个申万行业的股票：(date, code)。
+def industry_of(pool: pl.DataFrame, sw_member: pl.DataFrame) -> pl.DataFrame:
+    """pool 里每只股票每一天所属的申万一级行业：(date, code, industry_code)。查不到归属的不出现。
 
     - 纳入日 <= 当天 <= 剔除日，**剔除日当天还算旧行业**：实测换行业最常见的是新行业的纳入日
       正好是旧行业剔除日的第二天（1542 次）
@@ -85,10 +83,8 @@ def industry_members(
       如 000595.SZ 机械设备（1996 起）与公用事业（2026-07-01 起）同时没有剔除日
     - 纳入日也相同就分不出来，报错。实测这样的 3 只股票 2016 年以来都没有行情，碰不到
     """
-    candidates = sw_member.filter(pl.col("industry_code") == industry_code).select("code").unique()
     active = (
         pool.select("date", "code")
-        .join(candidates, on="code", how="semi")
         .join(sw_member.select("code", "industry_code", "in_date", "out_date"), on="code")
         .filter(
             (pl.col("in_date") <= pl.col("date"))
@@ -106,7 +102,23 @@ def industry_members(
             f"申万行业归属有 {ties.height} 个 (日期, 股票) 同一天纳入了不同行业，分不出当天属于哪个，"
             f"如 {ties.sort('date', 'code').select('date', 'code').head(3).rows()}"
         )
-    return current.filter(pl.col("industry_code") == industry_code).select("date", "code").unique()
+    return current.select("date", "code", "industry_code").unique()
+
+
+def industry_members(
+    pool: pl.DataFrame, sw_member: pl.DataFrame, industry_code: str
+) -> pl.DataFrame:
+    """pool 里每一天属于这个申万行业的股票：(date, code)。归属规则见 industry_of。
+
+    只看曾经进过这个行业的股票：别的股票归属再乱，也影响不到这个行业的成分。
+    """
+    candidates = sw_member.filter(pl.col("industry_code") == industry_code).select("code").unique()
+    in_pool = pool.select("date", "code").join(candidates, on="code", how="semi")
+    return (
+        industry_of(in_pool, sw_member)
+        .filter(pl.col("industry_code") == industry_code)
+        .select("date", "code")
+    )
 
 
 def universe_mask(

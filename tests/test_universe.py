@@ -12,6 +12,7 @@ from litmus.data.storage import MissingDataError
 from litmus.data.universe import (
     index_members,
     industry_members,
+    industry_of,
     parse_exclude,
     universe_mask,
 )
@@ -183,3 +184,19 @@ def test_指数_行业_板块取交集():
 def test_不认识的股票池直接报错():
     with pytest.raises(ValueError, match="sz50"):
         universe_mask(traded(), base="sz50")
+
+
+def test_每只股票当天所属的行业():
+    sw = members(
+        ("A", "机械", D(1996, 4, 19), None),  # 旧归属没关闭
+        ("A", "公用", D(2026, 7, 1), None),
+        ("B", "银行", D(2000, 1, 1), None),
+    )
+    days = [D(2026, 6, 30), D(2026, 7, 1)]
+    pool = pl.DataFrame({"date": days * 3, "code": ["A", "A", "B", "B", "C", "C"]})
+    assert sorted(industry_of(pool, sw).rows()) == [
+        (D(2026, 6, 30), "A", "机械"),
+        (D(2026, 6, 30), "B", "银行"),
+        (D(2026, 7, 1), "A", "公用"),
+        (D(2026, 7, 1), "B", "银行"),
+    ]
