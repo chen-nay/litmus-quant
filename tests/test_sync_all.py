@@ -124,7 +124,7 @@ def test_status只打印状态不联网(tmp_path, monkeypatch, capsys):
     def no_network(*args, **kwargs):
         raise AssertionError("--status 不该连 Tushare")
 
-    monkeypatch.setattr("litmus.data.__main__.TushareClient", no_network)
+    monkeypatch.setattr("litmus.data.sync.TushareClient", no_network)
     monkeypatch.setenv("LITMUS_DATA_DIR", str(tmp_path))
 
     assert main(["--status"]) == 0
@@ -165,3 +165,45 @@ def os_environ(key: str) -> str | None:
     import os
 
     return os.environ.get(key)
+
+
+# ── 同步锁 ──────────────────────────────────────────────────────
+
+
+class DummyClient:
+    def __init__(self, config):
+        self.config = config
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return None
+
+
+def test_同一个数据目录同时只能有一个同步_结束后可以再开(tmp_path, monkeypatch):
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    monkeypatch.setattr("litmus.data.sync.TushareClient", DummyClient)
+    store = MarketStore(tmp_path)
+
+    with DataSync.open(store) as sync:
+        assert isinstance(sync, DataSync)
+        with pytest.raises(SyncError, match="另一个同步"):
+            with DataSync.open(store):
+                pass
+    with DataSync.open(store):
+        pass
+
+
+def test_没配token时打开同步器报错_锁也放掉(tmp_path, monkeypatch):
+    from litmus.data import TushareError
+
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+    monkeypatch.setattr("litmus.data.sync.TushareClient", DummyClient)
+    store = MarketStore(tmp_path)
+    with pytest.raises(TushareError, match="TUSHARE_TOKEN"):
+        with DataSync.open(store):
+            pass
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    with DataSync.open(store):
+        pass

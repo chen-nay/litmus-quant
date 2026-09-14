@@ -17,9 +17,8 @@ import logging
 import os
 import sys
 from datetime import date
-from pathlib import Path
 
-from litmus.data.loaders.tushare import MAX_CONCURRENCY, TushareClient, TushareConfig
+from litmus.data.loaders.tushare import MAX_CONCURRENCY
 from litmus.data.manifest import Manifest
 from litmus.data.storage import MarketStore
 from litmus.data.sync import (
@@ -30,21 +29,7 @@ from litmus.data.sync import (
     DataSync,
     MonthResult,
 )
-
-#: 仓库根目录下的 .env
-ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
-
-
-def load_env(path: Path = ENV_FILE) -> None:
-    """把 .env 读进 os.environ。已经设过的环境变量优先，不覆盖。"""
-    if not path.exists():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip())
+from litmus.env import load_env
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -118,8 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"区间：{args.start} ~ {end}，步骤：{' '.join(args.only or SYNC_STEPS)}\n", flush=True)
 
     try:
-        with TushareClient(TushareConfig.from_env()) as client:
-            sync = DataSync(client, store, workers=args.workers)
+        with DataSync.open(store, workers=args.workers) as sync:
             summary = sync.sync_all(
                 args.start, end, Manifest.load(store), steps=args.only, on_month=report_month
             )

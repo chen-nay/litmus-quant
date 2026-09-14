@@ -16,9 +16,11 @@
 from __future__ import annotations
 
 import calendar
+import fcntl
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -77,7 +79,12 @@ from litmus.data.loaders.normalize import (
     normalize_stk_limit,
     normalize_stock_st,
 )
-from litmus.data.loaders.tushare import MAX_CONCURRENCY, TushareAuthError
+from litmus.data.loaders.tushare import (
+    MAX_CONCURRENCY,
+    TushareAuthError,
+    TushareClient,
+    TushareConfig,
+)
 from litmus.data.manifest import Manifest
 from litmus.data.storage import MarketStore
 
@@ -208,6 +215,26 @@ class SyncError(RuntimeError):
     """同步中断。已经落盘的月份不受影响，重跑会从断点继续。"""
 
 
+@contextmanager
+def _sync_lock(store: MarketStore) -> Iterator[None]:
+    """数据目录下的锁文件：同一台机器上的两个进程（命令行、网页服务）不会同时同步同一个目录。
+
+    flock 在同一进程里用两个文件句柄去锁也会冲突，所以进程内重复打开同样拦得住。
+    进程退出（包括被杀掉）时系统自动释放，不会留下一把永远打不开的锁。
+    """
+    path = store.market / ".sync.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise SyncError(f"另一个同步正在使用 {store.market}，等它结束再试") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 @dataclass(frozen=True)
 class MonthResult:
     """一个月同步完的结果。`complete=False` 表示这个月还会再拉一次。"""
@@ -259,6 +286,22 @@ class DataSync:
         self._client = client
         self._store = store
         self._workers = workers
+
+    @classmethod
+    @contextmanager
+    def open(
+        cls, store: MarketStore | None = None, workers: int = MAX_CONCURRENCY
+    ) -> Iterator[DataSync]:
+        """按环境变量连上 Tushare，用完自动断开。没配 TUSHARE_TOKEN 抛 TushareError。
+
+        api 和命令行都从这里拿同步器，不直接碰 loaders（ARCHITECTURE §1.2 第 3 条）。
+        store 不传就用 LITMUS_DATA_DIR 或仓库下的 data/。
+
+        **同一个数据目录同一时间只允许一个同步**：命令行和网页服务都受这把锁管，拿不到锁抛 SyncError。
+        """
+        store = store or MarketStore.from_env()
+        with _sync_lock(store), TushareClient(TushareConfig.from_env()) as client:
+            yield cls(client, store, workers)
 
     # ── 状态 ────────────────────────────────────────────────────
 

@@ -17,24 +17,38 @@ from litmus.data.fields import (
     check_available,
     names_for,
 )
+from litmus.data.loaders.tushare import TushareError
 from litmus.data.service import BoardInfo, DataService
-from litmus.data.storage import MissingDataError
-from litmus.data.sync import DataStatus, DataSync
+from litmus.data.storage import MarketStore, MissingDataError
+from litmus.data.sync import (
+    HISTORY_START,
+    SYNC_STEPS,
+    DataStatus,
+    DataSync,
+    MonthResult,
+    SyncError,
+)
 
 __all__ = [
     "BOARD_TARGETS",
     "CONCEPT",
     "FIELDS",
+    "HISTORY_START",
     "INTERNAL_COLUMNS",
     "STOCK",
     "SW_INDUSTRY",
+    "SYNC_STEPS",
     "AmbiguousDataError",
     "BoardInfo",
     "DataService",
     "DataStatus",
     "DataSync",
     "Field",
+    "MarketStore",
     "MissingDataError",
+    "MonthResult",
+    "SyncError",
+    "TushareError",
     "UnknownFieldError",
     "available_targets",
     "check_available",
