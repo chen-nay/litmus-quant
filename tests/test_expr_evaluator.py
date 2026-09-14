@@ -7,8 +7,9 @@ from datetime import date, timedelta
 import polars as pl
 import pytest
 
+from litmus.expr.collector import collect_lookback
 from litmus.expr.evaluator import eval_ast
-from litmus.expr.parser import parse
+from litmus.expr.parser import onset, parse
 
 DAY0 = date(2026, 1, 5)
 
@@ -181,3 +182,11 @@ def test_不在池内的日子照样参与时序窗口():
     panel = pl.DataFrame({"code": ["B"] * 3, "date": days, "amount": [1.0, 2.0, 3.0]})
     pool = pl.DataFrame({"date": [days[0], days[2]], "code": ["B", "B"]})
     assert values("Mean($amount, 3)", panel, pool) == [None, None, 2.0]
+
+
+def test_事件只取由不满足变为满足的那一天():
+    """连续成立只算第一天。第一行没有前一天：不成立就是不满足（空值 & 假 = 假）。"""
+    node = onset(parse("$is_up"))
+    panel = one_stock(is_up=[False, True, True, False, True])
+    assert eval_ast(node, panel).get_column("value").to_list() == [False, True, False, False, True]
+    assert collect_lookback(node) == 1

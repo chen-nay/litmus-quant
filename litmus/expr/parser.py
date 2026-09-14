@@ -75,6 +75,17 @@ class Binary:
 Node = Number | Field | Call | Unary | Binary
 
 
+def onset(node: Node) -> Node:
+    """事件只取「由不满足变为满足」的那一天：cond & ~Ref(cond, 1)（ARCHITECTURE §4.3）。
+
+    连续 5 天创新高只算 1 次，三连板只在第 2 天触发一次。在语法树上包、不拼字符串：
+    拼字符串会让表达式长度翻倍，长一点的事件就超过 MAX_LENGTH。预热条数随之多 1。
+    """
+    at = node.position
+    previous = Call("Ref", (node, Number(1.0, "1", at)), at)
+    return Binary("&", node, Unary("~", previous, at), at)
+
+
 # ── 词法 ────────────────────────────────────────────────────────
 
 

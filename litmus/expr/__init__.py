@@ -7,7 +7,7 @@ from litmus.expr.catalog import field_catalog, operator_catalog
 from litmus.expr.collector import collect_fields, collect_lookback
 from litmus.expr.evaluator import Evaluation, ExprDataError, evaluate
 from litmus.expr.operators import MAX_LOOKBACK, MAX_WINDOW
-from litmus.expr.parser import ExprSyntaxError, Node, parse
+from litmus.expr.parser import ExprSyntaxError, Node, onset, parse
 from litmus.expr.validator import ExprValidationError, Issue, ValidationResult, validate
 
 __all__ = [
@@ -24,6 +24,7 @@ __all__ = [
     "collect_lookback",
     "evaluate",
     "field_catalog",
+    "onset",
     "operator_catalog",
     "parse",
     "validate",

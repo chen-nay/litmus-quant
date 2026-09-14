@@ -112,7 +112,7 @@ class Evaluation:
 
 
 def evaluate(
-    expr: str,
+    expr: str | Node,
     purpose: str,
     universe: pl.DataFrame,
     start: date,
@@ -133,7 +133,7 @@ def evaluate(
     """
     if start > end:
         raise ValueError(f"起始日 {start} 晚于结束日 {end}")
-    node = parse(expr)
+    node = parse(expr) if isinstance(expr, str) else expr  # 语法树：比如事件包过 onset 的
     validate(node, target, purpose).raise_if_invalid()
     fields = sorted(collect_fields(node))
     full = collect_lookback(node)
