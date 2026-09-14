@@ -82,7 +82,7 @@
    DataService 只有一个实现，expr、research 是纯函数，都直接暴露类或函数
 6. **API 语义靠契约测试保证**。DataService、Store 各有一套契约测试，见 §2.4、§7
 7. **用 import-linter 自动检查**，违反依赖规则时 `lint-imports` 直接报错（第 2 步起接入 `make check`；
-   目前只有 expr、data 两个模块，下面的完整配置随模块出现逐步补上）：
+   目前有 data、spec、expr、research 四个模块，下面的完整配置随模块出现逐步补上）：
 
 ```toml
 [tool.importlinter]
@@ -117,7 +117,7 @@ layers = [
 
 | 模块 | 对外暴露 |
 |---|---|
-| data | `DataService`：`ds.get_fields()` / `ds.get_trading_calendar()` / `ds.latest_trading_day()` / `ds.data_range()` / `ds.available_targets()` / `ds.get_universe()` / `ds.get_universe_mask()` / `ds.list_boards()` / `ds.board_members()` / `ds.resolve_stock()` / `ds.resolve_board()`（第 7 步）；`DataSync`：`start()` / `status()`（本地数据状态、能否提问）；字段目录 `data.FIELDS` |
+| data | `DataService`：`ds.get_fields()` / `ds.get_trading_calendar()` / `ds.latest_trading_day()` / `ds.data_range()` / `ds.available_targets()` / `ds.stock_info()` / `ds.get_index_daily()` / `ds.get_universe()` / `ds.get_universe_mask()` / `ds.list_boards()` / `ds.board_members()` / `ds.resolve_stock()` / `ds.resolve_board()`（第 7 步）；`DataSync`：`start()` / `status()`（本地数据状态、能否提问）；字段目录 `data.FIELDS` |
 | spec | `spec.QuerySpec`（三种形状）、`spec.DEFAULTS`（默认值表）、`spec.render_assumptions()`（由 spec 生成确认卡说明） |
 | expr | `expr.parse()` / `expr.validate()` / `expr.collect_fields()` / `expr.collect_lookback()` / `expr.evaluate()`（返回结果与实际统计起点）；`expr.field_catalog()` / `expr.operator_catalog()`（供 llm 组装提示词） |
 | signals | `signals.load_events()`（事件库） |
@@ -246,6 +246,13 @@ class DataService:
 
     def available_targets(self) -> tuple[str, ...]:
         """当前能用的标的类型（概念板块要能力探测通过）。表达式校验之前，调用方先用它判断标的能不能用"""
+
+    def stock_info(self, codes: list[str], as_of: date) -> pl.DataFrame:
+        """(code, name, industry, list_date, delist_date)：as_of 当天的名称与申万一级行业，上市日、退市日。
+        名称规则见 §2.6 曾用名；查不到的字段为空值"""
+
+    def get_index_daily(self, code: str, start: date, end: date) -> pl.DataFrame:
+        """沪深300 / 中证500 日线 (date, code, open, close)，个股回看换成指数对照时用"""
 
     def resolve_stock(self, text: str) -> list[StockMatch]:
         """股票提及 → 候选股票列表。规则见 §2.3"""
@@ -601,7 +608,7 @@ data/                                  # 默认在仓库根目录（已 gitignor
 | 次新股 | 上市后的前 60 个交易日（含上市当天）标记 `is_new`，默认排除。按交易日历数，停牌的日子也算上市的日子；非交易日上市的从下一个交易日算第一天。上市早于本地交易日历起点（2016 年）的不算次新 |
 | 北交所 | **数据照常落盘，在股票池这一层排除**。Tushare 按日返回的数据里本来就含北交所（实测某日 `daily_basic` 5550 行中有 `.BJ` 代码），落盘时丢掉的话，将来想放开就得重新同步十年；存下来则只是改一条股票池规则。理由见 §2.5 |
 | 交易日历 | 所有"N日"一律指**交易日**，不是自然日。这是确认卡必须澄清的项 |
-| 曾用名 | `namechange` 会返回**整行重复**的记录（实测全量 34749 行里 14263 行重复；单只股票只有 12 行、根本不翻页也照样重复，是数据源本身的问题），落盘前整行去重。另外 `end_date` 为空**不**等于现用名——去重后仍有股票存在多行 `end_date` 为空，最多一只 8 行；判断现用名要取 `start_date` 最大的那一行 |
+| 曾用名 | `namechange` 会返回**整行重复**的记录（实测全量 34749 行里 14263 行重复；单只股票只有 12 行、根本不翻页也照样重复，是数据源本身的问题），落盘前整行去重。另外 `end_date` 为空**不**等于现用名——去重后仍有股票存在多行 `end_date` 为空，最多一只 8 行；判断现用名要取 `start_date` 最大的那一行。**曾用名表有滞后**：2026-09-14 实测 688189.SH 已改名「ST南新」、000595.SZ 已改名「新能股份」，曾用名表都还没收录。所以 `ds.stock_info` 取当天名称时，as_of 之后还有改名记录才用曾用名表里当天生效的那条，否则用股票列表里的现用名 |
 | 指数成分 | `index_weight` **有发布滞后**：2026-09-13 实测最新快照是 8/31，9 月的窗口返回 0 行。取「某日的成分」必须用**当日及之前最近一期**快照，按当月去找会拿到空集，股票池静默变空。两个指数的快照频率也不同：沪深300 每月两个、中证500 每月一个，是数据源本身的差异，不是漏拉。**早于第一期快照（2016-01-29）的日子直接报错**：本地数据从 2016 年起，不为这 19 个交易日往前补拉 2015 年；给空池子会答出「沪深300里没有满足条件的股票」这种错的结论 |
 | 公告日事件 | `$is_report_date` / `$is_forecast_date`：公告那天该股票有行情就标在当天，否则**顺延到它下一个有行情的交易日**——周末、节假日、停牌期间发的公告，市场要到下一次交易才反应得到，2026-09-14 实测约 27% 的披露日、29% 的预告日落在该股票没有行情的日子，不顺延就在稀疏面板里丢了。公告时还没上市的不标 |
 | 除权除息日 | 复权因子比该股票上一条行情**涨了 0.05% 以上**才算，停牌期间除权的标在复牌那天。实测复权因子「变小」1.26 万次，几乎全在 0.05% 以内——数据源小数位数时三时四造成的舍入抖动，同样幅度的「变大」也是噪声；0.05%~0.1% 这档变大 826 次、变小只有 105 次 |
@@ -913,6 +920,11 @@ def evaluate(expr: str, purpose: str, universe: pl.DataFrame, start: date, end: 
 - `universe.base = all_a` 指沪深 A 股（不含北交所）；`universe.industry` 为申万行业名，按每个交易日当时的归属取成分；
   `universe.board` 形如 `{"type": "concept", "code": "880728.TDX"}`，P0 用当前成分，必须写进 assumptions
 
+**结构校验**（spec 模块用 Pydantic，2026-09-14 定）：多写了不认识的字段直接报错（大模型把 `limit` 写成 `top_n` 不能悄悄用默认值顶上）；
+前 N 名 1~500，默认 50；持有天数 1~250 个交易日、最多 10 档，自动去重升序，默认 5/20/60；成本 0~500 个基点，默认 30；
+对照口径只能是 `universe_equal_weight`、`index:000300.SH`、`index:000905.SH`；回看区间起点不能晚于终点。
+spec 只查结构，表达式对不对由 `expr.validate()` 管。`target.code` 可以为空（大模型的输出），研究计算时必须有
+
 ### 4.2 股票表与板块表
 
 ```
@@ -924,7 +936,10 @@ def evaluate(expr: str, purpose: str, universe: pl.DataFrame, start: date, end: 
 
 - 筛选和排序都可以为空：只筛选（不排序按成交额降序）、只排序（"涨幅前 50"）、两者都有
 - 股票池按 `as_of` 当天的状态确定（PIT）：剔除 ST、停牌、次新，以及不在指定行业/指数中的股票
-- 排序值为空的标的不进排序结果
+- 排序值为空的标的不进排序结果，同分按代码排；结果附带提示（没指定排序、有几只排序值为空）
+- **排序依据在整个股票池上算**，再取出满足筛选条件的那些：`Rank` 的范围是股票池，先筛选再排名就成了只在筛选结果里排
+- 只排序不筛选时整个股票池参与；两个都没有就是「成交额前 N」；`total` 是满足筛选条件的只数（取前 N 之前）
+- 名称和行业都按 `as_of` 当天（`ds.stock_info`）；截止日不是交易日直接报错
 - 板块表的"股票池"就是该口径下的全部板块
 
 ### 4.3 个股回看
@@ -953,6 +968,7 @@ def evaluate(expr: str, purpose: str, universe: pl.DataFrame, start: date, end: 
 `cond & ~Ref(cond, 1)`。否则像"创 250 日新高""缩量回调""连板"这类会连续多天成立的条件，
 同一段行情会被重复计入，相邻触发的观察窗口也几乎完全重叠。加上这层包装后，连续 5 天创新高只算 1 次，
 三连板只在第 2 天触发一次（第 3 天因为前一天已经成立而不再触发）。
+包装在语法树上做（`expr.onset`），不拼字符串：拼字符串会让表达式长度翻倍，长一点的事件就超过 500 字符上限。
 
 **事件表达式由代码渲染，LLM 不写**：`builtin.yaml` 里每个事件是一段带参数占位的模板，`llm.plan()` 只输出
 `preset_id` 和 `params`，表达式由代码渲染。这样"参数和表达式对不上"这种错误从根上不可能发生。
@@ -985,11 +1001,14 @@ def evaluate(expr: str, purpose: str, universe: pl.DataFrame, start: date, end: 
 
 | 细节 | 处理 |
 |---|---|
-| **买入顺延** | 次日开盘涨停（开盘价 = 涨停价）或停牌 → 顺延到第一个"开盘未涨停且未停牌"的交易日 |
+| **买入顺延** | 次日开盘涨停（开盘价 = 涨停价）或停牌 → 顺延到第一个"开盘未涨停且未停牌"的交易日。2026-09-14 实测「涨停」事件第二天买有 8.3% 要顺延，全市场随便哪天买只有 0.4% |
 | **卖出顺延** | 第 N 天跌停（收盘价 = 跌停价）或停牌 → 顺延到第一个"未跌停且未停牌"的交易日 |
-| **顺延上限** | 顺延超过 20 个交易日（长期停牌）→ 标记为"无法成交"，不计入平均，在明细中说明 |
-| **未走完样本** | 触发日 + N 日超出数据末日 → 标记"观察中"，不计入平均 |
-| **退市** | 持仓期内退市按退市整理期最后价格计算 |
+| **顺延上限** | 顺延超过 20 个交易日（长期停牌）→ 标记为"无法成交"，不计入平均，在明细中说明。顺延正好 20 天仍算成交 |
+| **观察中** | 买入日或**顺延之后的实际卖出日**落在本地数据末日之后 → 标记"观察中"，不计入平均；停牌到数据末日还不满 20 天的也算观察中。原写法「触发日 + N 日超出数据末日」没算上顺延，而且卖出日是从买入日起数的 |
+| **退市** | 持有期内退市、之后再也卖不出去（股票列表有退市日）→ 按退市前最后一个交易日的收盘价结算，**计入平均**；卖出顺延期间遇到退市同样处理。触发之后已经退市、买不进的算无法成交 |
+| **缺涨跌停价** | 2016~2019 年 886 行数据源缺涨跌停价，判断不了涨跌停：按可以成交处理，备注写明 |
+
+**每一笔的结局**只有四种：完成、退市（计入平均），无法成交、观察中（不计入，分别计数并出提示）。
 
 每一次触发都记录顺延情况，接口返回，前端在明细表的"备注"列显示（如"买入顺延 1 天（涨停）"）。
 
@@ -997,8 +1016,10 @@ def evaluate(expr: str, purpose: str, universe: pl.DataFrame, start: date, end: 
 
 | 对照 | 算法 |
 |---|---|
-| 同期市场平均（默认） | 取**这次触发实际的买入日与卖出日**，对当日股票池内全部股票用同一段日历窗口算涨跌，等权平均。对照股票不各自顺延——两边比较的必须是同一段时间。**买入日或卖出日停牌、拿不到价格的股票，从这一次对照中剔除**，并记录剔除只数 |
-| 这只股票平时的平均 | 统计区间内每一个交易日都当作起点，用同样的起止算法算之后 N 天涨跌，取平均。不排除触发日，不扣成本 |
+| 同期市场平均（默认） | 取**这次触发实际的买入日与卖出日**，对**买入日**的股票池（全A，剔除 ST、停牌、次新，和股票表默认一致）内全部股票用同一段日历窗口算涨跌，等权平均。对照股票不各自顺延——两边比较的必须是同一段时间。**持有期内退市的按最后价格算进去**，和被回看的股票同一口径：剔掉的话市场平均会被系统性抬高（2026-09-14 实测持有 60 天、每次 0~25 只退市，最多高估约 0.1 个百分点）。卖出日停牌、拿不到价格的剔除，并记录剔除只数 |
+| 这只股票平时的平均 | 统计区间（实际统计起点 ~ 截止日）里这只股票每个有行情的交易日都当作起点，用同样的买卖、顺延、退市规则算之后 N 天涨跌，只取计入平均的那些求平均。不排除触发日，不扣成本 |
+
+**跑赢比例**只统计自身涨跌和同期对照都算得出来的触发。
 
 **为什么默认等权而不是沪深300**：等权池平均和触发股票同池、同算法，回答的正是"随便买一只是不是也这样"。
 沪深300 是大盘股市值加权，拿它对照一只小盘股的触发，差异大半来自风格而不是信号。
@@ -1009,9 +1030,12 @@ def evaluate(expr: str, purpose: str, universe: pl.DataFrame, start: date, end: 
 ```python
 @dataclass
 class ListResult:              # 股票表 / 板块表
+    shape: str                 # stock_list / board_list
     as_of: date
-    rows: list[Row]            # 代码、名称、展示列
-    total: int                 # 满足条件的总数（取前 N 之前）
+    total: int                 # 满足筛选条件的总数（取前 N 之前）
+    columns: tuple[str, ...]   # 展示列，按顺序
+    rows: tuple[dict, ...]     # 代码、名称、行业（股票才有）、排序值、展示列
+    notes: tuple[str, ...]     # 如"没有指定排序，按成交额从高到低排"
 
 @dataclass
 class HistoryResult:           # 个股回看
@@ -1019,30 +1043,35 @@ class HistoryResult:           # 个股回看
     name: str
     event_label: str
     range: tuple[date, date]   # 实际统计区间（已扣掉预热期）
-    triggers: list[TriggerRecord]
+    benchmark: str
+    cost_bps: float
+    triggers: tuple[TriggerRecord, ...]
     summary: dict[int, HorizonSummary]      # key 是 5 / 20 / 60
-    n_excluded: dict           # {"无法成交": 1, "观察中": 2}
-    notes: list[str]           # 如"仅 23 次，样本偏少"
+    notes: tuple[str, ...]     # 如"仅触发 12 次，样本偏少"
 
 @dataclass
 class TriggerRecord:
     trigger_date: date
-    entry_date: date
-    entry_delay: Delay | None  # {days, reason: "涨停" | "停牌"}
-    exit_date: dict[int, date]
+    entry_date: date | None
+    entry_delay: Delay | None  # {days, reason: "涨停" | "停牌" | "涨停、停牌"}
+    status: dict[int, str]     # 完成 / 退市 / 无法成交 / 观察中
+    exit_date: dict[int, date | None]
     exit_delay: dict[int, Delay | None]
-    returns: dict[int, float]          # 未扣成本
-    market_returns: dict[int, float]   # 同期市场平均（同一段日历窗口）
-    market_excluded: dict[int, int]    # 对照中因停牌拿不到价格而剔除的股票只数
+    returns: dict[int, float | None]         # 未扣成本
+    market_returns: dict[int, float | None]  # 同期对照（同一段日历窗口）
+    market_excluded: dict[int, int]          # 对照中因卖出日停牌拿不到价格而剔除的股票只数
+    notes: tuple[str, ...]     # 如"持有期内退市，按退市前最后一个交易日的收盘价结算"
 
 @dataclass
-class HorizonSummary:
+class HorizonSummary:          # 只算「完成」「退市」的笔数
     n: int
     mean_return: float             # 未扣成本
     mean_return_after_cost: float  # 扣掉 cost_bps 之后
-    mean_market_return: float      # 同期市场平均
+    mean_market_return: float      # 同期对照
     mean_baseline_return: float    # 这只股票平时的平均
-    win_rate: float                # 相对同期市场跑赢的比例
+    win_rate: float                # 相对同期对照跑赢的比例
+    unfilled: int                  # 无法成交
+    pending: int                   # 观察中
 ```
 
 **P0 不做显著性检验、不给"有效性"结论**（§11）。
@@ -1052,11 +1081,16 @@ class HorizonSummary:
 固定模板加数字填空，不经过 LLM：
 
 ```python
-if n_triggers < 20:
+if n_triggers == 0:
+    note("{start} ~ {end} 里这个事件一次都没有触发")
+elif n_triggers < 20:
     note("仅触发 {n} 次，样本偏少，不能排除是运气")
 
-if n_excluded["无法成交"] > 0:
-    note("{k} 次因长期停牌无法成交，未计入平均")
+for horizon, summary in summaries:              # 每档持有天数各提示一次
+    if summary.unfilled > 0:
+        note("持有 {horizon} 天：{k} 次因长期停牌无法成交，未计入平均")
+    if summary.pending > 0:
+        note("持有 {horizon} 天：{k} 次还没走完（卖出日在 {latest} 之后），未计入平均")
 ```
 
 ---
@@ -1171,6 +1205,9 @@ DEFAULTS = {
     "top_n": 50,                    # "前N名"没说 N 时取多少
     "volume_means": "amount",       # "成交量"默认理解为成交额
     "cost_bps": 30,                 # 交易成本，买卖双边合计
+    "horizons": (5, 20, 60),        # 个股回看默认看之后几个交易日
+    "exclude": ("ST", "suspended", "new_listing_60d"),  # 股票池默认剔除
+    "benchmark": "universe_equal_weight",  # 个股回看默认对照：买入日全A等权
 }
 ```
 
@@ -1418,6 +1455,7 @@ def test_mean():
 | 空值与非有限值 | `~($pe_ttm > 10)` 不会选中市盈率为空的股票；除以 0、Log 非正数得到空值，不会被当成极大值选中或排第一 |
 | 预热期与股票池 | 停过牌的股票预热期按它自己的行情补够，不会因为行数不够被悄悄剔掉；`Rank` 只在当天池内排，不在池内的日子照样参与时序窗口 |
 | expr 契约 | 在本地真实数据上核对：停牌股预热补够、股票表结果与长历史直接计算一致、MACD 按 8n 预热与完整历史一致、实际统计起点（`tests/contract/test_expr.py`） |
+| research 契约 | 本地真实数据上手工核对：涨停后一字板买入顺延、长期停牌无法成交、持有期内退市按最后价格、MACD 回看的统计起点与自身涨跌、全A等权与沪深300 对照、观察中；股票表的总数、排名范围、空排序值（`tests/contract/test_history.py`、`test_screener.py`） |
 | returns | 手工构造 5 个触发点，核对起止价格、买入/卖出顺延、扣成本、无法成交的剔除 |
 | history | 事件只在"由不满足变为满足"那天触发（连续成立不重复计、三连板只算一次）；同期市场平均与这只股票平时平均的计算口径 |
 | screener | 股票表 / 板块表：筛选、排序、取前 N；板块字段正确路由到板块数据表 |
