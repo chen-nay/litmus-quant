@@ -58,6 +58,11 @@ def test_起始日晚于结束日直接报错(ds):
         ds.get_fields(None, DAY, date(2026, 9, 1), ["close"])
 
 
+def test_往前带的条数不能是负数(ds):
+    with pytest.raises(ValueError, match="lookback"):
+        ds.get_fields(None, DAY, DAY, ["close"], lookback=-1)
+
+
 def test_不认识的股票池直接报错(ds):
     with pytest.raises(ValueError, match="sz50"):
         ds.get_universe_mask(DAY, DAY, base="sz50")

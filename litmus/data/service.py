@@ -73,6 +73,14 @@ _EVENT_SOURCES: dict[str, tuple[str, str]] = {
 #: 板块标的 → 板块日线表
 _BOARD_DAILY: dict[str, str] = {SW_INDUSTRY: SW_DAILY_TABLE, CONCEPT: TDX_DAILY_TABLE}
 
+#: 涨跌停相关的布尔列
+_LIMIT_FLAGS = frozenset({"is_limit_up", "is_limit_down", "open_limit_up"})
+
+#: 涨停价不低于这个数，说明当天不设涨跌幅限制。2026-09-14 实测上市首日、退市整理期这类日子，数据源把涨停价填成
+#: 99999.999、100000、999999.999、1000000（共 6886 行，其中 115 行跌停价为空，跌停标记跟着成了空值）。
+#: A 股没有接近 1 万元的股价
+NO_LIMIT_PRICE = 10_000
+
 
 @dataclass(frozen=True)
 class BoardInfo:
@@ -86,6 +94,19 @@ def _previous_month(month: str) -> str:
     return f"{year - 1}-12" if mon == 1 else f"{year}-{mon - 1:02d}"
 
 
+def _trim_before(rows: pl.DataFrame, start: date, lookback: int) -> pl.DataFrame:
+    """留下 start 起的行，再给这些标的各留 start 之前自己最近的 lookback 条。"""
+    in_range = rows.filter(pl.col("date") >= start)
+    if lookback == 0:
+        return in_range
+    earlier = (
+        rows.filter(pl.col("date") < start)
+        .join(in_range.select("code").unique(), on="code", how="semi")
+        .filter(pl.col("date").rank("ordinal", descending=True).over("code") <= lookback)
+    )
+    return pl.concat([earlier, in_range])
+
+
 class DataService:
     """读本地数据。只有这一个实现，不做抽象接口（§1.2）。"""
 
@@ -95,6 +116,13 @@ class DataService:
     @classmethod
     def from_env(cls) -> DataService:
         return cls(MarketStore.from_env())
+
+    def available_targets(self) -> tuple[str, ...]:
+        """当前能用的标的类型：股票、申万行业总是有，概念板块要能力探测通过。
+
+        能力只针对整类标的，所以表达式校验可以保持纯函数，调用方先用它判断标的能不能用（§3.4）。
+        """
+        return available_targets(Manifest.load(self._store))
 
     # ── 覆盖范围与交易日历 ──────────────────────────────────────
 
@@ -145,11 +173,15 @@ class DataService:
         end: date,
         fields: Sequence[str],
         target: str = STOCK,
+        lookback: int = 0,
     ) -> pl.DataFrame:
         """统一取数入口：长表 (date, code, <fields…>)，按 (date, code) 排序，字段列按 fields 的顺序。
 
         - codes 为 None 表示这类标的的全部
-        - 股票价格一律后复权；财务按公告日对齐；事件、状态为布尔值，没有空值
+        - 股票价格一律后复权；财务按公告日对齐；事件、状态为布尔值。涨跌停标记只在数据源缺了涨跌停价的日子
+          为空值（2016~2019 年 886 行，判断不了、不猜）；不设涨跌幅限制的日子（上市首日、退市整理期等）都是 False
+        - lookback：每只标的再往前带上**它自己的**最多 lookback 条行情（停牌日不算，不够就有多少带多少）。
+          这些行早于 start，给表达式引擎预热用，算完由调用方截掉。按交易日历往前推会让停过牌的股票凑不够（§3.6）
         - 停牌日没有行（面板不补齐，§2.2）
         - 股票可以取 research 用的内部列（INTERNAL_COLUMNS）。表达式碰不到它们，由 expr 的校验器按 FIELDS 拦
         - 字段不在 FIELDS 里、不属于这类标的、这类标的当前不可用、区间超出本地数据，一律报错，不返回空列
@@ -162,39 +194,49 @@ class DataService:
         for name in wanted:
             if not (target == STOCK and name in INTERNAL_COLUMNS):
                 check_available([name], target)
+        if lookback < 0:
+            raise ValueError(f"lookback 不能是负数，收到 {lookback}")
         self._check_range(start, end, target)
         chosen = None if codes is None else sorted(set(codes))
 
         if target == STOCK:
-            table = self._stock_fields(chosen, start, end, wanted)
+            table = self._stock_fields(chosen, start, end, wanted, lookback)
         else:
-            query = self._scan_table(_BOARD_DAILY[target]).filter(
-                pl.col("date").is_between(start, end)
-            )
+            # 板块日线整张才十万行上下，直接读到 end 再截
+            query = self._scan_table(_BOARD_DAILY[target]).filter(pl.col("date") <= end)
             if chosen is not None:
                 query = query.filter(pl.col("code").is_in(chosen))
-            table = query.select("date", "code", *wanted).collect()
+            table = _trim_before(query.select("date", "code", *wanted).collect(), start, lookback)
         return table.select("date", "code", *wanted).sort("date", "code")
 
     def _stock_fields(
-        self, codes: list[str] | None, start: date, end: date, fields: list[str]
+        self, codes: list[str] | None, start: date, end: date, fields: list[str], lookback: int
     ) -> pl.DataFrame:
         wanted = set(fields)
-        columns = ["date", "code", *(name for name in fields if name not in DERIVED_FIELDS)]
-        if "is_ex_div" in wanted and "adj_factor" not in columns:
-            columns.append("adj_factor")
+        limit_flags = sorted(wanted & _LIMIT_FLAGS)
+        helpers = (["adj_factor"] if "is_ex_div" in wanted else []) + (
+            ["up_limit"] if limit_flags else []
+        )
+        stored = [name for name in fields if name not in DERIVED_FIELDS]
+        columns = list(dict.fromkeys(["date", "code", *stored, *helpers]))
         rows = self._read_panel(start, end, codes, columns)
 
         coverage_start = self.data_range(STOCK)[0]
         list_dates = self._scan_table(STOCK_BASIC_TABLE).select("code", "list_date").collect()
-        if wanted & _NEEDS_PREVIOUS_ROW:
-            # 起点那天的除权、起点之前停牌期间发的公告，都要和每只股票起点之前的最后一行比；
-            # 这些行只用来算，最后截掉
-            earlier = self._last_rows_before(
-                start, rows.get_column("code").unique(), columns, list_dates, coverage_start
+        # 往前带的条数：预热要 lookback 条；除权、公告顺延还要拿最早那条和它的前一条比，再多带一条，最后截掉
+        count = lookback + (1 if wanted & _NEEDS_PREVIOUS_ROW else 0)
+        if count:
+            earlier = self._rows_before(
+                start, rows.get_column("code").unique(), columns, count, list_dates, coverage_start
             )
             rows = pl.concat([*earlier, rows])
 
+        if limit_flags:
+            no_limit = pl.col("up_limit") >= NO_LIMIT_PRICE
+            rows = rows.with_columns(
+                pl.when(no_limit).then(False).otherwise(pl.col(flag)).alias(flag)
+                for flag in limit_flags
+            )
         if "is_ex_div" in wanted:
             rows = with_ex_div(rows)
         for name, (table, column) in _EVENT_SOURCES.items():
@@ -214,7 +256,7 @@ class DataService:
             if codes is not None:
                 fina = fina.filter(pl.col("code").is_in(codes))
             rows = with_finance(rows, finance_timeline(fina.collect()))
-        return rows.filter(pl.col("date") >= start)
+        return _trim_before(rows, start, lookback)
 
     def _read_panel(
         self, start: date, end: date, codes: list[str] | None, columns: Sequence[str]
@@ -230,37 +272,59 @@ class DataService:
             query = query.filter(pl.col("code").is_in(codes))
         return query.select(columns).collect()
 
-    def _last_rows_before(
+    def _rows_before(
         self,
         start: date,
         codes: pl.Series,
         columns: Sequence[str],
+        count: int,
         list_dates: pl.DataFrame,
         coverage_start: date,
     ) -> list[pl.DataFrame]:
-        """每只股票在 start 之前的最后一行。从 start 所在的月往回一个月一个月地找，找齐或翻到本地数据起点为止。
+        """每只股票在 start 之前自己最近的 count 条行情，不够就有多少取多少。
 
+        先按交易日历往前推 count 天，一次读完这几个月——没停过牌的股票这一下就够了；停过牌还不够的，
+        再一个月一个月往前补，直到够数或翻到本地数据起点（实测停牌超过一年才复牌的有 183 次）。
         上市日不早于 start 的股票之前本来就没有行，直接跳过，否则每只新股都要翻到最早的月份。
-        停牌很久的要多翻几个月（实测停牌超过一年才复牌的有 183 次），每个月只读这几列、只筛还没找到的股票。
         """
-        listed_later = list_dates.filter(pl.col("list_date") >= start).get_column("code")
-        pending = set(codes.to_list()) - set(listed_later.to_list())
+        listed_later = set(list_dates.filter(pl.col("list_date") >= start).get_column("code"))
+        remaining = {code: count for code in codes.to_list() if code not in listed_later}
+        before = [day for day in self.get_trading_calendar(coverage_start, start) if day < start]
+        if not remaining or not before:
+            return []
         first_month = coverage_start.strftime("%Y-%m")
-        month = start.strftime("%Y-%m")
+        earliest = before[-count] if len(before) >= count else before[0]
+        batch = [
+            month
+            for month in months_between(earliest.strftime("%Y%m%d"), start.strftime("%Y%m%d"))
+            if self._store.has_month(DAILY_DATASET, month)
+        ]
+        month = earliest.strftime("%Y-%m")
+
         found: list[pl.DataFrame] = []
-        while pending and month >= first_month:
-            if self._store.has_month(DAILY_DATASET, month):
-                part = (
-                    pl.scan_parquet(self._store.month_path(DAILY_DATASET, month))
-                    .filter((pl.col("date") < start) & pl.col("code").is_in(sorted(pending)))
-                    .select(columns)
-                    .collect()
-                )
-                last = part.filter(pl.col("date") == pl.col("date").max().over("code"))
-                found.append(last)
-                pending -= set(last.get_column("code").to_list())
-            month = _previous_month(month)
-        return found
+        while remaining and batch:
+            part = (
+                pl.scan_parquet([self._store.month_path(DAILY_DATASET, m) for m in batch])
+                .filter((pl.col("date") < start) & pl.col("code").is_in(sorted(remaining)))
+                .select(columns)
+                .collect()
+            )
+            found.append(part)
+            for code, rows in part.group_by("code").len().iter_rows():
+                remaining[code] -= rows
+            remaining = {code: left for code, left in remaining.items() if left > 0}
+            batch = []
+            while remaining and not batch:
+                month = _previous_month(month)
+                if month < first_month:
+                    break
+                if self._store.has_month(DAILY_DATASET, month):
+                    batch = [month]
+        if not found:
+            return []
+        earlier = pl.concat(found)
+        newest_first = pl.col("date").rank("ordinal", descending=True).over("code")
+        return [earlier.filter(newest_first <= count)]
 
     # ── 股票池 ──────────────────────────────────────────────────
 

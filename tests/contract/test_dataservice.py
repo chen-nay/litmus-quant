@@ -266,3 +266,66 @@ def test_未知字段与标的不支持的字段直接报错(ds):
         ds.get_fields(["600519.SH"], day, day, ["close_adj"])
     with pytest.raises(UnknownFieldError):
         ds.get_fields(["801010.SI"], day, day, ["turnover"], target="sw_industry")
+
+
+def test_可用的标的类型(ds):
+    targets = ds.available_targets()
+    assert "stock" in targets and "sw_industry" in targets
+
+
+# ── 涨跌停标记 ──────────────────────────────────────────────────
+
+
+def test_不设涨跌幅限制的日子涨跌停标记都是False(ds):
+    """001232.SZ 2026-08-04 上市首日不设涨跌幅限制：数据源把涨停价填成 100000、跌停价为空。"""
+    flags = ["is_limit_up", "is_limit_down", "open_limit_up"]
+    row = ds.get_fields(["001232.SZ"], D(2026, 8, 4), D(2026, 8, 4), flags).row(0, named=True)
+    assert [row[name] for name in flags] == [False, False, False]
+
+
+def test_数据源缺了涨跌停价的日子标记为空值(ds):
+    """000022.SZ 2018-12-19 没有涨跌停价，判断不了，不猜。"""
+    flags = ["is_limit_up", "is_limit_down"]
+    row = ds.get_fields(["000022.SZ"], D(2018, 12, 19), D(2018, 12, 19), flags).row(0, named=True)
+    assert [row[name] for name in flags] == [None, None]
+
+
+# ── 往前带行情（表达式引擎预热用）──────────────────────────────
+
+
+def test_往前带的是每只股票自己的行情_停过牌的也凑够(ds):
+    """神州高铁（000008.SZ）过去一年停过牌：按交易日历往前推 250 天只有 247 条，要往更早翻才凑够。"""
+    as_of = D(2026, 9, 11)
+    table = ds.get_fields(["000008.SZ", "600519.SH"], as_of, as_of, ["close"], lookback=250)
+    earlier = table.filter(pl.col("date") < as_of)
+    assert dict(earlier.group_by("code").len().iter_rows()) == {"000008.SZ": 250, "600519.SH": 250}
+
+    calendar_start = ds.get_trading_calendar(D(2025, 1, 1), as_of)[-251]
+    stock = table.filter(pl.col("code") == "000008.SZ")
+    assert stock.get_column("date").min() < calendar_start
+    history = ds.get_fields(["000008.SZ"], D(2016, 1, 4), as_of, ["close"])
+    assert stock.get_column("close").to_list() == history.get_column("close").tail(251).to_list()
+
+
+def test_往前带不够就有多少带多少(ds):
+    """陕西旅游（603402.SH）2026-01-06 上市，01-09 之前只有 3 条行情。"""
+    table = ds.get_fields(["603402.SH"], D(2026, 1, 9), D(2026, 1, 9), ["close"], lookback=10)
+    assert table.get_column("date").to_list() == [
+        D(2026, 1, 6),
+        D(2026, 1, 7),
+        D(2026, 1, 8),
+        D(2026, 1, 9),
+    ]
+
+
+def test_往前带出来的行现算字段也算对(ds):
+    """比亚迪 2025-07-29 送转：从 07-30 往前带 1 条，带出来的 07-29 也要标成除权日。"""
+    table = ds.get_fields(["002594.SZ"], D(2025, 7, 30), D(2025, 7, 30), ["is_ex_div"], lookback=1)
+    assert by_date(table, "is_ex_div") == {D(2025, 7, 29): True, D(2025, 7, 30): False}
+
+
+def test_板块也能往前带(ds):
+    day = D(2026, 9, 11)
+    table = ds.get_fields(["801010.SI"], day, day, ["close"], target="sw_industry", lookback=5)
+    assert table.height == 6
+    assert table.get_column("date").max() == day
