@@ -116,7 +116,7 @@ layers = [
 
 | 模块 | 对外暴露 |
 |---|---|
-| data | `DataService`：`ds.get_fields()` / `ds.get_trading_calendar()` / `ds.latest_trading_day()` / `ds.get_universe()` / `ds.get_universe_mask()` / `ds.list_boards()` / `ds.board_members()` / `ds.resolve_stock()` / `ds.resolve_board()`；`DataSync`：`start()` / `status()`（本地数据状态、能否提问）；字段目录 `data.FIELDS` |
+| data | `DataService`：`ds.get_fields()` / `ds.get_trading_calendar()` / `ds.latest_trading_day()` / `ds.data_range()` / `ds.get_universe()` / `ds.get_universe_mask()` / `ds.list_boards()` / `ds.board_members()` / `ds.resolve_stock()` / `ds.resolve_board()`（第 7 步）；`DataSync`：`start()` / `status()`（本地数据状态、能否提问）；字段目录 `data.FIELDS` |
 | spec | `spec.QuerySpec`（三种形状）、`spec.DEFAULTS`（默认值表）、`spec.render_assumptions()`（由 spec 生成确认卡说明） |
 | expr | `expr.parse()` / `expr.validate()` / `expr.collect_fields()` / `expr.collect_lookback()` / `expr.evaluate()`；`expr.field_catalog()` / `expr.operator_catalog()`（供 llm 组装提示词） |
 | signals | `signals.load_events()`（事件库） |
@@ -196,15 +196,17 @@ P0 只有两处单轮 LLM 调用，没有 agent loop，引入框架是负债。
 class DataService:
 
     def get_fields(
-        self, codes: list[str], start: date, end: date, fields: list[str],
+        self, codes: list[str] | None, start: date, end: date, fields: list[str],
         target: str = "stock",          # stock | sw_industry | concept
     ) -> pl.DataFrame:
         """统一取数入口。返回长表 (date, code, <fields...>)，按 (date, code) 排序。
         字段来自哪张表由 DataService 按 FIELDS 内部路由，调用方不关心。
         · 价格类字段一律后复权
-        · 财务类字段按【披露日】对齐（PIT），不是报告期；前向填充至下次披露
+        · 财务类字段按【披露日】对齐（PIT），不是报告期；前向填充至下次披露，取值规则见 §2.6
         · 事件类、状态类字段为布尔值
-        · 请求 FIELDS 之外、或当前账号能力不支持的字段，直接报错"""
+        · 请求 FIELDS 之外、或当前账号能力不支持的字段，直接报错
+        · codes 为 None 表示全部；区间超出 data_range() 直接报错，调用方先把区间裁好
+        · 股票可以取 research 用的内部列（INTERNAL_COLUMNS），表达式碰不到它们"""
 
     def get_universe(
         self, as_of: date, base: str = "all_a", industry: str | None = None,
@@ -219,14 +221,14 @@ class DataService:
         self, start: date, end: date, base: str = "all_a", industry: str | None = None,
         board: Board | None = None, exclude: list[str] | None = None,
     ) -> pl.DataFrame:
-        """按日的股票池：返回 (date, code, in_universe) 真假表。
+        """按日的股票池：只返回在池内的 (date, code)，不在池内的不出现。
         历史计算必须用它，不能用某一天的名单去套整段历史（否则产生幸存者偏差）"""
 
     def list_boards(self, board_type: str) -> list[BoardInfo]:
         """板块清单。board_type: sw_industry（申万行业）/ concept（概念板块，需能力可用）"""
 
     def board_members(self, board_code: str, as_of: date | None = None) -> list[str]:
-        """板块成分股。P0 概念板块只有当前快照，as_of 只接受最新日期"""
+        """板块成分股。申万行业按 as_of 当天的归属；P0 概念板块只有快照日的当前成分，as_of 早于快照日报错"""
 
     def get_trading_calendar(self, start: date, end: date) -> list[date]: ...
 
@@ -235,6 +237,10 @@ class DataService:
         六个按日拉取的接口入库时间不同（涨跌停价 8:40、复权因子盘前、行情与每日指标 15~17 点），
         只落了一半的当天不算完整日、不对外可见，否则筛选结果会静默变空。
         和页面上"数据截至 X"显示的是同一天"""
+
+    def data_range(self, target: str = "stock") -> tuple[date, date]:
+        """某类标的本地数据的起止日。取数区间必须落在里面，调用方（如 expr 扣预热期）先用它裁好。
+        股票取从最新一天往回连续覆盖的区间；板块取板块日线的首末日（概念板块 2025-03-28 起）"""
 
     def resolve_stock(self, text: str) -> list[StockMatch]:
         """股票提及 → 候选股票列表。规则见 §2.3"""
@@ -245,6 +251,15 @@ class DataService:
 
 下载由 data 模块内的 `DataSync` 负责，见 §2.5。本地数据的状态（覆盖范围、最近同步时间、可选数据是否可用、能不能提问）
 也由 `DataSync.status()` 回答，DataService 不另设入口。
+
+- **实现分三块**：`service.py` 对外方法；`derive.py` 读取时现算的字段（财务按公告日对齐、公告日事件、除权除息日、次新股）；
+  `universe.py` 按日股票池。后两块是纯函数，规则见 §2.6
+- **不做缓存**，每次按需读文件。2026-09-14 本机实测：全市场 37 个月 4 列 396 万行 0.03 秒，单只股票 10 年 0.06 秒；
+  全市场两年 7 个字段（含财务、事件、除权、次新）267 万行 1.45 秒，十年全 A 股票池 0.43 秒。缓存省不下什么，
+  反而要处理「同步已经改了文件、服务里还是旧数据」
+- **报错而不是返回空**：未知字段、能力不可用、区间超出本地数据（`MissingDataError`）、本地数据自相矛盾分不出取哪条
+  （`AmbiguousDataError`），一律报错
+- **换数据源不动接口**：DataService 只读本地 Parquet 的固定布局，不知道数据从哪来；换源只换 loader
 
 ### 2.2 字段目录 FIELDS
 
@@ -274,16 +289,16 @@ class DataService:
 | `$dv_ttm` | 股息率 TTM | % | `daily_basic.dv_ttm` | — |
 | `$market_cap` | 总市值 | 元 | `daily_basic.total_mv` | 万元 × 10000 |
 | `$circ_mv` | 流通市值 | 元 | `daily_basic.circ_mv` | 万元 × 10000 |
-| `$roe` | 净资产收益率（年化） | % | `fina_indicator_vip.roe_yearly` | 按披露日对齐；口径第 1a 步实测确认 |
+| `$roe` | 净资产收益率（年化） | % | `fina_indicator_vip.roe_yearly` | 按披露日对齐（取值规则见 §2.6）；口径第 1a 步实测确认 |
 | `$revenue_yoy` | 营业收入同比 | % | `fina_indicator_vip.or_yoy` | 按披露日对齐 |
 | `$profit_yoy` | 归母净利润同比 | % | `fina_indicator_vip.netprofit_yoy` | 按披露日对齐 |
-| `$is_report_date` | 财报实际披露日 | 布尔 | `disclosure_date.actual_date` | — |
-| `$is_forecast_date` | 业绩预告公告日 | 布尔 | `forecast_vip.ann_date` | — |
-| `$is_ex_div` | 除权除息日 | 布尔 | 由 `adj_factor` 推导 | 复权因子较前一交易日变化 |
+| `$is_report_date` | 财报实际披露日 | 布尔 | `disclosure_date.actual_date` | 非交易日或停牌日披露的，顺延到该股票下一个有行情的交易日（§2.6） |
+| `$is_forecast_date` | 业绩预告公告日 | 布尔 | `forecast_vip.ann_date` | 同上 |
+| `$is_ex_div` | 除权除息日 | 布尔 | 由 `adj_factor` 推导 | 复权因子比该股票上一条行情涨了 0.05% 以上（§2.6） |
 | `$is_st` | ST / *ST | 布尔 | `stock_st` | 当日在官方 ST 名单中 |
 | `$is_limit_up` | 收盘涨停 | 布尔 | `daily.close` 与 `stk_limit.up_limit` | 收盘价等于涨停价 |
 | `$is_limit_down` | 收盘跌停 | 布尔 | `daily.close` 与 `stk_limit.down_limit` | 收盘价等于跌停价 |
-| `$is_new` | 次新股 | 布尔 | `stock_basic.list_date` | 上市不足 N 个交易日 |
+| `$is_new` | 次新股 | 布尔 | `stock_basic.list_date` | 上市后的前 60 个交易日，含上市当天（§2.6） |
 
 #### 板块字段
 
@@ -345,19 +360,23 @@ class DataService:
 |---|---|
 | 返回格式 | 长表，列为 (date, code, <字段>)，按 (date, code) 排序，类型符合 FIELDS |
 | 后复权 | 选一个真实送转日，检查后复权价格前后连续；同一查询重复调用结果逐位相同 |
-| PIT | 选一个真实的财报更正案例，检查修正值只在修正披露日之后出现 |
+| PIT | 选一个真实的财报更正案例，检查修正值只在修正披露日之后出现；旧报告期迟到的更正不覆盖更新的一期 |
 | 交易日历 | 只含交易日；"N 日"位移按交易日计算 |
 | 退市股 | 已退市股票在其上市期间可查到 |
 | 按日股票池 | 某只股票在成为 ST 之前的日子在池内、之后不在；退市股在退市前的日子在池内 |
 | 未知字段 | 请求 FIELDS 之外、或能力不可用的字段直接报错，不返回空列 |
+| 公告日事件 | 周末披露的财报标在下一个交易日 |
+| 行业与指数成分 | 按当天归属、剔除日当天还算旧行业、旧归属没关闭时按最新的；早于第一期指数快照直接报错 |
+| 停牌、次新 | 停牌日没有行；次新股按上市后的交易日数剔除 |
 
 DataService 只有一个实现（读本地 Parquet），不做抽象接口，也不做测试用的假数据实现。
 算子、收益等计算逻辑的正确性由**小表格测试**保证，见 §10。
 
-**契约测试跑在合成数据集上**：`tests/fixtures/` 下放一份按真实 Parquet 布局生成的小数据集
-（约 20 只股票 × 2 年，含送转、停牌、ST、退市、一字涨停各一例），由一个生成脚本产出。
-这样契约测试和 CI 都能离线跑，不需要 token。真实数据上的验证降级为"有 token 时才跑"的可选测试。
-注意它和被砍掉的 FakeDataService 不是一回事：实现仍然只有一个，只是喂给它的数据是合成的。
+**契约测试跑在本地真实数据上**：DataService 不联网，所以不需要 token，只要本地同步过数据；没有数据就整个跳过，
+放在 `make check` 里。每条契约用一个真实案例，2026-09-14 从本地数据里找出来，并对着原始表逐条核对过期望值。
+现算字段与股票池的规则另有小表格测试（`tests/test_derive.py`、`tests/test_universe.py`），不需要任何数据。
+
+合成数据集（让契约测试在没有数据的机器上也能跑）推迟，见 §11。
 
 ### 2.5 数据来源、同步与存储
 
@@ -384,7 +403,7 @@ DataService 只有一个实现（读本地 Parquet），不做抽象接口，也
 | 3 | 每日指标 | 换手率、估值、市值 | `daily_basic` | 按交易日 |
 | 4 | 涨跌停价 | 涨跌停状态、开盘买不进 | `stk_limit` | 按交易日（含 B 股与基金，需分页） |
 | 5 | ST 名单 | `$is_st` | `stock_st` | 按日期区间（单次 1000 行，实测每天约 200 只 ST，约 4 天一次调用） |
-| 6 | 财务指标（含披露日） | `$roe $revenue_yoy $profit_yoy` | `fina_indicator_vip` | 按报告期 |
+| 6 | 财务指标（含披露日） | `$roe $revenue_yoy $profit_yoy` | `fina_indicator_vip` | 按报告期；**要点名 `update_flag`**，同一公告日的新旧版本靠它区分，默认不返回（§2.6） |
 | 7 | 财报披露日 | `$is_report_date` | `disclosure_date` | 按报告期（需分页） |
 | 8 | 业绩预告 | `$is_forecast_date` | `forecast_vip` | 按报告期，**多拉下一个报告期**：预告在报告期结束前就发（实测 8/1~9/13 公告的预告里有 30 条属于 9/30 的三季报） |
 | 9 | 限售解禁 | `$is_unlock_date` | `share_float` | **P0 不拉**，数据量见 §11 |
@@ -566,7 +585,7 @@ data/                                  # 默认在仓库根目录（已 gitignor
 | 复权 | **强制后复权**：后复权价 = 原始价 × 复权因子（与 Tushare 定义一致）。前复权的历史价格会随每次新除权而变化，导致结果不可复现 |
 | 成交量 | `$volume` 随复权调整：复权成交量 = 原始成交股数 ÷ 复权因子，避免送转后成交股数跳变误触发"放量"。`$amount`、`$turnover` 保持原值 |
 | 成交均价 | `$vwap` = 原始成交额 ÷ 原始成交股数 × 复权因子，与 `$close` 同为后复权口径 |
-| 财务 PIT | 按 `ann_date`（披露日）对齐，只用 `ann_date <= 当前日` 的记录，禁止用报告期。**同一天披露多个报告期时（4 月底年报与一季报常同日），按 (披露日, 报告期) 双键排序，取报告期最大的那条**，再前向填充。**更正公告确实存在**（实测 599 个 (股票, 报告期) 组合有两个公告日）：同一报告期取 `ann_date <= 当前日` 里最新的那条，归一层不去重 |
+| 财务 PIT | 按 `ann_date`（披露日）对齐，只用 `ann_date <= 当前日` 的记录，禁止用报告期。**同一天披露多个报告期时（4 月底年报与一季报常同日），按 (披露日, 报告期) 双键排序，取报告期最大的那条**，再前向填充。**更正公告确实存在**（实测 599 个 (股票, 报告期) 组合有两个公告日）：同一报告期取 `ann_date <= 当前日` 里最新的那条，归一层不去重。**但更新的报告期优先**：某天的值 = 截至当天已公告的报告期里最大的那一期，这一期有更正取最新的一次——实测 1.2 万多条旧报告期记录（补发或更正）是在更新的报告期公告之后才发的，只看公告日会让数值倒退回旧报告期。**同一公告日的新旧版本靠 `update_flag` 区分**（接口默认不返回，要点名）：2026-09-14 实测 4315 组 (股票, 报告期, 公告日) 数值不同、每组恰好一条标 1；标 0 的旧版本只在同一报告期标 1 的版本出现之前有效（有 26 组旧版本的公告日反而比新版本晚一天） |
 | 同比口径 | `$revenue_yoy` / `$profit_yoy` 是最新一期的**累计**同比：年报是全年、一季报是单季，披露日会跳变。字段说明里必须写明，否则用户会以为数据错了 |
 | 绝对价格 | 后复权价不是真实股价，"股价低于 10 元"必须用 `$close_raw`；股票表展示的收盘价也用原始价 |
 | 空值 | 亏损股的 PE、新股的同比等为空值。比较运算遇空值判为"不满足"，`Rank` 忽略空值 |
@@ -574,11 +593,15 @@ data/                                  # 默认在仓库根目录（已 gitignor
 | 涨跌停 | 以 `stk_limit` 的实际涨跌停价为准，不按比例自行推算（历次规则调整、ST、新股等情况都已包含） |
 | 停牌 | 上市期内的交易日没有 `daily` 记录即为停牌。**面板不补齐**：每只股票只保留有成交的交易日，时序算子窗口按该股票的有效交易日计算（§3.3）。停牌只影响两处：从股票池剔除、买卖顺延 |
 | ST | 按交易日取 `stock_st` 官方名单 |
-| 次新股 | 上市不足 N 个交易日标记 `is_new`，默认排除 |
+| 次新股 | 上市后的前 60 个交易日（含上市当天）标记 `is_new`，默认排除。按交易日历数，停牌的日子也算上市的日子；非交易日上市的从下一个交易日算第一天。上市早于本地交易日历起点（2016 年）的不算次新 |
 | 北交所 | **数据照常落盘，在股票池这一层排除**。Tushare 按日返回的数据里本来就含北交所（实测某日 `daily_basic` 5550 行中有 `.BJ` 代码），落盘时丢掉的话，将来想放开就得重新同步十年；存下来则只是改一条股票池规则。理由见 §2.5 |
 | 交易日历 | 所有"N日"一律指**交易日**，不是自然日。这是确认卡必须澄清的项 |
 | 曾用名 | `namechange` 会返回**整行重复**的记录（实测全量 34749 行里 14263 行重复；单只股票只有 12 行、根本不翻页也照样重复，是数据源本身的问题），落盘前整行去重。另外 `end_date` 为空**不**等于现用名——去重后仍有股票存在多行 `end_date` 为空，最多一只 8 行；判断现用名要取 `start_date` 最大的那一行 |
-| 指数成分 | `index_weight` **有发布滞后**：2026-09-13 实测最新快照是 8/31，9 月的窗口返回 0 行。取「某日的成分」必须用**当日及之前最近一期**快照，按当月去找会拿到空集，股票池静默变空。两个指数的快照频率也不同：沪深300 每月两个、中证500 每月一个，是数据源本身的差异，不是漏拉 |
+| 指数成分 | `index_weight` **有发布滞后**：2026-09-13 实测最新快照是 8/31，9 月的窗口返回 0 行。取「某日的成分」必须用**当日及之前最近一期**快照，按当月去找会拿到空集，股票池静默变空。两个指数的快照频率也不同：沪深300 每月两个、中证500 每月一个，是数据源本身的差异，不是漏拉。**早于第一期快照（2016-01-29）的日子直接报错**：本地数据从 2016 年起，不为这 19 个交易日往前补拉 2015 年；给空池子会答出「沪深300里没有满足条件的股票」这种错的结论 |
+| 公告日事件 | `$is_report_date` / `$is_forecast_date`：公告那天该股票有行情就标在当天，否则**顺延到它下一个有行情的交易日**——周末、节假日、停牌期间发的公告，市场要到下一次交易才反应得到，2026-09-14 实测约 27% 的披露日、29% 的预告日落在该股票没有行情的日子，不顺延就在稀疏面板里丢了。公告时还没上市的不标 |
+| 除权除息日 | 复权因子比该股票上一条行情**涨了 0.05% 以上**才算，停牌期间除权的标在复牌那天。实测复权因子「变小」1.26 万次，几乎全在 0.05% 以内——数据源小数位数时三时四造成的舍入抖动，同样幅度的「变大」也是噪声；0.05%~0.1% 这档变大 826 次、变小只有 105 次 |
+| 申万行业归属 | 纳入日 <= 当天 <= 剔除日，**剔除日当天还算旧行业**（实测换行业最常见的是新纳入日正好是剔除日的第二天，1542 次）。实测 63 只股票换了行业、旧归属却没关闭（如 000595.SZ 机械设备与公用事业同时没有剔除日），同一天挂着几条有效归属时**取纳入日最新的**；纳入日也相同就报错（实测 3 只，2016 年后都没有行情） |
+| 股票池 | **只从当天有行情的股票里选**：停牌的本来就不在池内，北交所排除，ST、次新按当天状态剔除。股票列表里查不到的 3 个老代码（000043.SZ、000022.SZ、300114.SZ，像是换过代码）照样按行情进池 |
 
 ### 2.7 行业与概念板块
 
@@ -1241,6 +1264,8 @@ litmus/
 │   └── assumptions.py      # 由 spec 生成确认卡说明文字的模板
 ├── data/                   # 零内部依赖
 │   ├── service.py          # DataService：读本地 Parquet
+│   ├── derive.py           # 读取时现算的字段：财务按公告日对齐、公告日事件、除权除息日、次新股
+│   ├── universe.py         # 按日股票池
 │   ├── fields.py           # 字段目录 FIELDS
 │   ├── resolve.py          # 股票名解析
 │   ├── loaders/            # tushare.py：拉取、归一、分页、返回校验
@@ -1280,7 +1305,7 @@ litmus/
 web/                        # React 前端
 tests/
 ├── contract/               # 契约测试：test_dataservice.py / test_store.py
-├── fixtures/               # 合成数据集与生成脚本（§2.4）
+├── fixtures/               # 合成数据集与生成脚本（推迟，见 §11）
 └── ...                     # 各模块单元测试
 api_define/                 # Tushare 接口定义（本地参考，不提交）
 docker-compose.yml
@@ -1297,7 +1322,7 @@ Makefile
 |---|---|---|
 | 0 | 项目骨架：uv + pyproject + 目录 + pytest/ruff；**用一条最小请求验证火山引擎支持强制 tool_use** | 骨架已完成（目录随各步补齐）；确认结构化输出可用，否则 §5 要换方案。import-linter 契约在出现第一个跨模块 import 时加入 |
 | 1a | data：`FIELDS` + Tushare loader（归一、分页、返回校验）+ DataSync（全量/增量同步、断点续传、能力探测、manifest） | 能把指定日期范围同步到本地；中断可续传；再次同步只补缺口；完成 §12 的接口实测项 |
-| 1b | data：DataService（含按日股票池、板块）+ 合成数据集 + 契约测试 | 契约测试在合成数据集上离线通过；有 token 时再跑一遍真实数据 |
+| 1b | data：DataService（含按日股票池、板块）+ 小表格测试 + 契约测试 | 小表格测试离线通过；契约测试在本地真实数据上通过（合成数据集推迟，见 §11） |
 | 2 | expr：parser / validator / collector / evaluator + 全部算子，支持股票与板块两类标的 | 小表格测试：`Cross`、`Mean`、`Rank` 等逐个验证 |
 | 3 | spec（三种形状 + 默认值表）+ research：股票表、板块表、个股回看 | 手工核对若干笔"之后 N 天涨跌"，含顺延与扣成本 |
 | 4 | signals：事件库 15 条 | YAML 加载，逐条校验通过，都能跑出回看结果 |
@@ -1324,7 +1349,7 @@ def test_mean():
 | 模块 | 测试重点 |
 |---|---|
 | 依赖规则 | `lint-imports` 通过，每次提交必跑 |
-| DataService 契约 | 在合成数据集上离线运行；有 token 时再跑一遍真实数据，见 §2.4 |
+| DataService 契约 | 现算字段与股票池的规则用小表格测；契约在本地真实数据上跑，没有数据时跳过，见 §2.4 |
 | loader | 需要 token：单位换算正确；达到单次上限时自动分页；字段名或类型不符时报错 |
 | DataSync | 需要 token：中断后续传不重复不遗漏；增量同步只补缺口；能力探测结果正确写入 manifest |
 | validator | 未来函数必须被拦截：`Ref($close, -1)` 应抛错；字段不在白名单、能力不可用时报错 |
@@ -1361,6 +1386,7 @@ def test_mean():
 | 无 LLM key 的降级路径 | P0 必须配 key |
 | `llm.review()`（LLM 审查用户改动） | 已取消，不是推迟：说明文字改由模板生成、参数范围由代码校验后，它的两个目标都有确定性替代，而它本身会带来死锁 |
 | 限售解禁（`share_float` → `$is_unlock_date`） | 数据量与收益不成比例。2026-09-13 实测：单个解禁日 22904 行，一个自然月超过 10 万行——**连一个月都拉不完**，翻到第 18 页就撞上代理的 offset 上限（offset=60000 正常、102000 被拒）。只能按天切，约 2600 个交易日、每天数页，而且这个接口扛不住并发、只能串行，估计十几个小时，只为换回一个布尔字段。归一逻辑 `normalize_share_float` 已经写好并有测试，P1 接上 DataSync 即可 |
+| 合成数据集（契约测试的离线版） | **待办，接 CI 或有别人参与开发时再做**。作用是让契约测试在没有数据的机器上也能跑：约 20 只股票 × 2 年，送转、停牌、ST、退市、一字涨停、财报更正、周末公告、换行业等各埋一例在已知日期，用假的 Tushare 返回喂给真实的 DataSync 落盘（列名、单位、布局和真实数据走同一段代码，不会对不上）。2026-09-14 决定推迟：单人开发、没有 CI、本机有完整数据，规则已由小表格测试覆盖、契约由本地真实数据覆盖，现在做价值不大 |
 
 ---
 
