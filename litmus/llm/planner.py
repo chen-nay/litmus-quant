@@ -458,7 +458,8 @@ def _date_table(context: PlanContext) -> str:
 
     2026-09-15 实测：不给这张表，问「今年以来涨幅最大的 50 只」，大模型在思考里逐月数工作日、猜节假日，
     8000 个 token 用完也没给出结果（215 秒）；它估的 171 天，本地日历是 170 天。
-    区间从今天所在的周、月、季、年算起；本地数据还没到这段时写明先同步，不让大模型拿旧数据凑。
+    区间从今天所在的周、月、季、年算起；本地数据还没到这段时写明本地数据截至哪天，不让大模型拿旧数据凑。
+    不说「要先同步」：可能是当天行情还没发布，同步也补不到（2026-09-15 定：数据旧了不特殊处理）。
     """
     today, latest = context.today, context.latest_trading_day
     lines = [
@@ -488,7 +489,7 @@ def _date_table(context: PlanContext) -> str:
         if count:
             lines.append(f"  - {label}：N={count}（比 {before[-1]} 收盘）")
         else:
-            lines.append(f"  - {label}：本地还没有这段的数据（数据截至 {latest}），要先同步")
+            lines.append(f"  - {label}：本地数据截至 {latest}，还没有这段的行情")
     return "\n".join(lines)
 
 

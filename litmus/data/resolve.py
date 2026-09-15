@@ -14,7 +14,7 @@
 
 板块按代码、名称一致、名称包含、字按顺序出现查，不做拼音（概念板块清单没有拼音列，概念名也很少有人用拼音缩写）。
 「银行板块」「航运概念」这类说法去掉后缀再查一遍，取两次里更好的一级。外号对不上的（通达信没有「光模块」，
-叫「光通信」「CPO概念」）由大模型给猜测名再查，这里不猜。原话和猜测名都查不到时，similar_boards 按共有的字
+叫「光通信」「CPO概念」）由大模型给猜测名再查，这里不猜。原话和猜测名都查不到时，similar_boards 按共有的两字词
 给几个名字相近的让用户选，不只回一句「没找到」。
 """
 
@@ -163,21 +163,26 @@ def match_boards(text: str, boards: Iterable[tuple[str, str, str]]) -> list[Boar
 
 
 def similar_boards(text: str, boards: Iterable[tuple[str, str, str]]) -> list[BoardMatch]:
-    """原话和猜测名都查不到时，名字相近的板块：去掉后缀后和原话共有的字越多越靠前，至少共有一半的字（最少 1 个）。
+    """原话和猜测名都查不到时，名字相近的板块：去掉后缀后，和原话共有两个字连在一起的词，共有的越多越靠前。
 
-    「光模块」→ 光通信、光伏……让用户自己挑，比只回一句「没找到」好用（2026-09-15 实测本地有「光通信」「CPO概念」）。
+    「机器人灵巧手」→ 机器人概念、人形机器人……让用户自己挑，比只回一句「没找到」好用。
+    只共有一个字不算：2026-09-15 实测按单个字比，「光模块」会列出「多模态AI」「区块链」这种凑巧有个「模」「块」字的。
     """
-    chars = set(_strip_suffix(normalize(text)))
-    if not chars:
+    pairs = _pairs(_strip_suffix(normalize(text)))
+    if not pairs:
         return []
-    need = max(1, len(chars) // 2)
     scored = []
     for code, name, board_type in boards:
-        shared = len(chars & set(_strip_suffix(normalize(name))))
-        if shared >= need:
+        shared = len(pairs & _pairs(_strip_suffix(normalize(name))))
+        if shared:
             scored.append(((-shared, board_type != "sw_industry", code), code, name, board_type))
     scored.sort(key=lambda item: item[0])
     return [BoardMatch(code, name, kind, SIMILAR) for _, code, name, kind in scored[:MAX_SIMILAR]]
+
+
+def _pairs(text: str) -> set[str]:
+    """两个字连在一起的词：「光模块」→ 光模、模块。"""
+    return {text[i : i + 2] for i in range(len(text) - 1)}
 
 
 def _strip_suffix(query: str) -> str:

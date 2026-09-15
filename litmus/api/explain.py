@@ -88,7 +88,7 @@ def _data_dates(ds: DataService, used: set[str]) -> tuple[tuple[str, date], ...]
 def _defaulted(texts: Mapping[str, str], mentions: Sequence[Mention]) -> frozenset[str]:
     """条件、排序里用了默认门槛、原话里又没给数字的栏目：「小市值」→ 总市值 < 30 亿，确认卡上标默认值。
 
-    原话里有数字（「市值低于 30 亿」）是用户自己说的；没有原话（手填、确认卡上改过这一栏）也不算默认值。
+    原话里自己说了市值门槛（「市值低于 30 亿」）的不算；没有原话（手填、确认卡上改过这一栏）也不算默认值。
     """
     small_cap = float(DEFAULTS["small_cap"])  # type: ignore[arg-type]
     marked = set()
@@ -97,11 +97,19 @@ def _defaulted(texts: Mapping[str, str], mentions: Sequence[Mention]) -> frozens
         phrases = [m.phrase for m in mentions if m.field.split(".")[0] == field]
         if (
             phrases
-            and not any(_DIGIT.search(phrase) for phrase in phrases)
+            and not any(_gives_cap(phrase) for phrase in phrases)
             and compares_below(parse(text), "market_cap", small_cap)
         ):
             marked.add(field)
     return frozenset(marked)
+
+
+def _gives_cap(phrase: str) -> bool:
+    """原话里自己说了市值门槛：带数字，又说到市值、亿、万（「市值低于 30 亿」「50亿以下」）。
+
+    「市盈率低于 20」带数字但说的不是市值：同一栏里的「小市值」照样按默认门槛标出来。
+    """
+    return bool(_DIGIT.search(phrase)) and any(word in phrase for word in ("市值", "亿", "万"))
 
 
 def _at(spec: Mapping[str, Any], path: str) -> object:

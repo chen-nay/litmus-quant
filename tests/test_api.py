@@ -520,7 +520,11 @@ def test_条件用了默认门槛_原话没给数字才标默认值():
 
     texts = {"filter.expr": "$market_cap < 30亿 & $is_limit_up"}
     assert _defaulted(texts, (Mention("小市值", "filter"),)) == {"filter"}
+    # 同一栏里别的说法带数字（说的是市盈率），小市值照样是默认门槛
+    both = (Mention("小市值", "filter"), Mention("市盈率低于 20", "filter"))
+    assert _defaulted(texts, both) == {"filter"}
     assert _defaulted(texts, (Mention("市值低于 30 亿", "filter"),)) == frozenset()
+    assert _defaulted(texts, (Mention("30亿以下", "filter"),)) == frozenset()
     assert _defaulted(texts, ()) == frozenset()  # 手填的、确认卡上改过的
     changed = {"filter.expr": "$market_cap < 50亿"}
     assert _defaulted(changed, (Mention("小市值", "filter"),)) == frozenset()

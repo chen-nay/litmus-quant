@@ -107,7 +107,7 @@ def test_日期换算表_交易日数由代码按本地日历数好():
     # 一周没同步：本地还没有这周的数据，不拿旧数据凑
     stale = PlanContext(**{**context.__dict__, "today": date(2026, 9, 22)})
     assert (
-        "本周以来：本地还没有这段的数据（数据截至 2026-09-14）"
+        "本周以来：本地数据截至 2026-09-14，还没有这段的行情"
         in system_variables(stale, EVENTS)["dates"]
     )
 

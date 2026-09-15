@@ -171,12 +171,17 @@ def test_概念板块猜了几个名字_都对得上就让用户选(client, llm)
 def test_概念板块原话和猜测名都查不到_列出名字相近的让用户选(client, llm):
     if CONCEPT not in _ds.available_targets():
         pytest.skip("概念板块不可用")
-    output = {**STOCK_LIST, "board_mention": "光模块", "board_guess": "没有这个板块"}
+    output = {**STOCK_LIST, "board_mention": "机器人灵巧手", "board_guess": "没有这个板块"}
     body = ask(client, llm, output)
     assert body["status"] == "needs_clarification", body
-    assert body["message"].startswith("没找到叫「光模块」的概念板块")
-    assert "光通信" in {c["name"] for c in body["board_candidates"]}
-    assert "/api/" not in body["message"]
+    assert body["message"].startswith("没找到叫「机器人灵巧手」的概念板块")
+    assert "机器人概念" in {c["name"] for c in body["board_candidates"]}
+
+    # 连名字相近的都没有：不给接口地址，让用户换个说法或者去表单里选
+    output = {**STOCK_LIST, "board_mention": "光模块", "board_guess": "没有这个板块"}
+    body = ask(client, llm, output)
+    assert (body["status"], body["board_candidates"]) == ("needs_clarification", [])
+    assert "打开表单" in body["message"] and "/api/" not in body["message"]
 
 
 def test_澄清之后追问_把原问题和回答一起交给大模型(client, llm):

@@ -141,7 +141,8 @@ def test_外号对不上的概念板块_能用上或者从候选里选(ask):
     if body["status"] == "ok":
         assert body["spec"]["universe"]["board"]["code"], body
     else:
-        assert body["status"] == "needs_clarification" and body["board_candidates"], body
+        assert body["status"] == "needs_clarification", body
+        assert body["board_candidates"] or "打开表单" in body["message"], body
 
 
 def test_个股回看_没说的栏目用默认值并标出来(ask):
