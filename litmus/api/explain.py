@@ -13,9 +13,10 @@ from dataclasses import replace
 from typing import Any
 
 from litmus.data import CONCEPT, STOCK, DataService
-from litmus.expr import collect_lookback, describe, parse
+from litmus.expr import collect_lookback, compares_below, describe, parse
 from litmus.research import statistics_range
 from litmus.spec import (
+    DEFAULTS,
     Assumption,
     BoardListSpec,
     Facts,
@@ -30,6 +31,7 @@ Spec = StockListSpec | BoardListSpec | StockHistorySpec
 
 # 只认 Rank(，不认 TsRank(
 _RANK = re.compile(r"\bRank\s*\(")
+_DIGIT = re.compile(r"\d")
 
 
 def explain(spec: Spec, ds: DataService, mentions: Sequence[Mention] = ()) -> list[Assumption]:
@@ -61,6 +63,25 @@ def plan_mentions(spec: Mapping[str, Any], record: PlanRecord | None) -> list[Me
 _COMPARED = {"target": "target.code"}
 
 
+def _defaulted(texts: Mapping[str, str], mentions: Sequence[Mention]) -> frozenset[str]:
+    """条件、排序里用了默认门槛、原话里又没给数字的栏目：「小市值」→ 总市值 < 30 亿，确认卡上标默认值。
+
+    原话里有数字（「市值低于 30 亿」）是用户自己说的；没有原话（手填、确认卡上改过这一栏）也不算默认值。
+    """
+    small_cap = float(DEFAULTS["small_cap"])  # type: ignore[arg-type]
+    marked = set()
+    for path, text in texts.items():
+        field = path.split(".")[0]  # filter.expr → filter
+        phrases = [m.phrase for m in mentions if m.field.split(".")[0] == field]
+        if (
+            phrases
+            and not any(_DIGIT.search(phrase) for phrase in phrases)
+            and compares_below(parse(text), "market_cap", small_cap)
+        ):
+            marked.add(field)
+    return frozenset(marked)
+
+
 def _at(spec: Mapping[str, Any], path: str) -> object:
     value: object = spec
     for key in path.split("."):
@@ -86,6 +107,7 @@ def _facts(spec: Spec, ds: DataService, mentions: tuple[Mention, ...]) -> Facts:
         uses_rank=any(_RANK.search(text) for text in texts.values()),
         lookback=max((collect_lookback(parse(text)) for text in texts.values()), default=0),
         mentions=mentions,
+        defaulted=_defaulted(texts, mentions),
     )
     if isinstance(spec, BoardListSpec):
         return replace(facts, board_range=ds.data_range(spec.board_type))

@@ -70,6 +70,13 @@ def test_用户原话的说法_理解为栏目里的定义():
     ]
 
 
+def test_条件里用了默认门槛_这一栏标默认值():
+    spec = stock_list(filter={"expr": "$market_cap < 30亿", "label": "小市值"})
+    facts = Facts(expressions={"filter.expr": "总市值 < 30 亿"}, defaulted=frozenset({"filter"}))
+    row = next(item for item in render_assumptions(spec, facts) if item.field == "filter")
+    assert (row.text, row.default) == ("筛选条件：小市值（总市值 < 30 亿）", True)
+
+
 def test_原话就是说明开头的名称_不写理解为():
     board = parse_spec({"shape": "board_list", "board_type": "sw_industry", "as_of": "2026-09-14"})
     facts = Facts(

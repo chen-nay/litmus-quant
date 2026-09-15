@@ -127,6 +127,14 @@ def test_今年以来_交易日数用代码算好的(ask):
     assert body["spec"]["sort"]["by"].replace(" ", "") == f"Pct($close,{days})"
 
 
+def test_小市值_没给数字按默认30亿_标成默认值(ask):
+    """2026-09-15 实测：没有默认值时大模型自己编门槛，名字写 30 亿、表达式写成了 300 亿。"""
+    body = ask("小市值股票里昨天涨停的有哪些")
+    assert body["status"] == "ok", body
+    row = items(body)["filter"]
+    assert "总市值 < 30 亿" in row["text"] and row["default"], row
+
+
 def test_个股回看_没说的栏目用默认值并标出来(ask):
     body = ask(HISTORY)
     assert body["status"] == "ok", body

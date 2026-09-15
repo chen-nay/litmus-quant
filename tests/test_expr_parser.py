@@ -90,6 +90,26 @@ def test_数字写法():
     assert shape(parse("$pb < .5")) == ("<", "$pb", 0.5)
 
 
+def test_数字可以带万和亿():
+    assert shape(parse("$market_cap < 30亿 & $amount > 5000万")) == (
+        "&",
+        ("<", "$market_cap", 3e9),
+        (">", "$amount", 5e7),
+    )
+    assert shape(parse("$market_cap < 1.5亿")) == ("<", "$market_cap", 1.5e8)
+    assert not parse("30亿").is_int  # 窗口参数不能带单位
+    assert "不认识的字符「元」" in str(error_of("$amount > 5亿元"))
+
+
+def test_找某字段小于某数的比较():
+    from litmus.expr import compares_below
+
+    assert compares_below(parse("$market_cap < 30亿 & $is_limit_up"), "market_cap", 3e9)
+    assert compares_below(parse("30亿 >= $market_cap"), "market_cap", 3e9)
+    assert not compares_below(parse("$market_cap < 50亿"), "market_cap", 3e9)
+    assert not compares_below(parse("$market_cap > 30亿"), "market_cap", 3e9)
+
+
 def test_区分整数字面量():
     call = parse("Mean($close, 250)")
     assert isinstance(call, Call)

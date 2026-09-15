@@ -484,6 +484,18 @@ def test_原话的说法_改过的栏目不再用_股票只比代码():
     assert plan_mentions(edited, None) == []
 
 
+def test_条件用了默认门槛_原话没给数字才标默认值():
+    from litmus.api.explain import _defaulted
+    from litmus.spec import Mention
+
+    texts = {"filter.expr": "$market_cap < 30亿 & $is_limit_up"}
+    assert _defaulted(texts, (Mention("小市值", "filter"),)) == {"filter"}
+    assert _defaulted(texts, (Mention("市值低于 30 亿", "filter"),)) == frozenset()
+    assert _defaulted(texts, ()) == frozenset()  # 手填的、确认卡上改过的
+    changed = {"filter.expr": "$market_cap < 50亿"}
+    assert _defaulted(changed, (Mention("小市值", "filter"),)) == frozenset()
+
+
 def test_候选里只有一个代码或名称完全一致的_直接用():
     from litmus.api.routes.plan import _decisive
 

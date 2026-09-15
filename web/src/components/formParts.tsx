@@ -33,7 +33,7 @@ export function ConditionFields({ target }: { target: Target }) {
           <Form.Item
             label="筛选条件（表达式，可以不填）"
             name={["filter", "expr"]}
-            extra="例：$amount > Mean(Ref($amount, 1), 5) * 1.4。多个条件用 & 连接，比较要加括号：($pct_chg > 5) & ($pe_ttm < 30)"
+            extra="例：$amount > Mean(Ref($amount, 1), 5) * 1.4。多个条件用 & 连接，比较要加括号：($pct_chg > 5) & ($pe_ttm < 30)。金额可以写成 30亿、5000万：$market_cap < 30亿"
           >
             <Input.TextArea autoSize={{ minRows: 2, maxRows: 6 }} placeholder="$pct_chg > 9" />
           </Form.Item>

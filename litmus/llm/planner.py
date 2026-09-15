@@ -429,6 +429,7 @@ def _events(events: EventLibrary) -> str:
 
 def _defaults(context: PlanContext) -> str:
     horizons = "、".join(str(h) for h in DEFAULTS["horizons"])  # type: ignore[attr-defined]
+    small_cap = f"{DEFAULTS['small_cap'] / 1e8:g}亿"  # type: ignore[operator]
     return "\n".join(
         [
             f"- 股票表、板块表的日期：最近已收盘交易日 {context.latest_trading_day}",
@@ -441,6 +442,7 @@ def _defaults(context: PlanContext) -> str:
             f"- 「放量」：成交额超过前 20 日均额的 {DEFAULTS['volume_surge_ratio']:g} 倍；"
             f"「缩量」：{DEFAULTS['volume_shrink_ratio']:g} 倍",
             "- 「成交量」理解为成交额 $amount",
+            f"- 「小市值」没给数字：总市值低于 {small_cap}，写成 $market_cap < {small_cap}",
         ]
     )
 

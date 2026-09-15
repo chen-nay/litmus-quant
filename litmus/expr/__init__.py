@@ -4,7 +4,7 @@
 """
 
 from litmus.expr.catalog import field_catalog, operator_catalog
-from litmus.expr.collector import collect_fields, collect_lookback
+from litmus.expr.collector import collect_fields, collect_lookback, compares_below
 from litmus.expr.describer import describe
 from litmus.expr.evaluator import Evaluation, ExprDataError, evaluate
 from litmus.expr.operators import MAX_LOOKBACK, MAX_WINDOW
@@ -23,6 +23,7 @@ __all__ = [
     "ValidationResult",
     "collect_fields",
     "collect_lookback",
+    "compares_below",
     "describe",
     "evaluate",
     "field_catalog",

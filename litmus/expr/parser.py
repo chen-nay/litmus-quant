@@ -8,6 +8,9 @@
 会被理解成 `$close > (10 & $pe_ttm) < 20`，悄悄算错；加了括号的写法在这套规则下含义不变。
 
 报错带上字符位置和中文原因，大模型按报错修改表达式时用得上。字段、算子是否存在由校验器管，这里只管语法。
+
+数字可以带「万」「亿」：`$market_cap < 30亿`。金额字段的单位是元，一长串 0 大模型会数错
+（2026-09-15 实测想写 30 亿，写成了 30000000000，是 300 亿），人在确认卡上也核对不了。
 """
 
 from __future__ import annotations
@@ -92,7 +95,7 @@ def onset(node: Node) -> Node:
 _TOKEN = re.compile(
     r"""
     (?P<space>\s+)
-  | (?P<number>(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)
+  | (?P<number>(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?[万亿]?)
   | (?P<field>\$[A-Za-z_][A-Za-z0-9_]*)
   | (?P<name>[A-Za-z_][A-Za-z0-9_]*)
   | (?P<op><=|>=|==|!=|[<>&|~+\-*/(),])
@@ -111,6 +114,15 @@ _CHAR_HINTS = {
     "）": "括号要用英文半角 ( )",
     "，": "逗号要用英文半角 ,",
 }
+
+
+#: 数字后面的单位
+NUMBER_UNITS = {"万": 1e4, "亿": 1e8}
+
+
+def _number_value(text: str) -> float:
+    unit = NUMBER_UNITS.get(text[-1])
+    return float(text[:-1]) * unit if unit else float(text)
 
 
 @dataclass(frozen=True)
@@ -205,7 +217,7 @@ class _Parser:
             raise ExprSyntaxError("表达式没写完，结尾还缺东西", self._length)
         self._index += 1
         if token.kind == "number":
-            return Number(float(token.text), token.text, token.position)
+            return Number(_number_value(token.text), token.text, token.position)
         if token.kind == "field":
             return Field(token.text[1:], token.position)
         if token.kind == "name":

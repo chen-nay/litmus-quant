@@ -68,6 +68,9 @@ class Facts:
     #: 个股回看：回看区间裁到本地数据、扣掉预热期之后，实际从哪天算
     first_date: date | None = None
     mentions: tuple[Mention, ...] = ()
+    #: 用了默认门槛的栏目（「小市值」→ 总市值 < 30 亿），和 spec.defaults_used 一样标「默认值，可修改」。
+    #: 不放进 defaults_used：那里的栏目缺了才补，前端会把没改过的整栏去掉不发，筛选条件不能这么丢
+    defaulted: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -81,7 +84,7 @@ def render_assumptions(
     spec: StockListSpec | BoardListSpec | StockHistorySpec, facts: Facts | None = None
 ) -> list[Assumption]:
     facts = facts or Facts()
-    notes = _Notes(spec.defaults_used, facts.mentions)
+    notes = _Notes((*spec.defaults_used, *facts.defaulted), facts.mentions)
     if isinstance(spec, StockHistorySpec):
         _history(spec, facts, notes)
     elif isinstance(spec, StockListSpec):

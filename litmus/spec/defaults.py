@@ -19,6 +19,7 @@ DEFAULTS: dict[str, object] = {
     "horizons": (5, 20, 60),  # 个股回看默认看之后几个交易日
     "exclude": ("ST", "suspended", "new_listing_60d"),  # 股票池默认剔除
     "benchmark": "universe_equal_weight",  # 个股回看默认对照：买入日全A等权
+    "small_cap": 3_000_000_000,  # 「小市值」没给数字时：总市值低于多少元（30 亿，2026-09-15 定）
 }
 
 #: 股票表、板块表最多取前多少名

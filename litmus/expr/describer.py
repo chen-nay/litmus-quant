@@ -3,6 +3,7 @@
 - 字段用中文名：$amount → 成交额
 - 全部算子都有对应说法；Mean(Ref(x, 1), n) 这种「前 n 日均值、不含当天」的常见写法单独翻得顺一点
 - 运算先后和解析器一致（| < & < 比较 < 加减 < 乘除 < 取反），需要时加中文括号
+- 一万以上的数按亿、万写：「总市值 < 30000000000」核对不了是 30 亿还是 300 亿
 """
 
 from __future__ import annotations
@@ -48,7 +49,7 @@ class _Describer:
 
     def text(self, node: Node) -> str:
         if isinstance(node, Number):
-            return node.text
+            return _number(node)
         if isinstance(node, Field):
             field = FIELDS.get(node.name)
             return field.label if field else f"${node.name}"
@@ -119,6 +120,14 @@ class _Describer:
             condition, then, otherwise = (self._value(arg) for arg in args)
             return f"如果{condition}，取{then}，否则取{otherwise}"
         return f"{name}（{'，'.join(self.text(arg) for arg in args)}）"
+
+
+def _number(node: Number) -> str:
+    for unit, size in (("亿", 1e8), ("万", 1e4)):
+        if abs(node.value) >= size:
+            scaled = f"{node.value / size:.4f}".rstrip("0").rstrip(".")
+            return f"{scaled} {unit}"
+    return node.text
 
 
 def _precedence(node: Node) -> int:

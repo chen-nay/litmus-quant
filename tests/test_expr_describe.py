@@ -43,6 +43,9 @@ from litmus.expr.operators import OPERATORS
         ("Sign($pct_chg)", "当日涨跌幅的正负（1、0、-1）"),
         ("-$pct_chg", "-当日涨跌幅"),
         ("$close != 1.40", "收盘价 ≠ 1.40"),
+        ("$market_cap < 30000000000", "总市值 < 300 亿"),
+        ("$market_cap < 30亿 & $amount > 5000万", "总市值 < 30 亿 且 成交额 > 5000 万"),
+        ("$amount > 123456789", "成交额 > 1.2346 亿"),
     ],
 )
 def test_说法(expr, text):

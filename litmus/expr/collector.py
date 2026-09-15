@@ -8,7 +8,7 @@
 - 含当天的 n 天窗口往前 n-1 条；`Ref / Delta / Pct` 往前 n 条；`Cross` 往前 1 条；EMA 按 8n
 - 条数数的是每只标的自己的行情，不是交易日历上的天数
 
-两个函数都假定表达式已经过校验。
+两个函数都假定表达式已经过校验。另外 compares_below 找「某字段小于某数」这一段，确认卡判断用没用默认门槛时用。
 """
 
 from __future__ import annotations
@@ -28,6 +28,30 @@ def collect_fields(node: Node) -> set[str]:
     if isinstance(node, Call):
         return set().union(*(collect_fields(arg) for arg in node.args))
     return set()
+
+
+def compares_below(node: Node, field: str, value: float) -> bool:
+    """表达式里有没有「$field 小于（等于）value」这一段，如 `$market_cap < 30亿`，也认反过来写的 `30亿 > $market_cap`。"""
+    if isinstance(node, Binary):
+        if node.op in ("<", "<=") and _bound(node.left, node.right, field, value):
+            return True
+        if node.op in (">", ">=") and _bound(node.right, node.left, field, value):
+            return True
+        return compares_below(node.left, field, value) or compares_below(node.right, field, value)
+    if isinstance(node, Unary):
+        return compares_below(node.operand, field, value)
+    if isinstance(node, Call):
+        return any(compares_below(arg, field, value) for arg in node.args)
+    return False
+
+
+def _bound(subject: Node, limit: Node, field: str, value: float) -> bool:
+    return (
+        isinstance(subject, Field)
+        and subject.name == field
+        and isinstance(limit, Number)
+        and limit.value == value
+    )
 
 
 def collect_lookback(node: Node, *, ema_warmup: bool = True) -> int:
