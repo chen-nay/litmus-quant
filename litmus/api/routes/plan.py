@@ -49,6 +49,7 @@ from litmus.llm import (
     Question,
     plan,
 )
+from litmus.spec import Mention
 from litmus.store import PlanRecord
 
 router = APIRouter()
@@ -121,14 +122,15 @@ def make_plan(query: str, previous_plan_id: str | None, services: Services) -> P
         trading_days=tuple(ds.get_trading_calendar(date(today.year - 1, 12, 1), last)),
     )
     result = plan(query, context, services.llm, services.events, previous)
-    response = _respond(result, services)
+    mentions = _with_names(result)
+    response = _respond(result, mentions, services)
 
     detail = {
         # 多轮追问时把回答接在原问题后面，下一轮追问用它
         "question": query if previous is None else f"{previous.query}；用户补充：{query}",
         "previous_plan_id": previous_plan_id,
         "questions": to_jsonable(list(result.questions)),
-        "mentions": [{"phrase": m.phrase, "field": m.field} for m in result.mentions],
+        "mentions": [{"phrase": m.phrase, "field": m.field} for m in mentions],
         "message": response.message,
         "alternatives": response.alternatives,
         "stock_candidates": [c.model_dump() for c in response.stock_candidates],
@@ -143,7 +145,21 @@ def make_plan(query: str, previous_plan_id: str | None, services: Services) -> P
     return response.model_copy(update={"plan_id": plan_id})
 
 
-def _respond(result: PlanResult, services: Services) -> PlanResponse:
+def _with_names(result: PlanResult) -> tuple[Mention, ...]:
+    """股票、概念板块的原话大模型已经单独给了（stock_mention、board_mention），它没在 mentions 里再记一遍的由代码补上。
+
+    2026-09-15 实测：同一句「平安每次放量之后一周涨跌怎样」，大模型有时一个说法都不给，确认卡就只能写「股票：中国平安」。
+    """
+    fields = {mention.field for mention in result.mentions}
+    extra = []
+    if result.stock is not None and "target" not in fields:
+        extra.append(Mention(result.stock.mention, "target"))
+    if result.board is not None and "universe.board" not in fields:
+        extra.append(Mention(result.board.mention, "universe.board"))
+    return (*result.mentions, *extra)
+
+
+def _respond(result: PlanResult, mentions: tuple[Mention, ...], services: Services) -> PlanResponse:
     if result.status == FAILED:
         return PlanResponse(
             status="failed", message=f"没能把这个问题翻译成查询条件：{result.error}"
@@ -183,7 +199,7 @@ def _respond(result: PlanResult, services: Services) -> PlanResponse:
         message = "；".join(issue_text(issue) for issue in issues)
         return PlanResponse(status=CLARIFY, spec=spec, message=f"条件要改一下：{message}")
     try:
-        assumptions = explain(checked, ds, result.mentions)
+        assumptions = explain(checked, ds, mentions)
     except (MissingDataError, ExprDataError) as exc:
         return PlanResponse(status=CLARIFY, spec=spec, message=f"条件要改一下：{exc}")
     checked = checked.model_copy(update={"assumptions": tuple(item.text for item in assumptions)})

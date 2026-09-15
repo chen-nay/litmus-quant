@@ -124,6 +124,19 @@ def test_个股回看_股票按原话解析成代码_没说的区间用本地全
     assert items["time_range"]["default"] is True
 
 
+def test_大模型没记原话的说法_股票和概念板块的原话照样用上(client, llm):
+    without = {key: value for key, value in HISTORY.items() if key != "mentions"}
+    body = ask(client, llm, without)
+    assert body["status"] == "ok", body
+    assert texts(body)["target"] == "「茅台」理解为：贵州茅台（600519.SH）"
+
+    if CONCEPT not in _ds.available_targets():
+        return
+    body = ask(client, llm, {**STOCK_LIST, "board_mention": "光模块", "board_guess": "光通信"})
+    assert body["status"] == "ok", body
+    assert texts(body)["universe.board"] == "「光模块」理解为：光通信"
+
+
 def test_个股回看_平安对应多只股票_让用户选(client, llm):
     body = ask(client, llm, {**HISTORY, "stock_mention": "平安", "stock_guess": "中国平安"})
     assert body["status"] == "needs_clarification", body
