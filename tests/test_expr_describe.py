@@ -46,6 +46,9 @@ from litmus.expr.operators import OPERATORS
         ("$market_cap < 30000000000", "总市值 < 300 亿"),
         ("$market_cap < 30亿 & $amount > 5000万", "总市值 < 30 亿 且 成交额 > 5000 万"),
         ("$amount > 123456789", "成交额 > 1.2346 亿"),
+        ("Pct($close, 20) > 0.1", "收盘价较 20 个交易日前的涨跌幅 > 10%"),
+        ("Pct($close, 5) < -0.05", "收盘价较 5 个交易日前的涨跌幅 < -5%"),
+        ("0.155 <= Pct($close, 60)", "15.5% ≤ 收盘价较 60 个交易日前的涨跌幅"),
     ],
 )
 def test_说法(expr, text):

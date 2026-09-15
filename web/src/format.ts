@@ -1,7 +1,7 @@
 /**
  * 数字怎么显示。结果里混着三种单位，集中在这一处并有单元测试：
  * - 字段单位是 % 的（涨跌幅 pct_chg、换手率等）是百分数：1.41 表示 1.41%
- * - 个股回看的涨跌、同期对照、跑赢比例是小数：-0.0078 表示 -0.78%
+ * - 个股回看的涨跌、同期对照、跑赢比例，按 Pct(...) 排序的排序值，都是小数：-0.0078 表示 -0.78%
  * - 成本是基点：30 表示 0.3%
  * 颜色按 A 股习惯：红涨绿跌。
  */
@@ -17,6 +17,9 @@ export interface FieldMeta {
   label: string;
   unit: string;
 }
+
+/** 结果是小数的那一列的单位：按 Pct(...) 排序的排序值 */
+export const FRACTION_UNIT = "小数";
 
 const MONEY_FIELDS = new Set(["amount", "market_cap", "circ_mv"]);
 const SIGNED_FIELDS = new Set(["pct_chg", "revenue_yoy", "profit_yoy"]);
@@ -77,14 +80,16 @@ export function formatCell(name: string, value: Cell | undefined, unit: string):
   if (typeof value === "string") return value;
   if (!isNumber(value)) return EMPTY;
   if (MONEY_FIELDS.has(name)) return formatYuan(value);
+  if (unit === FRACTION_UNIT) return formatFraction(value);
   if (unit === "%") return formatPercentValue(value, 2, SIGNED_FIELDS.has(name));
   if (unit === "个" || unit === "股") return fixed(value, 0);
   return fixed(value, 2);
 }
 
-/** 涨跌类的字段红涨绿跌，其余不上色 */
-export function cellColor(name: string, value: Cell | undefined): string | undefined {
-  return SIGNED_FIELDS.has(name) && typeof value === "number" ? trendColor(value) : undefined;
+/** 涨跌类的字段、按 Pct(...) 排序的排序值红涨绿跌，其余不上色 */
+export function cellColor(name: string, value: Cell | undefined, unit = ""): string | undefined {
+  const signed = SIGNED_FIELDS.has(name) || unit === FRACTION_UNIT;
+  return signed && typeof value === "number" ? trendColor(value) : undefined;
 }
 
 /** 列名。金额、百分数的格子里已经带了单位，列名不再写；板块的价格是点位 */
@@ -119,8 +124,22 @@ export function sortColumn(
   return {
     name: field?.name ?? "",
     label: sort?.label || field?.label || "排序值",
-    unit: field?.unit ?? "",
+    unit: field?.unit ?? (isPctCall(by) ? FRACTION_UNIT : ""),
   };
+}
+
+/** 排序依据整个就是一次 Pct(...)：算出来是小数。Pct(...) / Std(...) 这种不算 */
+function isPctCall(by: string): boolean {
+  if (!by.startsWith("Pct(")) return false;
+  let depth = 0;
+  for (let i = 3; i < by.length; i += 1) {
+    if (by[i] === "(") depth += 1;
+    if (by[i] === ")") {
+      depth -= 1;
+      if (depth === 0) return i === by.length - 1;
+    }
+  }
+  return false;
 }
 
 /** 排序依据就是结果里已有的一列（比如按涨跌幅排）时，不再重复显示排序值那一列 */

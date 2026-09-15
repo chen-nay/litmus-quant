@@ -4,12 +4,13 @@
 - 全部算子都有对应说法；Mean(Ref(x, 1), n) 这种「前 n 日均值、不含当天」的常见写法单独翻得顺一点
 - 运算先后和解析器一致（| < & < 比较 < 加减 < 乘除 < 取反），需要时加中文括号
 - 一万以上的数按亿、万写：「总市值 < 30000000000」核对不了是 30 亿还是 300 亿
+- 和 Pct 比较的数写成百分比：Pct 算出来是小数，「涨跌幅 > 0.1」容易看成 0.1%，写成「> 10%」
 """
 
 from __future__ import annotations
 
 from litmus.data import FIELDS, STOCK
-from litmus.expr.parser import Binary, Call, Field, Node, Number, Unary, parse
+from litmus.expr.parser import COMPARISONS, Binary, Call, Field, Node, Number, Unary, parse
 
 _PRECEDENCE = {
     "|": 1,
@@ -62,6 +63,9 @@ class _Describer:
             left = self._wrap(node.left, level)
             # a - (b - c)、a / (b * c)：右边同级也要括号
             right = self._wrap(node.right, level + 1 if node.op in ("-", "/") else level)
+            if node.op in COMPARISONS:
+                left = _percent(node.left, node.right) or left
+                right = _percent(node.right, node.left) or right
             return f"{left} {_SYMBOLS.get(node.op, node.op)} {right}"
         return self._call(node)
 
@@ -128,6 +132,19 @@ def _number(node: Number) -> str:
             scaled = f"{node.value / size:.4f}".rstrip("0").rstrip(".")
             return f"{scaled} {unit}"
     return node.text
+
+
+def _percent(value: Node, other: Node) -> str | None:
+    """和 Pct(...) 比较的数写成百分比：0.1 → 10%，-0.05 → -5%。别的情况返回 None。"""
+    if not (isinstance(other, Call) and other.name == "Pct"):
+        return None
+    sign = ""
+    if isinstance(value, Unary) and value.op == "-":
+        sign, value = "-", value.operand
+    if not isinstance(value, Number):
+        return None
+    scaled = f"{value.value * 100:.4f}".rstrip("0").rstrip(".")
+    return f"{sign}{scaled}%"
 
 
 def _precedence(node: Node) -> int:

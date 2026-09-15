@@ -60,7 +60,7 @@ export function ListResultView({
       align: "right",
       sorter,
       render: (value: Cell) => (
-        <span style={{ color: cellColor(meta.name, value) }}>{formatCell(meta.name, value, meta.unit)}</span>
+        <span style={{ color: cellColor(meta.name, value, meta.unit) }}>{formatCell(meta.name, value, meta.unit)}</span>
       ),
     };
   });

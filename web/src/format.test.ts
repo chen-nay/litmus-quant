@@ -32,6 +32,14 @@ describe("三种单位", () => {
     expect(formatFraction(0.25, 0, false)).toBe("25%");
   });
 
+  it("按 Pct(...) 排序时排序值是小数：0.1234 就是 +12.34%，也红涨绿跌", () => {
+    const meta = sortColumn({ by: "Pct($close, 20)", label: "20 日涨幅" }, new Map());
+    expect(meta).toEqual({ name: "", label: "20 日涨幅", unit: "小数" });
+    expect(formatCell(meta.name, 0.1234, meta.unit)).toBe("+12.34%");
+    expect(cellColor(meta.name, -0.02, meta.unit)).toBe(DOWN_COLOR);
+    expect(sortColumn({ by: "Pct($close, 20) / Std($pct_chg, 20)", label: "" }, new Map()).unit).toBe("");
+  });
+
   it("成本是基点：30 就是 0.30%", () => {
     expect(formatBps(30)).toBe("0.30%");
     expect(formatBps(5)).toBe("0.05%");
