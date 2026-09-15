@@ -1,4 +1,4 @@
-"""GET /api/stocks/{code}/kline（ARCHITECTURE §6）：个股回看页的 K 线图，前复权。"""
+"""GET /api/stocks（找股票）、GET /api/stocks/{code}/kline（个股回看页的 K 线图，前复权）（ARCHITECTURE §6）。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,33 @@ from litmus.data import STOCK, MissingDataError
 router = APIRouter()
 
 _ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+#: 找股票最多返回几个候选
+SEARCH_LIMIT = 20
+
+
+@router.get("/api/stocks")
+def search_stocks(request: Request, q: str | None = None) -> dict[str, object]:
+    """找股票：代码、名称、拼音首字母、曾用名、简称都行（规则见 ARCHITECTURE §2.3），按规则优先级排。
+    total 是全部命中的只数，matches 最多给 SEARCH_LIMIT 个。"""
+    text = (q or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="q 不能为空")
+    matches = services_of(request).ds.resolve_stock(text)
+    return {
+        "query": text,
+        "total": len(matches),
+        "matches": [
+            {
+                "code": match.code,
+                "name": match.name,
+                "rule": match.rule_label,
+                "matched": match.matched,
+                "delisted": match.delisted,
+            }
+            for match in matches[:SEARCH_LIMIT]
+        ],
+    }
 
 
 @router.get("/api/stocks/{code}/kline")

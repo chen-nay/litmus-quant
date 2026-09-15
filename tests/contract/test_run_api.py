@@ -125,3 +125,45 @@ def test_数据状态与板块清单(client):
     assert body["status"]["data_through"] >= DAY.isoformat()
     assert body["sync"]["state"] == "idle"
     assert len(client.get("/api/boards?type=sw_industry").json()["boards"]) == 31
+
+
+def test_检查接口_个股回看的实际统计起点和结果对得上(client):
+    """年线要往前读 250 多条行情，本地数据从 2016-01-04 起，回看实际从 2017 年初才算得出来。"""
+    spec = {
+        "shape": "stock_history",
+        "target": {"code": "000001.SZ"},
+        "event": {"preset_id": "breakout_ma"},
+        "time_range": {"from": "2016-01-01", "to": "2017-06-30"},
+        "horizons": [5],
+    }
+    body = client.post("/api/check", json={"spec": spec}).json()
+    assert body["status"] == "ok", body
+    items = {item["field"]: item for item in body["assumptions"]}
+    assert items["target"]["text"] == "股票：平安银行（000001.SZ）"
+    assert items["event"]["default"] is True  # 均线天数没给，用了默认值
+    assert items["benchmark"]["default"] is True
+
+    run = client.post("/api/run", json={"spec": spec}).json()
+    assert run["status"] == "done", run
+    first = run["result"]["range"][0]
+    assert first.startswith("2017-")
+    assert f"实际从 {first} 算起" in items["time_range"]["text"]
+
+
+def test_检查接口_表达式翻成中文(client):
+    spec = {
+        "shape": "stock_list",
+        "as_of": DAY.isoformat(),
+        "filter": {"expr": "$amount > Mean(Ref($amount, 1), 20) * 2"},
+        "limit": 5,
+    }
+    body = client.post("/api/check", json={"spec": spec}).json()
+    items = {item["field"]: item["text"] for item in body["assumptions"]}
+    assert items["filter"] == "筛选条件：成交额 > 前 20 日成交额均值（不含当天） × 2"
+
+
+def test_找股票(client):
+    body = client.get("/api/stocks?q=平安").json()
+    assert {"000001.SZ", "601318.SH"} <= {match["code"] for match in body["matches"]}
+    first = client.get("/api/stocks?q=gzmt").json()["matches"][0]
+    assert (first["code"], first["rule"]) == ("600519.SH", "拼音首字母")

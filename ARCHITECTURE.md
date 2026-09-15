@@ -120,9 +120,9 @@ layers = [
 |---|---|
 | data | `DataService`：`ds.get_fields()` / `ds.get_trading_calendar()` / `ds.latest_trading_day()` / `ds.data_range()` / `ds.available_targets()` / `ds.stock_info()` / `ds.get_index_daily()` / `ds.get_universe()` / `ds.get_universe_mask()` / `ds.list_boards()` / `ds.board_members()` / `ds.concept_snapshot_date()` / `ds.get_kline()` / `ds.resolve_stock()` / `ds.resolve_board()`（第 7 步）；`DataSync`：`open()`（按环境变量连上 Tushare，拿到数据目录的同步锁）/ `sync_all()` / `status()`（本地数据状态、能否提问）；字段目录 `data.FIELDS` |
 | spec | `spec.QuerySpec`（三种形状）、`spec.DEFAULTS`（默认值表）、`spec.render_assumptions()`（由 spec 生成确认卡说明） |
-| expr | `expr.parse()` / `expr.validate()` / `expr.collect_fields()` / `expr.collect_lookback()` / `expr.evaluate()`（返回结果与实际统计起点）；`expr.field_catalog()` / `expr.operator_catalog()`（供 llm 组装提示词） |
+| expr | `expr.parse()` / `expr.validate()` / `expr.collect_fields()` / `expr.collect_lookback()` / `expr.evaluate()`（返回结果与实际统计起点）/ `expr.describe()`（表达式 → 中文说明）；`expr.field_catalog()` / `expr.operator_catalog()`（供 llm 组装提示词） |
 | signals | `signals.load_events()` / `signals.render_event()` / `signals.event_catalog()`（事件库） |
-| research | `research.run(spec, ds)` |
+| research | `research.run(spec, ds)` / `research.statistics_range(spec, ds)`（个股回看实际统计的区间，确认卡用） |
 | llm | `llm.plan()` |
 | store | 见 §7 |
 | api | `create_app()`：HTTP 接口，见 §6 |
@@ -362,8 +362,14 @@ class DataService:
 - 代码覆盖不了的是**外号**（如"宁王"→宁德时代）：由 LLM 给出 guess，再用同样规则核对 guess
 - 结果：0 个 → 提示"未找到"；1 个 → 直接填入；多个 → 确认卡列出候选让用户选
 - 全部股票约 5500 只，内存中逐只比对即可
+- **实现说明**（第 7a 步，2026-09-15）：拼音首字母用股票列表自带的拼音列（5904 只里 14 只为空），不加依赖；
+  一只股票只出现一次，取命中的最高一级；不含北交所（P0 不含），含已退市的股票并标出来；比较前统一全角转半角、去空格、
+  字母转大写。实测「平安」→ 平安银行、平安电工、中国平安；「招行」→ 招商银行；「龙净环保」→ 紫金龙净（曾用名）。
+  `GET /api/stocks?q=` 用同一套规则
 - **板块同样走"提及 + 解析"**：申万只有 31 个一级行业，整份放进提示词；概念板块有几百个，不进提示词，
-  LLM 只填用户原话，由 `ds.resolve_board()` 用同一套规则（精确、包含、拼音、字序）查找，多个候选让用户选
+  LLM 填用户原话，由 `ds.resolve_board()` 查找，多个候选让用户选。规则是代码、名称一致、名称包含、字按顺序出现，
+  **不做拼音**（概念板块清单没有拼音列，概念名也很少有人用拼音缩写）；「银行板块」「航运概念」去掉后缀再查一遍。
+  **外号对不上的由 LLM 给猜测名再查**，和股票一样：2026-09-15 实测通达信没有「光模块」，叫「光通信」（2026-09-15 定）
 
 ### 2.4 DataService 契约测试
 
@@ -1198,7 +1204,7 @@ LLM 调用本身失败时，前端展示事件库里的固定示例，完全不�
 
 **防线③ 的三类检查**（任一不过 → 转成 needs_clarification，绝不执行）：
 
-1. **必填项**：股票表必须有 `as_of`；板块表必须有 `board_type` 和排序指标；个股回看必须有 `target.code` 和 `event.preset_id`
+1. **必填项**：股票表必须有 `as_of`；板块表必须有 `board_type`（不指定排序就按成交额，§4.2）；个股回看必须有 `target.code` 和 `event.preset_id`
 2. **白名单核对**：股票过 `ds.resolve_stock()`；板块过 `ds.resolve_board()`；事件过 `signals.load_events()`
 3. **参数范围**：事件参数必须落在 `builtin.toml` 定义的取值范围内（均线天数、放量倍数、连板数等）；
    `signals.render_event()` 越界时报错并带上参数名、传入的值、可选范围，据此让用户改参数。
@@ -1261,6 +1267,19 @@ LLM 既不写也不审查。
 
 `spec.defaults_used` 记录哪些字段用的是默认值，确认卡据此标出"默认值，可修改"。
 
+**实现**（第 7a 步，2026-09-15）：
+
+- `spec.render_assumptions(spec, facts)` 按栏目逐条生成，每条带栏目名和是否默认值。spec 模块不依赖别的模块，
+  表达式的中文、股票名、概念板块名和成分快照日、板块数据区间、个股回看实际统计起点，由 api 查好放进 `Facts`（`api/explain.py`）
+- 股票表、板块表的条件和排序是任意表达式，模板写不出来，由 `expr.describe()` 翻成中文：全部算子都有说法，
+  `$amount > Mean(Ref($amount, 1), 20) * 2` 翻成「成交额 > 前 20 日成交额均值（不含当天） × 2」
+- 说明要用到用户原话（「「放量」理解为……」），而模板只认栏目：由 LLM 给出「原话里的词 → 栏目」（`Mention`，只有词、不含数字），
+  数字和定义一律从 spec 取
+- `defaults_used` 由代码按请求里缺了哪些栏目填（事件参数看 `render_event` 用了哪些默认值），请求里带来的
+  `defaults_used`、`assumptions` 不作数；运行记录里存的是代码生成的那份
+- 个股回看的实际统计起点由 `research.statistics_range()` 算，和算结果用的是同一段代码，确认卡上的区间和结果页对得上
+- 确认卡上改了参数，调 `POST /api/check`（只检查、不计算）刷新说明
+
 ### 5.5 prompt 管理
 
 一个 prompt 一个文件，文件名即 ID：
@@ -1312,13 +1331,23 @@ POST /api/plan
   说明：调 llm.plan()，再做确定性兜底核对；保存原话与 spec 得到 plan_id；
         返回未执行的 QuerySpec，前端渲染成确认卡或澄清卡
 
+POST /api/check
+  body: 同 /api/run
+  resp: { "status": "ok|needs_revision|data_not_ready", "issues": [...], "spec": QuerySpec,
+          "assumptions": [{ "field", "text", "default" }] }
+  说明：只检查、不计算。返回整理好的 spec（事件按事件库生成、默认值已标出）和说明文字；确认卡上改了参数用它刷新（§5.4）
+
+GET  /api/stocks?q=平安
+  resp: { "query", "total", "matches": [{ "code", "name", "rule", "matched", "delisted" }] }
+  说明：找股票，规则见 §2.3，按规则优先级排，最多 20 个
+
 POST /api/run
   body: { "spec": QuerySpec, "plan_id": "..." }                # plan_id 可选
   resp: { "status": "done|needs_revision|data_not_ready|failed",
           "issues": [{ "path", "message", "allowed", "position" }], "run_id": "...",
           "result": ListResult | HistoryResult, "message": "...", "data": {...} }
   说明：本地数据够不够（data_not_ready，data 里附数据状态和同步进度）→ 确定性检查（needs_revision）
-        → research.run() → 存运行记录。用户改过参数走同一套检查，不再调 LLM；assumptions 由 spec 重新生成（第 7 步）
+        → research.run() → 存运行记录。用户改过参数走同一套检查，不再调 LLM；说明文字由代码重新生成，和运行记录一起存
 
 GET  /api/run/{run_id}
   说明：运行记录（spec、结果或错误、数据截至、事件库版本、耗时）；分享链接打开。没有这条记录返回 404
@@ -1474,6 +1503,7 @@ litmus/
 │   ├── collector.py        # collect_fields / collect_lookback
 │   ├── evaluator.py        # AST 求值
 │   ├── catalog.py          # field_catalog / operator_catalog
+│   ├── describer.py        # describe()：表达式 → 中文说明，给确认卡用
 │   └── operators/
 │       ├── timeseries.py
 │       ├── cross_section.py
@@ -1498,6 +1528,7 @@ litmus/
 │   ├── main.py             # create_app()
 │   ├── services.py         # 启动时创建一次的依赖：ds、store、事件库、同步任务、数据状态
 │   ├── checks.py           # /api/run 的确定性检查
+│   ├── explain.py          # 说明文字要用的表达式中文、名称、快照日、实际统计起点
 │   ├── serialize.py        # 研究结果 → JSON
 │   ├── sync_job.py         # 后台同步：一次一个、可停止、出错停下、进度
 │   ├── routes/             # runs.py / catalog.py / data.py
@@ -1542,7 +1573,7 @@ Makefile
 | 4 | signals：事件库 15 条 | TOML 加载，全部参数组合校验通过，都能跑出回看结果 |
 | 5 | store（JSON）+ FastAPI：`/api/run`（先不接 LLM，直接传 QuerySpec）、`/api/run/{run_id}`、`/api/events`、`/api/boards` + `/api/data/sync`、`/api/data/sync/stop`、`/api/data/status` | curl 能跑出三种结果（§6，`tests/contract/test_run_api.py` 用同样的请求）；能触发同步、查看进度、停止（离线用假同步器测；2026-09-14 经接口真实同步一次，从 09-11 补到 09-14，6 分 5 秒） |
 | 6 | 前端：同步页 + 查询表单（第 7 步之前直接填条件）+ 三种结果页（个股回看带前复权 K 线） | 页面上能完成同步，并看到三种结果。浏览器里用本地真实数据跑三种结果，数据量小；页面上真实同步一次之前先确认 |
-| 7 | `llm.plan()` + prompt 管理 + `ds.resolve_stock()` / `ds.resolve_board()` + 确认卡 / 澄清卡（说明文字由模板生成） | 自然语言能正确生成三种形状；编造字段被拦截；"平安"返回多个候选；"最近哪个板块最强"先澄清；"现在能买茅台吗"给改写建议；改完参数说明文字跟着变 |
+| 7 | `llm.plan()` + prompt 管理 + `ds.resolve_stock()` / `ds.resolve_board()` + 确认卡 / 澄清卡（说明文字由模板生成）。拆成四小步：7a 名称解析、表达式翻中文、说明文字、检查接口；7b 大模型模块与 `/api/plan`；7c 前端提问框、确认卡、澄清卡；7d 用真实问题验收 | 自然语言能正确生成三种形状；编造字段被拦截；"平安"返回多个候选；"最近哪个板块最强"先澄清；"现在能买茅台吗"给改写建议；改完参数说明文字跟着变 |
 | 8 | Docker 打包 | 全新环境按 README 能完成部署、同步并正常使用 |
 
 ---
@@ -1583,10 +1614,11 @@ def test_mean():
 | returns | 手工构造 5 个触发点，核对起止价格、买入/卖出顺延、扣成本、无法成交的剔除 |
 | history | 事件只在"由不满足变为满足"那天触发（连续成立不重复计、三连板只算一次）；同期市场平均与这只股票平时平均的计算口径 |
 | screener | 股票表 / 板块表：筛选、排序、取前 N；板块字段正确路由到板块数据表 |
-| resolve_stock | 六条匹配规则逐条覆盖；多个候选全部返回 |
+| 名称解析 | 小表格逐条覆盖六条规则、同一只只出现一次、不含北交所、含退市、全角和空格、板块去后缀（`tests/test_resolve.py`）；真实数据上「平安」多个候选、茅台的名称 / 代码 / 拼音、「招行」「中石油」、曾用名「龙净环保」、板块「光模块」查不到（`tests/contract/test_resolve.py`） |
+| describe | 每个算子的中文说法、括号与运算先后、全部算子都有说法（`tests/test_expr_describe.py`） |
 | prompts | 所有 prompt 能渲染；变量不缺不多；id 与文件名一致 |
 | llm.plan | 用假 LLMClient：编造字段被拦截；缺必填项转澄清；状态条件要求回看时返回 not_an_event；改写建议含禁用词时被丢弃 |
-| assumptions | 改了参数说明文字跟着变；默认值字段被标出"默认值"；板块条件带上"按当前成分"的说明 |
+| assumptions | 改了参数说明文字跟着变；默认值栏目标出"默认值"；原话说法写成「理解为」；概念板块成分、排名范围、长窗口、实际统计起点的说明（`tests/test_assumptions.py`）；检查接口不计算、请求里带来的说明和默认值标记不作数、确认卡上的实际统计起点和结果对得上（`tests/test_api.py`、`tests/contract/test_run_api.py`） |
 
 ---
 

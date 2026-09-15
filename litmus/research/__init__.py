@@ -4,7 +4,7 @@
 """
 
 from litmus.data import DataService
-from litmus.research.history import run_stock_history
+from litmus.research.history import run_stock_history, statistics_range
 from litmus.research.results import HistoryResult, HorizonSummary, ListResult, TriggerRecord
 from litmus.research.returns import Delay
 from litmus.research.screener import run_board_list, run_stock_list
@@ -28,4 +28,5 @@ __all__ = [
     "ListResult",
     "TriggerRecord",
     "run",
+    "statistics_range",
 ]

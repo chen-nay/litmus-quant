@@ -36,6 +36,7 @@ from litmus.data.fields import (
     check_available,
 )
 from litmus.data.manifest import Manifest
+from litmus.data.resolve import BoardMatch, StockMatch, match_boards, match_stocks
 from litmus.data.storage import MarketStore, MissingDataError
 from litmus.data.sync import (
     BENCHMARK_INDEXES,
@@ -525,6 +526,31 @@ class DataService:
             raise ValueError(f"不认识的板块类型 {board_type!r}，可选 sw_industry、concept")
         boards = self._scan_table(table).select("code", "name").sort("code").collect()
         return [BoardInfo(code, name, board_type) for code, name in boards.iter_rows()]
+
+    def resolve_stock(self, text: str) -> list[StockMatch]:
+        """股票代码 / 名称 / 拼音首字母 / 曾用名 / 简称 → 候选，按规则优先级排（§2.3，规则见 resolve.py）。
+
+        0 个就是没找到，1 个直接用，多个让用户在确认卡上选。不含北交所，含已退市的股票。
+        """
+        basic = (
+            self._scan_table(STOCK_BASIC_TABLE)
+            .select("code", "name", "pinyin", "delist_date")
+            .collect()
+        )
+        renames = self._scan_table(NAMECHANGE_TABLE).select("code", "name").collect()
+        return match_stocks(text, basic, renames)
+
+    def resolve_board(self, text: str, board_type: str | None = None) -> list[BoardMatch]:
+        """板块代码 / 名称 → 候选。不给 board_type 就两种口径都查（概念板块不可用时只查申万行业），
+        同一级里申万行业排在前面。"""
+        if board_type is None:
+            kinds = [SW_INDUSTRY, *([CONCEPT] if CONCEPT in self.available_targets() else [])]
+        elif board_type in (SW_INDUSTRY, CONCEPT):
+            kinds = [board_type]
+        else:
+            raise ValueError(f"不认识的板块类型 {board_type!r}，可选 sw_industry、concept")
+        boards = [(b.code, b.name, b.board_type) for kind in kinds for b in self.list_boards(kind)]
+        return match_boards(text, boards)
 
     def concept_snapshot_date(self) -> date:
         """概念板块清单与成分的快照日。P0 概念板块只有这一天的成分（§2.7），需要能力可用。"""

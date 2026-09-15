@@ -3,6 +3,7 @@
 其他模块只从这里 import（ARCHITECTURE §1.2 第 3 条）。
 """
 
+from litmus.spec.assumptions import Assumption, Facts, Mention, render_assumptions
 from litmus.spec.defaults import (
     BENCHMARKS,
     DEFAULTS,
@@ -33,10 +34,13 @@ __all__ = [
     "MAX_HORIZON",
     "MAX_HORIZONS",
     "MAX_LIMIT",
+    "Assumption",
     "BoardListSpec",
     "BoardRef",
     "Condition",
     "Event",
+    "Facts",
+    "Mention",
     "QuerySpec",
     "Sort",
     "StockHistorySpec",
@@ -45,4 +49,5 @@ __all__ = [
     "TimeRange",
     "Universe",
     "parse_spec",
+    "render_assumptions",
 ]

@@ -57,7 +57,9 @@ def check_spec(
     """通过返回 (spec, [])，个股回看的事件已经按事件库重新生成；不通过返回 (None, 要改的地方)。"""
     if not isinstance(raw, dict):
         return None, [Issue(path="spec", message="spec 要是一个对象")]
-    raw, event_issues = _render_event(raw, events)
+    raw, event_issues, event_defaults = _render_event(raw, events)
+    # 用了哪些默认值、说明文字都由代码定，请求里带来的不作数（§5.4）
+    raw = {**raw, "defaults_used": [*_missing_defaults(raw), *event_defaults], "assumptions": []}
     try:
         spec = parse_spec(raw)
     except ValidationError as exc:
@@ -74,22 +76,25 @@ def check_spec(
 # ── 1. 事件 ─────────────────────────────────────────────────────
 
 
-def _render_event(raw: dict[str, Any], events: EventLibrary) -> tuple[dict[str, Any], list[Issue]]:
+def _render_event(
+    raw: dict[str, Any], events: EventLibrary
+) -> tuple[dict[str, Any], list[Issue], list[str]]:
+    """返回 (请求, 问题, 用了默认值的事件参数路径)。"""
     if raw.get("shape") != "stock_history" or not isinstance(raw.get("event"), dict):
-        return raw, []  # 不是个股回看，或者事件栏目本身就不对（结构检查会报）
+        return raw, [], []  # 不是个股回看，或者事件栏目本身就不对（结构检查会报）
     event = raw["event"]
     preset_id = event.get("preset_id")
     if not preset_id:
         message = "个股回看的事件要从事件库里选，可选的见 /api/events（暂不支持自定义事件）"
-        return raw, [Issue(path="event.preset_id", message=message)]
+        return raw, [Issue(path="event.preset_id", message=message)], []
     params = event.get("params") or {}
     if not isinstance(params, Mapping):
-        return raw, []  # 结构检查会报 event.params
+        return raw, [], []  # 结构检查会报 event.params
     try:
         rendered = render_event(str(preset_id), params, events)
     except EventParamError as exc:
         path = "event.preset_id" if exc.param is None else f"event.params.{exc.param}"
-        return raw, [Issue(path=path, message=str(exc), allowed=exc.allowed)]
+        return raw, [Issue(path=path, message=str(exc), allowed=exc.allowed)], []
     event = {
         **event,
         "preset_id": rendered.preset_id,
@@ -98,7 +103,27 @@ def _render_event(raw: dict[str, Any], events: EventLibrary) -> tuple[dict[str, 
         "label": rendered.label,
         "library_version": rendered.library_version,
     }
-    return {**raw, "event": event}, []
+    defaults = [f"event.params.{name}" for name in rendered.defaults_used]
+    return {**raw, "event": event}, [], defaults
+
+
+#: 请求里没给、由默认值补上的栏目（spec.DEFAULTS），确认卡据此标「默认值，可修改」
+_DEFAULTABLE: dict[str, tuple[tuple[str, ...], ...]] = {
+    "stock_list": (("sort",), ("limit",), ("universe", "base"), ("universe", "exclude")),
+    "board_list": (("sort",), ("limit",)),
+    "stock_history": (("horizons",), ("benchmark",), ("cost_bps",)),
+}
+
+
+def _missing_defaults(raw: dict[str, Any]) -> list[str]:
+    missing = []
+    for path in _DEFAULTABLE.get(str(raw.get("shape")), ()):
+        value: Any = raw
+        for key in path:
+            value = value.get(key) if isinstance(value, dict) else None
+        if value is None:
+            missing.append(".".join(path))
+    return missing
 
 
 # ── 2. 结构 ─────────────────────────────────────────────────────

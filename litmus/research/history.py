@@ -16,7 +16,7 @@ from datetime import date
 import polars as pl
 
 from litmus.data import STOCK, DataService, MissingDataError
-from litmus.expr import evaluate, onset, parse
+from litmus.expr import Evaluation, evaluate, onset, parse
 from litmus.research.results import HistoryResult, HorizonSummary, TriggerRecord
 from litmus.research.returns import COUNTED, PENDING, UNFILLED, Tape, Trade, pool_average
 from litmus.spec import DEFAULTS, StockHistorySpec
@@ -31,28 +31,11 @@ _TAPE_FIELDS = ["open", "close", "open_limit_up", "is_limit_down"]
 
 
 def run_stock_history(spec: StockHistorySpec, ds: DataService) -> HistoryResult:
-    code = spec.target.code
-    if not code:
-        raise ValueError(
-            "target.code 为空：要先把股票解析成代码（第 7 步由 api 调 ds.resolve_stock）"
-        )
-    coverage_start, latest = ds.data_range(STOCK)
-    start = max(spec.time_range.start, coverage_start)
-    end = min(spec.time_range.end, latest)
-    if start > end:
-        raise MissingDataError(
-            f"回看区间 {spec.time_range.start} ~ {spec.time_range.end} 不在本地数据（{coverage_start} ~ {latest}）里"
-        )
-
+    coverage_start, latest, start, end, rows, evaluation = _scan(spec, ds, _TAPE_FIELDS)
+    code = spec.target.code or ""
     calendar = ds.get_trading_calendar(coverage_start, latest)
-    rows = ds.get_fields([code], coverage_start, latest, _TAPE_FIELDS)
-    universe = rows.filter(pl.col("date").is_between(start, end)).select("date", "code")
-    if universe.is_empty():
-        raise MissingDataError(f"本地没有 {code} 在 {start} ~ {end} 的行情")
     info = ds.stock_info([code], end).row(0, named=True)
     tape = Tape(calendar, rows, info["delist_date"])
-
-    evaluation = evaluate(onset(parse(spec.event.expr)), "event", universe, start, end, ds)
     first = evaluation.first_date or start
     trigger_days = evaluation.values.filter(pl.col("value")).get_column("date").to_list()
 
@@ -76,6 +59,35 @@ def run_stock_history(spec: StockHistorySpec, ds: DataService) -> HistoryResult:
         summary=summary,
         notes=_notes(len(records), summary, start, end, latest),
     )
+
+
+def statistics_range(spec: StockHistorySpec, ds: DataService) -> tuple[date, date]:
+    """实际统计的区间：回看区间裁到本地数据里，再扣掉事件的预热期。和结果里的 range 是同一段代码算的，
+    确认卡上显示（§3.5）。"""
+    _, _, start, end, _, evaluation = _scan(spec, ds, ["close"])
+    return evaluation.first_date or start, end
+
+
+def _scan(
+    spec: StockHistorySpec, ds: DataService, fields: list[str]
+) -> tuple[date, date, date, date, pl.DataFrame, Evaluation]:
+    """裁区间、取这只股票的行情、求事件表达式。返回 (本地数据起点, 最新一天, 起点, 终点, 行情, 求值结果)。"""
+    code = spec.target.code
+    if not code:
+        raise ValueError("target.code 为空：要先把股票解析成代码（ds.resolve_stock）")
+    coverage_start, latest = ds.data_range(STOCK)
+    start = max(spec.time_range.start, coverage_start)
+    end = min(spec.time_range.end, latest)
+    if start > end:
+        raise MissingDataError(
+            f"回看区间 {spec.time_range.start} ~ {spec.time_range.end} 不在本地数据（{coverage_start} ~ {latest}）里"
+        )
+    rows = ds.get_fields([code], coverage_start, latest, fields)
+    universe = rows.filter(pl.col("date").is_between(start, end)).select("date", "code")
+    if universe.is_empty():
+        raise MissingDataError(f"本地没有 {code} 在 {start} ~ {end} 的行情")
+    evaluation = evaluate(onset(parse(spec.event.expr)), "event", universe, start, end, ds)
+    return coverage_start, latest, start, end, rows, evaluation
 
 
 def _record(

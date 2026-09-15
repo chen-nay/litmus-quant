@@ -19,6 +19,27 @@ class Issue(BaseModel):
     position: int | None = None
 
 
+class AssumptionItem(BaseModel):
+    """确认卡上的一条说明。"""
+
+    #: 对应的栏目，如 "as_of"、"universe.exclude"；整体说明为空
+    field: str | None = None
+    text: str
+    #: 用的是默认值，确认卡标「默认值，可修改」
+    default: bool = False
+
+
+class CheckResponse(BaseModel):
+    status: Literal["ok", "needs_revision", "data_not_ready"]
+    issues: list[Issue] = Field(default_factory=list)
+    #: ok：整理好的查询条件（事件按事件库生成、默认值已标出），原样交给 /api/run
+    spec: dict[str, Any] | None = None
+    #: ok：说明文字，由查询条件按模板生成
+    assumptions: list[AssumptionItem] = Field(default_factory=list)
+    message: str | None = None
+    data: dict[str, Any] | None = None
+
+
 class RunResponse(BaseModel):
     status: Literal["done", "needs_revision", "data_not_ready", "failed"]
     #: needs_revision：要改的地方，逐条列出

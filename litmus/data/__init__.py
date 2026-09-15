@@ -18,6 +18,7 @@ from litmus.data.fields import (
     names_for,
 )
 from litmus.data.loaders.tushare import TushareError
+from litmus.data.resolve import BoardMatch, StockMatch
 from litmus.data.service import BoardInfo, DataService, Kline
 from litmus.data.storage import MarketStore, MissingDataError
 from litmus.data.sync import (
@@ -40,6 +41,7 @@ __all__ = [
     "SYNC_STEPS",
     "AmbiguousDataError",
     "BoardInfo",
+    "BoardMatch",
     "DataService",
     "DataStatus",
     "DataSync",
@@ -48,6 +50,7 @@ __all__ = [
     "MarketStore",
     "MissingDataError",
     "MonthResult",
+    "StockMatch",
     "SyncError",
     "TushareError",
     "UnknownFieldError",

@@ -353,3 +353,54 @@ def test_事件清单带参数类型和范围(tmp_path):
 def test_K线参数写错不读数据直接400(tmp_path, query):
     response = make_client(tmp_path, ds=NoData()).get(f"/api/stocks/600519.SH/kline?{query}")
     assert response.status_code == 400
+
+
+# ── 只检查不计算、说明文字、找股票 ──────────────────────────────
+
+
+def test_检查接口_不计算_给出说明文字_没给的栏目标成默认值(tmp_path, monkeypatch):
+    def no_run(spec, ds):
+        raise AssertionError("检查接口不该计算")
+
+    monkeypatch.setattr("litmus.api.routes.runs.run_research", no_run)
+    body = make_client(tmp_path).post("/api/check", json={"spec": stock_list()}).json()
+    assert body["status"] == "ok", body
+    assert body["spec"]["defaults_used"] == ["sort", "limit", "universe.base", "universe.exclude"]
+    items = {item["field"]: item for item in body["assumptions"]}
+    assert items["sort"] == {
+        "field": "sort",
+        "text": "排序：成交额从高到低（没有指定排序）",
+        "default": True,
+    }
+    assert (items["as_of"]["text"], items["as_of"]["default"]) == ("日期：2026-09-11", False)
+    assert body["spec"]["assumptions"] == [item["text"] for item in body["assumptions"]]
+
+
+def test_检查接口_请求里带来的说明文字和默认值标记不作数(tmp_path):
+    spec = stock_list(limit=10, assumptions=["乱写的说明"], defaults_used=["as_of"])
+    body = make_client(tmp_path).post("/api/check", json={"spec": spec}).json()
+    assert "乱写的说明" not in body["spec"]["assumptions"]
+    assert {"as_of", "limit"}.isdisjoint(body["spec"]["defaults_used"])
+
+
+def test_检查接口_要改的照样返回问题_不读数据(tmp_path):
+    spec = stock_history({"preset_id": "breakout_ma", "params": {"ma": 7}})
+    body = make_client(tmp_path, ds=NoData()).post("/api/check", json={"spec": spec}).json()
+    assert body["status"] == "needs_revision"
+    assert body["issues"][0]["path"] == "event.params.ma"
+
+
+def test_运行记录里存的是代码生成的说明文字(tmp_path, monkeypatch):
+    result = ListResult("stock_list", DAY, 0, ("code",), (), ())
+    monkeypatch.setattr("litmus.api.routes.runs.run_research", lambda spec, ds: result)
+    client = make_client(tmp_path)
+    body = post(client, stock_list(assumptions=["乱写的说明"])).json()
+    record = client.get(f"/api/run/{body['run_id']}").json()
+    assert record["spec"]["assumptions"][0] == "日期：2026-09-11"
+    assert "乱写的说明" not in record["spec"]["assumptions"]
+
+
+def test_找股票要给关键词(tmp_path):
+    client = make_client(tmp_path, ds=NoData())
+    assert client.get("/api/stocks?q=%20").status_code == 400
+    assert client.get("/api/stocks").status_code == 400
