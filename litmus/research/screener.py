@@ -75,7 +75,7 @@ def _run(
     ranked = scores.join(matches, on=["date", "code"], how="semi")
     missing = ranked.get_column("value").null_count()
     if missing:
-        notes.append(f"有 {missing} 只排序值为空（比如亏损股没有市盈率），没有参与排序")
+        notes.append(f"有 {missing} 只排序值为空，没有参与排序")
     top = (
         ranked.drop_nulls("value")
         .sort(["value", "code"], descending=[order.order == "desc", False])
