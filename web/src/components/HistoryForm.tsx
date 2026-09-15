@@ -32,7 +32,7 @@ export function HistoryForm({ initial, planId, issues, onChecked, onCancel }: Fo
     () => [...BASE_FIELDS, ...(event?.params ?? []).map((param) => ["event", "params", param.name])],
     [event],
   );
-  const checker = useChecker(form, fields, { planId, issues, onChecked });
+  const checker = useChecker(form, fields, { initial, planId, issues, onChecked });
   const first = status?.history_from;
   const last = status?.data_through;
 
@@ -131,7 +131,7 @@ export function HistoryForm({ initial, planId, issues, onChecked, onCancel }: Fo
             <Select
               mode="tags"
               tokenSeparators={[",", "，", " "]}
-              options={HORIZON_CHOICES.map((n) => ({ value: n, label: `${n} 天` }))}
+              options={HORIZON_CHOICES.map((n) => ({ value: String(n), label: `${n} 天` }))}
             />
           </Form.Item>
         </Col>

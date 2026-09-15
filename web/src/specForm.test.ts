@@ -7,6 +7,7 @@ import {
   buildHistory,
   buildStockList,
   disabledDay,
+  dropUntouchedDefaults,
   fieldForIssue,
   historyValues,
   issueText,
@@ -159,7 +160,28 @@ describe("查询条件 → 表单（确认卡上点修改时预填）", () => {
     expect(values.as_of).toBeUndefined();
     expect((values.universe as StockListValues["universe"]).base).toBe("all_a");
     expect((values.universe as StockListValues["universe"]).exclude).toEqual(["ST", "suspended", "new_listing_60d"]);
-    expect(historyValues({}).horizons).toEqual([5, 20, 60]);
+    expect(historyValues({}).horizons).toEqual(["5", "20", "60"]);
+  });
+
+  it("改完再提交：原来是默认值、没改的栏目不发，改过的照发；没有默认值清单原样发", () => {
+    const confirmed: StockHistorySpec = {
+      shape: "stock_history",
+      target: { code: "600519.SH" },
+      event: { preset_id: "breakout_ma_volume", params: { ma: 250, volume_ratio: 2 } },
+      time_range: { from: "2016-01-04", to: "2026-09-14" },
+      horizons: [5, 20, 60],
+      benchmark: "universe_equal_weight",
+      cost_bps: 30,
+      defaults_used: ["time_range", "horizons", "benchmark", "cost_bps", "event.params.volume_ratio"],
+    };
+    const { defaults_used: _, ...edited } = { ...confirmed, cost_bps: 50 };
+    expect(dropUntouchedDefaults(edited, confirmed)).toEqual({
+      shape: "stock_history",
+      target: { code: "600519.SH" },
+      event: { preset_id: "breakout_ma_volume", params: { ma: 250 } },
+      cost_bps: 50,
+    });
+    expect(dropUntouchedDefaults(edited, undefined)).toEqual(edited);
   });
 });
 

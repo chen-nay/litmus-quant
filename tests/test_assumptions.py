@@ -70,6 +70,24 @@ def test_用户原话的说法_理解为栏目里的定义():
     ]
 
 
+def test_原话就是说明开头的名称_不写理解为():
+    board = parse_spec({"shape": "board_list", "board_type": "sw_industry", "as_of": "2026-09-14"})
+    facts = Facts(
+        board_range=(date(2016, 1, 4), date(2026, 9, 14)),
+        mentions=(Mention("申万一级行业", "board_type"),),
+    )
+    assert render_assumptions(board, facts)[0].text == (
+        "板块口径：申万一级行业，数据从 2016-01-04 到 2026-09-14"
+    )
+
+    def target(mention: str) -> str:
+        facts = Facts(stock_name="贵州茅台", mentions=(Mention(mention, "target"),))
+        return render_assumptions(history(), facts)[0].text
+
+    assert target("贵州茅台") == "股票：贵州茅台（600519.SH）"
+    assert target("茅台") == "「茅台」理解为：贵州茅台（600519.SH）"
+
+
 def test_没指定排序_概念板块成分_排名_长窗口都有说明():
     spec = stock_list(
         as_of="2025-06-03",

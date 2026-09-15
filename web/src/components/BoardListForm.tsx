@@ -23,7 +23,7 @@ export function BoardListForm({ initial, planId, issues, onChecked, onCancel }: 
   const boardType: BoardType = Form.useWatch("board_type", form) ?? initialValues.board_type ?? "sw_industry";
   const catalog = useCatalog();
   const status = useStatus().data?.status;
-  const checker = useChecker(form, FIELDS, { planId, issues, onChecked });
+  const checker = useChecker(form, FIELDS, { initial, planId, issues, onChecked });
   const boards = boardType === "concept" ? catalog.concept : catalog.sw;
   const range = boards?.range;
 

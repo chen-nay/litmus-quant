@@ -28,7 +28,7 @@ export function StockListForm({ initial, planId, issues, onChecked, onCancel }: 
   const [form] = Form.useForm<StockListValues>();
   const status = useStatus().data?.status;
   const catalog = useCatalog();
-  const checker = useChecker(form, FIELDS, { planId, issues, onChecked });
+  const checker = useChecker(form, FIELDS, { initial, planId, issues, onChecked });
   const initialValues = useMemo(() => stockListValues(initial ?? {}), [initial]);
   const last = status?.data_through;
 

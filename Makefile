@@ -16,8 +16,9 @@
 
 .PHONY: check ready web
 
-# 这两个测试文件要连 Tushare，平时不跑
-OFFLINE = --ignore=tests/test_tushare_live.py --ignore=tests/test_panel_live.py
+# 这三个测试文件要连外部服务（前两个连 Tushare，最后一个连大模型、要几分钟），平时不跑
+OFFLINE = --ignore=tests/test_tushare_live.py --ignore=tests/test_panel_live.py \
+	--ignore=tests/test_plan_live.py
 TESTS ?= tests
 
 # 相对上一次提交改过的、以及新加的 .py 文件（删掉的不算）。

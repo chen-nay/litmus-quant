@@ -5,8 +5,8 @@ import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api, errorText } from "../api";
-import { type FieldName, splitIssues } from "../specForm";
-import type { CheckResponse, Issue, Spec } from "../types";
+import { type FieldName, dropUntouchedDefaults, splitIssues } from "../specForm";
+import type { CheckResponse, Issue, Spec, SpecMeta } from "../types";
 
 interface Problem {
   type: "warning" | "error";
@@ -16,6 +16,8 @@ interface Problem {
 }
 
 export interface CheckerOptions {
+  /** 在改的查询条件：原来是默认值、这次没改的栏目不发，确认卡上照样标「默认值」 */
+  initial?: SpecMeta;
   /** 提问记录编号：从确认卡点「修改」进来的带上，没改过的栏目继续用提问原话的说法 */
   planId?: string | null;
   /** 打开表单时就要标出来的问题（草稿检查没通过） */
@@ -26,7 +28,7 @@ export interface CheckerOptions {
 export function useChecker(
   form: FormInstance,
   fields: FieldName[],
-  { planId, issues, onChecked }: CheckerOptions,
+  { initial, planId, issues, onChecked }: CheckerOptions,
 ): { running: boolean; submit: (spec: Spec) => Promise<void>; alert: ReactNode } {
   const [running, setRunning] = useState(false);
   const [problem, setProblem] = useState<Problem | null>(null);
@@ -53,7 +55,7 @@ export function useChecker(
     setProblem(null);
     form.setFields(fields.map((name) => ({ name, errors: [] })));
     try {
-      const response = await api.check(spec, planId);
+      const response = await api.check(dropUntouchedDefaults(spec, initial), planId);
       if (response.status === "ok") {
         onChecked(response);
       } else if (response.status === "needs_revision") {

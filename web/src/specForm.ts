@@ -14,6 +14,7 @@ import type {
   EventInfo,
   Issue,
   Sort,
+  SpecMeta,
   StockHistorySpec,
   StockListSpec,
   Universe,
@@ -168,10 +169,33 @@ export function historyValues(spec: Partial<StockHistorySpec>): Partial<HistoryV
     time_range: spec.time_range
       ? [dayjs(spec.time_range.from), dayjs(spec.time_range.to)]
       : undefined,
-    horizons: spec.horizons ?? [5, 20, 60],
+    // 标签选择框的值要是文字（数字 antd 会报警告），提交时 buildHistory 再转回数值
+    horizons: (spec.horizons ?? [5, 20, 60]).map(String),
     benchmark: spec.benchmark ?? "universe_equal_weight",
     cost_bps: spec.cost_bps ?? 30,
   };
+}
+
+/**
+ * 确认卡上点「修改」再提交：表单把每一栏都填上带回来，接口只看请求里缺了哪些栏目来标默认值，「默认值」标记会全丢。
+ * 原来就是默认值、这次没改的栏目去掉不发，接口补上的还是同一个值，照样标出来。没有默认值清单（手填、提问草稿）原样发。
+ */
+export function dropUntouchedDefaults<S extends object>(spec: S, initial: SpecMeta | undefined): S {
+  const result = structuredClone(spec) as Record<string, unknown>;
+  for (const path of initial?.defaults_used ?? []) {
+    const keys = path.split(".");
+    if (JSON.stringify(valueAt(result, keys)) !== JSON.stringify(valueAt(initial, keys))) continue;
+    const parent = valueAt(result, keys.slice(0, -1));
+    if (parent && typeof parent === "object") delete (parent as Record<string, unknown>)[keys[keys.length - 1]];
+  }
+  return result as S;
+}
+
+function valueAt(value: unknown, keys: string[]): unknown {
+  return keys.reduce<unknown>(
+    (current, key) => (current && typeof current === "object" ? (current as Record<string, unknown>)[key] : undefined),
+    value,
+  );
 }
 
 /** 日期选择器：周末和本地数据范围之外的日子不能选（节假日选了，接口会说不是交易日） */

@@ -74,6 +74,8 @@ def test_配置从环境变量读():
         {"LLM_BASE_URL": VOLCES, "LLM_API_KEY": "k", "LLM_MODEL": "m", "LLM_TIMEOUT": "90"}
     )
     assert (loaded.temperature, loaded.auth_style, loaded.timeout) == (0.0, "auto", 90.0)
+    unset = LLMConfig.from_env({"LLM_BASE_URL": VOLCES, "LLM_API_KEY": "k", "LLM_MODEL": "m"})
+    assert unset.timeout == 180.0
     with pytest.raises(LLMError, match="LLM_AUTH_STYLE"):
         LLMConfig.from_env(
             {
@@ -104,6 +106,7 @@ def test_强制调用工具_跳过思考块取结构化结果_温度放进请求
     assert call["tools"][0]["input_schema"] == SCHEMA
     assert call["extra_body"] == {"temperature": 0.0}
     assert sdk.clients[0]["auth_token"] == "k" and "api_key" not in sdk.clients[0]
+    assert sdk.clients[0]["max_retries"] == 0  # SDK 自己不重试，超时了马上告诉用户
 
 
 def test_没有返回工具调用就报错():
@@ -128,7 +131,7 @@ def test_明确指定认证方式时401直接报错():
 
 def test_超时说清等了多久():
     sdk = FakeSDK(anthropic.APITimeoutError(request=httpx.Request("POST", VOLCES)))
-    with pytest.raises(LLMError, match="120 秒没有回应"):
+    with pytest.raises(LLMError, match="180 秒没有回应"):
         AnthropicClient(config(), factory=sdk).structured("s", "u", SCHEMA)
 
 

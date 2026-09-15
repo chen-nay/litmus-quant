@@ -47,7 +47,8 @@ class LLMConfig:
     model: str
     temperature: float = 0.0
     auth_style: str = AUTO
-    timeout: float = 120.0
+    #: 带思考一次十几到一百多秒（第 7d 步实测回答追问 106 秒）
+    timeout: float = 180.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> LLMConfig:
@@ -62,7 +63,7 @@ class LLMConfig:
             raise LLMError(f"LLM_AUTH_STYLE 只能是 auto、bearer、x-api-key，收到 {style!r}")
         try:
             temperature = float(env.get("LLM_TEMPERATURE") or 0)
-            timeout = float(env.get("LLM_TIMEOUT") or 120)
+            timeout = float(env.get("LLM_TIMEOUT") or cls.timeout)
         except ValueError as exc:
             raise LLMError(f"LLM_TEMPERATURE、LLM_TIMEOUT 要是数字：{exc}") from exc
         return cls(
@@ -126,7 +127,11 @@ class AnthropicClient(LLMClient):
         credential = (
             {"auth_token": config.api_key} if auth == BEARER else {"api_key": config.api_key}
         )
-        client = self._factory(base_url=config.base_url, timeout=config.timeout, **credential)
+        # SDK 默认超时、连不上时自己再试 2 次：慢的时候用户要干等三倍超时才看到失败。不让它重试，
+        # 输出不对的重试由 planner 负责
+        client = self._factory(
+            base_url=config.base_url, timeout=config.timeout, max_retries=0, **credential
+        )
         started = time.perf_counter()
         try:
             response = client.messages.create(

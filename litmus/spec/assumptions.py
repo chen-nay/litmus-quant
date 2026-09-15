@@ -100,7 +100,7 @@ class _Notes:
     def add(self, field: str, label: str, value: str, definition: str | None = None) -> None:
         """有原话说法时写成「「放量」理解为：定义」，definition 是去掉名称的定义，避免和原话重复。"""
         phrases = [m.phrase for m in self._mentions if _under(m.field, field)]
-        if phrases:
+        if phrases and not _repeats(phrases, definition or value):
             text = f"{'、'.join(f'「{p}」' for p in phrases)}理解为：{definition or value}"
         else:
             text = f"{label}：{value}"
@@ -113,6 +113,13 @@ class _Notes:
 
 def _under(path: str, field: str) -> bool:
     return path == field or path.startswith(f"{field}.")
+
+
+def _repeats(phrases: list[str], value: str) -> bool:
+    """原话就是说明开头的名称（「申万一级行业」→ 申万一级行业，数据从……），再写「理解为」就重复了。"""
+    return (
+        len(phrases) == 1 and re.match(rf"{re.escape(phrases[0])}(?:$|[，（])", value) is not None
+    )
 
 
 # ── 三种形状 ────────────────────────────────────────────────────
