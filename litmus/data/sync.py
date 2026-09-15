@@ -10,7 +10,9 @@
   这样磁盘上永远不会出现半个月的数据（见 storage.py 的不变量）。
 - **一天要么全有、要么全没有**：4 个必需接口只要有一个有数据，就必须 4 个都有。
   全都没有说明当天还没发布（比如收盘前问今天），跳过该天并把这个月记为未走完；
-  只有部分有，说明数据源不一致，直接报错，不猜。
+  **最近那个交易日**只有部分有，是还没发布完：各接口入库时间不同（涨跌停价 8:40、复权因子盘前、
+  行情与每日指标 15~17 点，2026-09-15 14:11 实测当天涨跌停价已经有了），同样跳过，下次同步再补；
+  更早的日子只有部分有，说明数据源不一致，直接报错，不猜。
 """
 
 from __future__ import annotations
@@ -843,6 +845,10 @@ class DataSync:
         todo = sorted(todo, key=lambda month: manifest.month(DAILY_DATASET, month) is None)
 
         # 交易日历是提前发布的，end 之后的交易日还没有数据，不用白调
+        # 最近那个交易日白天同步时只发布了一部分，允许跳过
+        latest = max(
+            (day for days in by_month.values() for day in days if day <= end), default=None
+        )
         plan: list[tuple[str, list[str], bool]] = []
         for month in todo:
             all_days = by_month[month]
@@ -853,7 +859,7 @@ class DataSync:
 
         results: list[MonthResult] = []
         for index, (month, days, whole_month) in enumerate(plan, start=1):
-            result = self.sync_month(month, days, manifest, whole_month=whole_month)
+            result = self.sync_month(month, days, manifest, whole_month=whole_month, latest=latest)
             manifest.save(self._store)
             results.append(result)
             logger.info(
@@ -874,11 +880,13 @@ class DataSync:
         manifest: Manifest,
         *,
         whole_month: bool = True,
+        latest: str | None = None,
     ) -> MonthResult:
         """拉一个月。任何一次调用失败都会抛错，这个月不落盘。
 
         `whole_month=False` 表示 days 只是这个月交易日的一部分（请求区间截断，或者月还没过完），
         这时即使拉全了也不算走完，下次同步会把整月重来一遍。
+        `latest`：这次同步最近的那个交易日，它只拿到部分接口时当作还没发布完、跳过，不报错。
         """
         pulled = self._pull_days(days)
         # ST 名单按日期区间拉：一个月一次就够，不必按天，省下二十来倍的调用
@@ -893,6 +901,10 @@ class DataSync:
             missing = [api for api in REQUIRED_APIS if not per_api[api]]
             if len(missing) == len(REQUIRED_APIS):
                 skipped.append(day)  # 当天还没发布
+                continue
+            if missing and day == latest:
+                logger.info("%s 还没发布完（缺 %s），跳过，下次同步再补", day, missing)
+                skipped.append(day)
                 continue
             if missing:
                 raise SyncError(f"{day} 只拿到部分接口的数据，缺 {missing}；{month} 不落盘")

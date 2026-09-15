@@ -209,8 +209,8 @@ def test_中途失败整月不落盘也不记账(store):
     assert store.has_month(DAILY_DATASET, "2026-09")  # 失败前完成的月份保住了
 
 
-def test_一天只拿到部分接口直接报错(store):
-    """数据源不一致，宁可停下也不落一个缺列的月份。"""
+def test_更早的日子只拿到部分接口直接报错(store):
+    """不是最近那个交易日，说明数据源不一致，宁可停下也不落一个缺列的月份。"""
     client = FakeClient(empty={("stk_limit", "20260804")})
     sync = DataSync(client, store, workers=2)
 
@@ -218,6 +218,18 @@ def test_一天只拿到部分接口直接报错(store):
         sync.sync_daily("20260701", "20260930", Manifest.load(store))
 
     assert not store.has_month(DAILY_DATASET, "2026-08")
+
+
+def test_最近那个交易日只发布了一部分_跳过这天_前面的照常落盘(store):
+    """白天同步：涨跌停价 8:40 就有，行情、每日指标收盘后才有（2026-09-15 实测）。"""
+    client = FakeClient(empty={("daily", "20260804"), ("daily_basic", "20260804")})
+    manifest = Manifest.load(store)
+
+    DataSync(client, store, workers=2).sync_daily("20260701", "20260804", manifest)
+
+    record = manifest.month(DAILY_DATASET, "2026-08")
+    assert (record.complete, record.days) == (False, 1)  # 没走完，下次同步整月重来
+    assert store.has_month(DAILY_DATASET, "2026-08")
 
 
 # ── 还没发布的日子 ──────────────────────────────────────────────
