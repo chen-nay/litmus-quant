@@ -464,6 +464,26 @@ def test_提问_追问的提问记录不存在(tmp_path):
     assert body["status"] == "failed" and "p20260915000000abcdef" in body["message"]
 
 
+def test_原话的说法_改过的栏目不再用_股票只比代码():
+    from litmus.api.explain import plan_mentions
+    from litmus.store import PlanRecord
+
+    mentions = [
+        {"phrase": "昨天", "field": "as_of"},
+        {"phrase": "茅台", "field": "target"},
+        {"phrase": "前 20", "field": "limit"},
+    ]
+    saved = {
+        "as_of": "2026-09-11",
+        "target": {"mention": "茅台", "guess": "贵州茅台", "code": "600519.SH"},
+    }
+    record = PlanRecord(query="问题", status="ok", spec=saved, detail={"mentions": mentions})
+    edited = {"as_of": "2026-09-10", "target": {"code": "600519.SH"}, "limit": 20}
+    # 日期改过了不再用「昨天」；股票代码没变照样用「茅台」；提问时没定下来的「前 20」照样用
+    assert [m.phrase for m in plan_mentions(edited, record)] == ["茅台", "前 20"]
+    assert plan_mentions(edited, None) == []
+
+
 def test_候选里只有一个代码或名称完全一致的_直接用():
     from litmus.api.routes.plan import _decisive
 

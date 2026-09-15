@@ -3,12 +3,15 @@
 import type {
   BoardType,
   BoardsResponse,
+  CheckResponse,
   EventsResponse,
   FieldsResponse,
   KlineResponse,
+  PlanResponse,
   RunRecord,
   RunResponse,
   Spec,
+  SpecDraft,
   StatusResponse,
   SyncProgress,
 } from "./types";
@@ -57,7 +60,17 @@ export const api = {
   events: () => request<EventsResponse>("/api/events"),
   boards: (type: BoardType) => request<BoardsResponse>(`/api/boards?type=${type}`),
   fields: () => request<FieldsResponse>("/api/fields"),
-  run: (spec: Spec) => post<RunResponse>("/api/run", { spec }),
+  /** 中文提问。回答追问时带上一轮的 plan_id。大模型要十几到几十秒 */
+  plan: (query: string, previousPlanId?: string | null) =>
+    post<PlanResponse>(
+      "/api/plan",
+      previousPlanId ? { query, previous_plan_id: previousPlanId } : { query },
+    ),
+  /** 只检查、不计算：生成确认卡。带 plan_id 时没改过的栏目继续用提问原话的说法 */
+  check: (spec: Spec | SpecDraft, planId?: string | null) =>
+    post<CheckResponse>("/api/check", planId ? { spec, plan_id: planId } : { spec }),
+  run: (spec: Spec, planId?: string | null) =>
+    post<RunResponse>("/api/run", planId ? { spec, plan_id: planId } : { spec }),
   record: (runId: string) => request<RunRecord>(`/api/run/${encodeURIComponent(runId)}`),
   kline: (code: string, from: string, to: string) =>
     request<KlineResponse>(

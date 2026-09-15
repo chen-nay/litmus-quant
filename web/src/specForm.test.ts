@@ -2,15 +2,21 @@ import dayjs from "dayjs";
 import { describe, expect, it } from "vitest";
 
 import {
+  boardListValues,
   buildBoardList,
   buildHistory,
   buildStockList,
   disabledDay,
   fieldForIssue,
+  historyValues,
   issueText,
   splitIssues,
+  stockListValues,
+  type BoardListValues,
+  type HistoryValues,
+  type StockListValues,
 } from "./specForm";
-import type { EventInfo } from "./types";
+import type { BoardListSpec, EventInfo, StockHistorySpec, StockListSpec } from "./types";
 
 const BREAKOUT: EventInfo = {
   id: "breakout_ma",
@@ -104,6 +110,56 @@ describe("表单 → 查询条件", () => {
     expect(disabled(dayjs("2026-09-12"))).toBe(true); // 星期六
     expect(disabled(dayjs("2026-09-14"))).toBe(true); // 本地数据之后
     expect(disabled(dayjs("2015-12-31"))).toBe(true);
+  });
+});
+
+describe("查询条件 → 表单（确认卡上点修改时预填）", () => {
+  it("股票表：填回表单再生成，和原来的一样", () => {
+    const spec: StockListSpec = {
+      shape: "stock_list",
+      as_of: "2026-09-11",
+      filter: { expr: "$pct_chg > 9", label: "涨超 9%" },
+      sort: { by: "$amount", order: "asc", label: "" },
+      limit: 20,
+      universe: {
+        base: "hs300",
+        industry: "银行",
+        board: { type: "concept", code: "880728.TDX" },
+        exclude: ["ST"],
+      },
+    };
+    expect(buildStockList(stockListValues(spec) as StockListValues)).toEqual(spec);
+  });
+
+  it("板块表、个股回看同样来回一致", () => {
+    const board: BoardListSpec = {
+      shape: "board_list",
+      board_type: "concept",
+      as_of: "2026-09-11",
+      filter: null,
+      sort: { by: "Pct($close, 20)", order: "desc", label: "20 日涨幅" },
+      limit: 10,
+    };
+    expect(buildBoardList(boardListValues(board) as BoardListValues)).toEqual(board);
+
+    const history: StockHistorySpec = {
+      shape: "stock_history",
+      target: { code: "600519.SH" },
+      event: { preset_id: "breakout_ma", params: { ma: 60 } },
+      time_range: { from: "2016-01-04", to: "2026-09-14" },
+      horizons: [5, 20],
+      benchmark: "index:000300.SH",
+      cost_bps: 50,
+    };
+    expect(buildHistory(historyValues(history) as HistoryValues, BREAKOUT)).toEqual(history);
+  });
+
+  it("大模型给的草稿缺栏目：用表单默认值补上，日期留给页面按数据截至日填", () => {
+    const values = stockListValues({ universe: { industry: "电子" } as StockListSpec["universe"] });
+    expect(values.as_of).toBeUndefined();
+    expect((values.universe as StockListValues["universe"]).base).toBe("all_a");
+    expect((values.universe as StockListValues["universe"]).exclude).toEqual(["ST", "suspended", "new_listing_60d"]);
+    expect(historyValues({}).horizons).toEqual([5, 20, 60]);
   });
 });
 

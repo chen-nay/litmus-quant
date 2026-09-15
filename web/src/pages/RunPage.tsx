@@ -70,6 +70,18 @@ export function RunPage() {
     <div style={{ display: "grid", gap: 16 }}>
       <Card size="small" title={runTitle(spec)} extra={<Link to="/">再查一个</Link>}>
         <Descriptions size="small" column={3} items={items} />
+        {spec.assumptions?.length ? (
+          <details style={{ marginTop: 8 }}>
+            <summary style={{ cursor: "pointer", color: "#1677ff" }}>
+              确认卡上的说明（{spec.assumptions.length} 条）
+            </summary>
+            <ul style={{ paddingLeft: 20, marginBottom: 0 }}>
+              {spec.assumptions.map((text) => (
+                <li key={text}>{text}</li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
       </Card>
       {record.status === "failed" && (
         <Alert

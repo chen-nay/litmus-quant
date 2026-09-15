@@ -23,7 +23,13 @@ export interface Universe {
   exclude: string[];
 }
 
-export interface StockListSpec {
+/** 后端检查时由代码填：用了哪些默认值、确认卡上的说明文字。请求里带来的不作数 */
+export interface SpecMeta {
+  assumptions?: string[];
+  defaults_used?: string[];
+}
+
+export interface StockListSpec extends SpecMeta {
   shape: "stock_list";
   as_of: string;
   filter: Condition | null;
@@ -32,7 +38,7 @@ export interface StockListSpec {
   universe: Universe;
 }
 
-export interface BoardListSpec {
+export interface BoardListSpec extends SpecMeta {
   shape: "board_list";
   board_type: BoardType;
   as_of: string;
@@ -48,9 +54,10 @@ export interface EventRef {
   library_version?: number | null;
 }
 
-export interface StockHistorySpec {
+export interface StockHistorySpec extends SpecMeta {
   shape: "stock_history";
-  target: { code: string };
+  /** mention、guess 是提问时用户的原话和大模型猜的全称 */
+  target: { code: string; mention?: string; guess?: string | null };
   event: EventRef;
   time_range: { from: string; to: string };
   horizons: number[];
@@ -257,4 +264,54 @@ export interface KlineResponse {
   base_date: string | null;
   range: [string, string];
   rows: KlineRow[];
+}
+
+// ── 提问、确认卡 ────────────────────────────────────────────────
+
+/** 还没检查过的查询条件草稿（大模型给的，可能缺栏目） */
+export type SpecDraft = Record<string, unknown>;
+
+export interface AssumptionItem {
+  field: string | null;
+  text: string;
+  default: boolean;
+}
+
+export interface Candidate {
+  code: string;
+  name: string;
+  note: string;
+}
+
+export interface PlanQuestion {
+  question: string;
+  options: string[];
+}
+
+export interface PlanResponse {
+  status:
+    | "ok"
+    | "needs_clarification"
+    | "unsupported"
+    | "not_an_event"
+    | "data_not_ready"
+    | "failed";
+  plan_id: string | null;
+  spec: SpecDraft | null;
+  assumptions: AssumptionItem[];
+  questions: PlanQuestion[];
+  stock_candidates: Candidate[];
+  board_candidates: Candidate[];
+  alternatives: string[];
+  message: string | null;
+  data: StatusResponse | null;
+}
+
+export interface CheckResponse {
+  status: "ok" | "needs_revision" | "data_not_ready";
+  issues: Issue[];
+  spec: Spec | null;
+  assumptions: AssumptionItem[];
+  message: string | null;
+  data: StatusResponse | null;
 }

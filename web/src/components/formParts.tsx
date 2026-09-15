@@ -1,10 +1,19 @@
-/** 股票表、板块表共用的输入框：筛选、排序、字段参考、运行按钮。 */
+/** 股票表、板块表共用的输入框：筛选、排序、字段参考；三张表单共用的提交按钮和参数。 */
 
-import { Button, Col, Form, Input, Row, Select, Table, Typography } from "antd";
+import { Button, Col, Form, Input, Row, Select, Space, Table, Typography } from "antd";
 
 import { useCatalog } from "../context";
 import type { FieldName } from "../specForm";
-import type { FieldInfo, Target } from "../types";
+import type { CheckResponse, FieldInfo, Issue, Target } from "../types";
+
+/** 三张表单的参数：不给 initial 就是空白表单；从确认卡点「修改」进来时带着查询条件、提问编号 */
+export interface FormProps<S> {
+  initial?: Partial<S>;
+  planId?: string | null;
+  issues?: Issue[];
+  onChecked: (response: CheckResponse) => void;
+  onCancel?: () => void;
+}
 
 export const CONDITION_FIELDS: FieldName[] = [
   ["as_of"],
@@ -100,13 +109,24 @@ export function FieldReference({ target }: { target: Target }) {
 }
 
 /** ready 为 undefined 表示状态还没取到，先放行：真不够时接口会返回 data_not_ready */
-export function SubmitButton({ running, ready }: { running: boolean; ready: boolean | undefined }) {
+export function SubmitButtons({
+  running,
+  ready,
+  onCancel,
+}: {
+  running: boolean;
+  ready: boolean | undefined;
+  onCancel?: () => void;
+}) {
   const blocked = ready === false;
   return (
     <Form.Item style={{ marginBottom: 0 }}>
-      <Button type="primary" htmlType="submit" loading={running} disabled={blocked}>
-        {blocked ? "本地数据还不够，先去同步" : "运行"}
-      </Button>
+      <Space>
+        <Button type="primary" htmlType="submit" loading={running} disabled={blocked}>
+          {blocked ? "本地数据还不够，先去同步" : "下一步：确认条件"}
+        </Button>
+        {onCancel && <Button onClick={onCancel}>取消修改</Button>}
+      </Space>
     </Form.Item>
   );
 }

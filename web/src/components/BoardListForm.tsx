@@ -1,22 +1,29 @@
 import { Alert, Col, DatePicker, Form, InputNumber, Radio, Row } from "antd";
 import dayjs from "dayjs";
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 
 import { useCatalog, useStatus } from "../context";
 import { BOARD_TYPE_LABELS } from "../format";
-import { type BoardListValues, type FieldName, buildBoardList, disabledDay } from "../specForm";
-import type { BoardType } from "../types";
-import { CONDITION_FIELDS, ConditionFields, SubmitButton } from "./formParts";
-import { useRunner } from "./useRunner";
+import {
+  type BoardListValues,
+  type FieldName,
+  boardListValues,
+  buildBoardList,
+  disabledDay,
+} from "../specForm";
+import type { BoardListSpec, BoardType } from "../types";
+import { CONDITION_FIELDS, ConditionFields, type FormProps, SubmitButtons } from "./formParts";
+import { useChecker } from "./useChecker";
 
 const FIELDS: FieldName[] = [...CONDITION_FIELDS, ["board_type"]];
 
-export function BoardListForm() {
+export function BoardListForm({ initial, planId, issues, onChecked, onCancel }: FormProps<BoardListSpec>) {
   const [form] = Form.useForm<BoardListValues>();
-  const boardType: BoardType = Form.useWatch("board_type", form) ?? "sw_industry";
+  const initialValues = useMemo(() => boardListValues(initial ?? {}), [initial]);
+  const boardType: BoardType = Form.useWatch("board_type", form) ?? initialValues.board_type ?? "sw_industry";
   const catalog = useCatalog();
   const status = useStatus().data?.status;
-  const runner = useRunner(form, FIELDS);
+  const checker = useChecker(form, FIELDS, { planId, issues, onChecked });
   const boards = boardType === "concept" ? catalog.concept : catalog.sw;
   const range = boards?.range;
 
@@ -35,10 +42,10 @@ export function BoardListForm() {
     <Form<BoardListValues>
       form={form}
       layout="vertical"
-      initialValues={{ board_type: "sw_industry", limit: 50, sort: { order: "desc" } }}
-      onFinish={(values) => runner.submit(buildBoardList(values))}
+      initialValues={initialValues}
+      onFinish={(values) => checker.submit(buildBoardList(values))}
     >
-      {runner.alert}
+      {checker.alert}
       <Form.Item label="板块口径" name="board_type">
         <Radio.Group
           optionType="button"
@@ -62,7 +69,7 @@ export function BoardListForm() {
         </Col>
       </Row>
       <ConditionFields target={boardType} />
-      <SubmitButton running={runner.running} ready={status?.ready} />
+      <SubmitButtons running={checker.running} ready={status?.ready} onCancel={onCancel} />
     </Form>
   );
 }

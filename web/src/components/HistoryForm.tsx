@@ -1,12 +1,13 @@
 import { Col, DatePicker, Form, Input, InputNumber, Row, Select, Typography } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 import { useCatalog, useStatus } from "../context";
 import { BENCHMARK_LABELS } from "../format";
-import { type FieldName, type HistoryValues, buildHistory, day } from "../specForm";
-import { SubmitButton } from "./formParts";
-import { useRunner } from "./useRunner";
+import { type FieldName, type HistoryValues, buildHistory, day, historyValues } from "../specForm";
+import type { StockHistorySpec } from "../types";
+import { type FormProps, SubmitButtons } from "./formParts";
+import { useChecker } from "./useChecker";
 
 const BASE_FIELDS: FieldName[] = [
   ["target", "code"],
@@ -19,8 +20,9 @@ const BASE_FIELDS: FieldName[] = [
 
 const HORIZON_CHOICES = [5, 10, 20, 60, 120, 250];
 
-export function HistoryForm() {
+export function HistoryForm({ initial, planId, issues, onChecked, onCancel }: FormProps<StockHistorySpec>) {
   const [form] = Form.useForm<HistoryValues>();
+  const initialValues = useMemo(() => historyValues(initial ?? {}), [initial]);
   const status = useStatus().data?.status;
   const catalog = useCatalog();
   const events = useMemo(() => catalog.events?.events ?? [], [catalog.events]);
@@ -30,7 +32,7 @@ export function HistoryForm() {
     () => [...BASE_FIELDS, ...(event?.params ?? []).map((param) => ["event", "params", param.name])],
     [event],
   );
-  const runner = useRunner(form, fields);
+  const checker = useChecker(form, fields, { planId, issues, onChecked });
   const first = status?.history_from;
   const last = status?.data_through;
 
@@ -40,12 +42,15 @@ export function HistoryForm() {
     }
   }, [last, form]);
 
-  // 换了事件就把参数重置成这个事件的默认值
+  // 用户换了事件才把参数重置成默认值；预填进来的事件保留原来的参数
+  const shownPreset = useRef<string | undefined>(initial?.event?.preset_id);
   useEffect(() => {
-    if (event) {
+    if (!event) return;
+    if (shownPreset.current !== event.id) {
       const defaults = Object.fromEntries(event.params.map((param) => [param.name, param.default]));
       form.setFieldValue(["event", "params"], defaults);
     }
+    shownPreset.current = event.id;
   }, [event, form]);
 
   const groups = [...new Set(events.map((item) => item.category))].map((category) => ({
@@ -63,22 +68,17 @@ export function HistoryForm() {
     <Form<HistoryValues>
       form={form}
       layout="vertical"
-      initialValues={{
-        event: { preset_id: "breakout_ma" },
-        horizons: [5, 20, 60],
-        benchmark: "universe_equal_weight",
-        cost_bps: 30,
-      }}
-      onFinish={(values) => runner.submit(buildHistory(values, event))}
+      initialValues={initialValues}
+      onFinish={(values) => checker.submit(buildHistory(values, event))}
     >
-      {runner.alert}
+      {checker.alert}
       <Row gutter={12}>
         <Col span={6}>
           <Form.Item
             label="股票代码"
             name={["target", "code"]}
             rules={[{ required: true, message: "填股票代码，如 600519.SH" }]}
-            extra="要带交易所后缀：沪市 .SH、深市 .SZ（第 7 步起可以直接写股票名）"
+            extra="要带交易所后缀：沪市 .SH、深市 .SZ；也可以在上面直接用中文提问"
           >
             <Input placeholder="600519.SH" />
           </Form.Item>
@@ -146,7 +146,7 @@ export function HistoryForm() {
           </Form.Item>
         </Col>
       </Row>
-      <SubmitButton running={runner.running} ready={status?.ready} />
+      <SubmitButtons running={checker.running} ready={status?.ready} onCancel={onCancel} />
     </Form>
   );
 }

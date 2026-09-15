@@ -50,10 +50,15 @@ def plan_mentions(spec: Mapping[str, Any], record: PlanRecord | None) -> list[Me
         phrase, field = item.get("phrase"), item.get("field")
         if not phrase or not field:
             continue
-        before = _at(saved, field)
-        if before is None or before == _at(spec, field):
+        path = _COMPARED.get(field, field)
+        before = _at(saved, path)
+        if before is None or before == _at(spec, path):
             kept.append(Mention(phrase, field))
     return kept
+
+
+#: 比较时只看这一项：股票比代码，表单改过条件后只带代码回来，原话和猜测名会丢
+_COMPARED = {"target": "target.code"}
 
 
 def _at(spec: Mapping[str, Any], path: str) -> object:

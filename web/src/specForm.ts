@@ -5,7 +5,7 @@
  * 标签输入框、文本框给的是文字，在这里转好再发。
  */
 
-import type { Dayjs } from "dayjs";
+import dayjs, { type Dayjs } from "dayjs";
 
 import type {
   BoardListSpec,
@@ -129,6 +129,48 @@ export function buildHistory(values: HistoryValues, event: EventInfo | undefined
     horizons,
     benchmark: values.benchmark,
     cost_bps: toNumber(values.cost_bps),
+  };
+}
+
+// ── 查询条件 → 表单（确认卡上点「修改」时预填；什么都不给就是表单的默认值）────
+
+export const DEFAULT_EXCLUDE = ["ST", "suspended", "new_listing_60d"];
+
+export function stockListValues(spec: Partial<StockListSpec>): Partial<StockListValues> {
+  return {
+    as_of: spec.as_of ? dayjs(spec.as_of) : undefined,
+    limit: spec.limit ?? 50,
+    filter: { expr: spec.filter?.expr ?? "", label: spec.filter?.label ?? "" },
+    sort: { by: spec.sort?.by ?? "", order: spec.sort?.order ?? "desc", label: spec.sort?.label ?? "" },
+    universe: {
+      base: spec.universe?.base ?? "all_a",
+      industry: spec.universe?.industry ?? undefined,
+      board: spec.universe?.board?.code ?? undefined,
+      exclude: spec.universe?.exclude ?? DEFAULT_EXCLUDE,
+    },
+  };
+}
+
+export function boardListValues(spec: Partial<BoardListSpec>): Partial<BoardListValues> {
+  return {
+    board_type: spec.board_type ?? "sw_industry",
+    as_of: spec.as_of ? dayjs(spec.as_of) : undefined,
+    limit: spec.limit ?? 50,
+    filter: { expr: spec.filter?.expr ?? "", label: spec.filter?.label ?? "" },
+    sort: { by: spec.sort?.by ?? "", order: spec.sort?.order ?? "desc", label: spec.sort?.label ?? "" },
+  };
+}
+
+export function historyValues(spec: Partial<StockHistorySpec>): Partial<HistoryValues> {
+  return {
+    target: { code: spec.target?.code ?? "" },
+    event: { preset_id: spec.event?.preset_id ?? "breakout_ma", params: spec.event?.params ?? {} },
+    time_range: spec.time_range
+      ? [dayjs(spec.time_range.from), dayjs(spec.time_range.to)]
+      : undefined,
+    horizons: spec.horizons ?? [5, 20, 60],
+    benchmark: spec.benchmark ?? "universe_equal_weight",
+    cost_bps: spec.cost_bps ?? 30,
   };
 }
 

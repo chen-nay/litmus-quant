@@ -1,12 +1,20 @@
 import { Checkbox, Col, DatePicker, Form, InputNumber, Row, Select } from "antd";
 import dayjs from "dayjs";
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 
 import { useCatalog, useStatus } from "../context";
 import { BASE_LABELS, excludeLabel } from "../format";
-import { type FieldName, type StockListValues, buildStockList, disabledDay } from "../specForm";
-import { CONDITION_FIELDS, ConditionFields, SubmitButton } from "./formParts";
-import { useRunner } from "./useRunner";
+import {
+  DEFAULT_EXCLUDE,
+  type FieldName,
+  type StockListValues,
+  buildStockList,
+  disabledDay,
+  stockListValues,
+} from "../specForm";
+import type { StockListSpec } from "../types";
+import { CONDITION_FIELDS, ConditionFields, type FormProps, SubmitButtons } from "./formParts";
+import { useChecker } from "./useChecker";
 
 const FIELDS: FieldName[] = [
   ...CONDITION_FIELDS,
@@ -16,13 +24,12 @@ const FIELDS: FieldName[] = [
   ["universe", "exclude"],
 ];
 
-const EXCLUDE = ["ST", "suspended", "new_listing_60d"];
-
-export function StockListForm() {
+export function StockListForm({ initial, planId, issues, onChecked, onCancel }: FormProps<StockListSpec>) {
   const [form] = Form.useForm<StockListValues>();
   const status = useStatus().data?.status;
   const catalog = useCatalog();
-  const runner = useRunner(form, FIELDS);
+  const checker = useChecker(form, FIELDS, { planId, issues, onChecked });
+  const initialValues = useMemo(() => stockListValues(initial ?? {}), [initial]);
   const last = status?.data_through;
 
   useEffect(() => {
@@ -33,14 +40,10 @@ export function StockListForm() {
     <Form<StockListValues>
       form={form}
       layout="vertical"
-      initialValues={{
-        limit: 50,
-        sort: { order: "desc" },
-        universe: { base: "all_a", exclude: EXCLUDE },
-      }}
-      onFinish={(values) => runner.submit(buildStockList(values))}
+      initialValues={initialValues}
+      onFinish={(values) => checker.submit(buildStockList(values))}
     >
-      {runner.alert}
+      {checker.alert}
       <Row gutter={12}>
         <Col span={6}>
           <Form.Item label="日期" name="as_of" rules={[{ required: true, message: "选一个交易日" }]}>
@@ -91,11 +94,13 @@ export function StockListForm() {
         </Col>
         <Col span={8}>
           <Form.Item label="剔除" name={["universe", "exclude"]}>
-            <Checkbox.Group options={EXCLUDE.map((value) => ({ value, label: excludeLabel(value) }))} />
+            <Checkbox.Group
+              options={DEFAULT_EXCLUDE.map((value) => ({ value, label: excludeLabel(value) }))}
+            />
           </Form.Item>
         </Col>
       </Row>
-      <SubmitButton running={runner.running} ready={status?.ready} />
+      <SubmitButtons running={checker.running} ready={status?.ready} onCancel={onCancel} />
     </Form>
   );
 }
