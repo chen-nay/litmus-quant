@@ -82,6 +82,35 @@ def test_提示词文件都能加载_系统提示词的变量都有代码填():
         assert expected in text
 
 
+def test_日期换算表_交易日数由代码按本地日历数好():
+    days = (
+        date(2025, 12, 30),
+        date(2025, 12, 31),
+        date(2026, 1, 5),
+        date(2026, 6, 30),
+        date(2026, 7, 1),
+        date(2026, 8, 31),
+        date(2026, 9, 1),
+        date(2026, 9, 11),
+        date(2026, 9, 14),
+    )
+    context = PlanContext(**{**CONTEXT.__dict__, "trading_days": days})  # 今天 09-15 星期二
+    text = system_variables(context, EVENTS)["dates"]
+    assert "今天：2026-09-15（星期二）" in text
+    assert "最近 10 个交易日，从近到远：2026-09-14（一）、2026-09-11（五）" in text
+    assert "本周以来：N=1（比 2026-09-11 收盘）" in text
+    assert "本月以来：N=3（比 2026-08-31 收盘）" in text
+    assert "本季度以来：N=5（比 2026-06-30 收盘）" in text
+    assert "今年以来：N=7（比 2025-12-31 收盘）" in text
+
+    # 一周没同步：本地还没有这周的数据，不拿旧数据凑
+    stale = PlanContext(**{**context.__dict__, "today": date(2026, 9, 22)})
+    assert (
+        "本周以来：本地还没有这段的数据（数据截至 2026-09-14）"
+        in system_variables(stale, EVENTS)["dates"]
+    )
+
+
 def test_概念板块不可用时_提示词里说清楚():
     context = PlanContext(**{**CONTEXT.__dict__, "targets": ("stock", "sw_industry")})
     assert "通达信概念板块当前不可用" in system_variables(context, EVENTS)["board_fields"]

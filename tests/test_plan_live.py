@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import time
+from datetime import date
 
 import pytest
 from fastapi.testclient import TestClient
@@ -116,6 +117,14 @@ def test_板块表(ask):
     assert (spec["shape"], spec["board_type"], spec["limit"]) == ("board_list", "sw_industry", 5)
     # Pct($close, 5) 或 Sum($pct_chg, 5)；2026-09-15 实测写成过 Pct($close, 4)
     assert spec["sort"]["order"] == "desc" and ",5)" in spec["sort"]["by"].replace(" ", "")
+
+
+def test_今年以来_交易日数用代码算好的(ask):
+    """2026-09-15 实测：不给日期换算表时，大模型自己数交易日，8000 个 token 用完也没给出结果。"""
+    body = ask("今年以来涨幅最大的 50 只股票")
+    assert body["status"] == "ok", body
+    days = len(_ds.get_trading_calendar(date(date.today().year, 1, 1), _last))
+    assert body["spec"]["sort"]["by"].replace(" ", "") == f"Pct($close,{days})"
 
 
 def test_个股回看_没说的栏目用默认值并标出来(ask):

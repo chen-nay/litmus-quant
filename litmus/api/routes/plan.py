@@ -107,12 +107,15 @@ def make_plan(query: str, previous_plan_id: str | None, services: Services) -> P
 
     ds = services.ds
     first, last = ds.data_range(STOCK)
+    today = date.today()
     context = PlanContext(
-        today=date.today(),
+        today=today,
         latest_trading_day=last,
         history_from=first,
         targets=ds.available_targets(),
         industries=tuple(board.name for board in ds.list_boards(SW_INDUSTRY)),
+        # 日期换算表要数到去年最后一个交易日（今年以来）
+        trading_days=tuple(ds.get_trading_calendar(date(today.year - 1, 12, 1), last)),
     )
     result = plan(query, context, services.llm, services.events, previous)
     response = _respond(result, services)

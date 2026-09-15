@@ -17,6 +17,7 @@ import logging
 import re
 from collections.abc import Mapping
 from dataclasses import replace
+from datetime import date, timedelta
 from typing import Any
 
 from pydantic import ValidationError
@@ -384,6 +385,7 @@ def system_variables(context: PlanContext, events: EventLibrary) -> dict[str, st
         "events": _events(events),
         "industries": "、".join(context.industries),
         "defaults": _defaults(context),
+        "dates": _date_table(context),
     }
 
 
@@ -441,6 +443,48 @@ def _defaults(context: PlanContext) -> str:
             "- 「成交量」理解为成交额 $amount",
         ]
     )
+
+
+_WEEKDAYS = "一二三四五六日"
+
+
+def _date_table(context: PlanContext) -> str:
+    """日期换算：今天星期几、最近 10 个交易日、本周 / 本月 / 本季度 / 今年以来各几个交易日。
+
+    2026-09-15 实测：不给这张表，问「今年以来涨幅最大的 50 只」，大模型在思考里逐月数工作日、猜节假日，
+    8000 个 token 用完也没给出结果（215 秒）；它估的 171 天，本地日历是 170 天。
+    区间从今天所在的周、月、季、年算起；本地数据还没到这段时写明先同步，不让大模型拿旧数据凑。
+    """
+    today, latest = context.today, context.latest_trading_day
+    lines = [
+        f"- 今天：{today}（星期{_WEEKDAYS[today.weekday()]}）；"
+        f"本地数据最近一个交易日：{latest}（星期{_WEEKDAYS[latest.weekday()]}）"
+    ]
+    days = sorted(day for day in context.trading_days if day <= latest)
+    if not days:
+        return "\n".join(lines)
+    recent = "、".join(f"{day}（{_WEEKDAYS[day.weekday()]}）" for day in reversed(days[-10:]))
+    lines.append(f"- 最近 10 个交易日，从近到远：{recent}")
+    lines.append(
+        "- 从某天起算的涨跌写成 Pct($close, N)：和起点前一个交易日的收盘价比，"
+        f"N 是起点到 {latest} 的交易日数"
+    )
+    starts = {
+        "本周以来": today - timedelta(days=today.weekday()),
+        "本月以来": today.replace(day=1),
+        "本季度以来": date(today.year, (today.month - 1) // 3 * 3 + 1, 1),
+        "今年以来": date(today.year, 1, 1),
+    }
+    for label, start in starts.items():
+        before = [day for day in days if day < start]
+        if not before:
+            continue  # 本地日历不够早，数不出来
+        count = sum(day >= start for day in days)
+        if count:
+            lines.append(f"  - {label}：N={count}（比 {before[-1]} 收盘）")
+        else:
+            lines.append(f"  - {label}：本地还没有这段的数据（数据截至 {latest}），要先同步")
+    return "\n".join(lines)
 
 
 def _questions_text(questions: tuple[Question, ...]) -> str:

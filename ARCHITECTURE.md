@@ -1205,7 +1205,8 @@ LLM_TEMPERATURE=0
 | 事件库（15 条，含表达式与可调参数） | `signals.load_events()` |
 | 申万 31 个一级行业名 | `ds.list_boards("sw_industry")`。概念板块有几百个，不进提示词：LLM 只填用户原话，由 `ds.resolve_board()` 解析 |
 | 默认值表 | `spec.DEFAULTS` |
-| 当前日期与最近已收盘交易日 | `ds.latest_trading_day()` |
+| 当前日期与本地数据最近一个交易日 | `ds.latest_trading_day()` |
+| 日期换算表：今天星期几、最近 10 个交易日、本周 / 本月 / 本季度 / 今年以来各几个交易日（和哪天的收盘比） | `ds.get_trading_calendar()`，由 `llm/planner.py` 数好。2026-09-15 实测不给这张表时，问「今年以来涨幅最大的 50 只」，大模型在思考里逐月数工作日、猜节假日，8000 个 token 用完也没给出结果。区间从今天所在的周、月、季、年算起，本地数据还没到这段时写明要先同步。天数按交易日历数，停过牌的股票 `Pct($close, N)` 会往前多跨几天、今年上市的算不出来（排序值为空） |
 
 **输出**：`status` + 对应内容
 
