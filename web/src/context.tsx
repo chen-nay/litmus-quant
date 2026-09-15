@@ -1,7 +1,7 @@
 /**
  * 全站共用的两份数据：
  * - 数据状态与同步进度：同步中每 3 秒刷新一次，平时 30 秒
- * - 清单（事件、字段、板块）：打开页面时读一次；本地数据从「不够」变成「够了」时重读一次
+ * - 清单（事件、字段、板块）：打开页面时读一次；本地数据从「不够」变成「够了」、每次同步结束时重读一次
  */
 
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
@@ -76,7 +76,10 @@ function settled<T>(result: PromiseSettledResult<T>): T | null {
 }
 
 export function CatalogProvider({ children }: { children: ReactNode }) {
-  const ready = useStatus().data?.status.ready ?? false;
+  const status = useStatus().data;
+  const ready = status?.status.ready ?? false;
+  // 同步完重读：可能多了新板块，概念板块也可能从不可用变成可用
+  const synced = status?.sync.finished_at ?? null;
   const [catalog, setCatalog] = useState<Catalog>(EMPTY_CATALOG);
 
   useEffect(() => {
@@ -101,7 +104,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
     return () => {
       alive = false;
     };
-  }, [ready]);
+  }, [ready, synced]);
 
   return <CatalogContext.Provider value={catalog}>{children}</CatalogContext.Provider>;
 }
