@@ -25,10 +25,12 @@ def list_events(request: Request) -> dict[str, object]:
 def list_boards(
     request: Request, board_type: Annotated[str | None, Query(alias="type")] = None
 ) -> dict[str, object]:
-    """板块清单和板块数据的可用区间。type=sw_industry：申万一级行业；type=concept：通达信概念板块，
-    不可用时返回 409 和原因。"""
+    """板块清单和板块数据的可用区间。type=sw_industry：申万一级行业；type=sw_industry_l2：申万二级行业，
+    带上级一级行业名（parent）；type=concept：通达信概念板块。不可用时返回 409 和原因。"""
     if board_type not in BOARD_TARGETS:
-        raise HTTPException(status_code=400, detail="type 只能是 sw_industry 或 concept")
+        raise HTTPException(
+            status_code=400, detail="type 只能是 sw_industry、sw_industry_l2 或 concept"
+        )
     ds = services_of(request).ds
     try:
         boards = ds.list_boards(board_type)
@@ -38,7 +40,10 @@ def list_boards(
     return {
         "type": board_type,
         "range": [first.isoformat(), last.isoformat()],
-        "boards": [{"code": b.code, "name": b.name} for b in boards],
+        "boards": [
+            {"code": b.code, "name": b.name, **({"parent": b.parent} if b.parent else {})}
+            for b in boards
+        ],
     }
 
 

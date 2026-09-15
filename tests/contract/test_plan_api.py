@@ -11,7 +11,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from litmus.api import Services, SyncJob, create_app
-from litmus.data import CONCEPT, DataService, DataSync, MarketStore, MissingDataError
+from litmus.data import (
+    CONCEPT,
+    SW_INDUSTRY_L2,
+    DataService,
+    DataSync,
+    MarketStore,
+    MissingDataError,
+)
 from litmus.llm import LLMClient, StructuredReply
 from litmus.signals import load_events
 from litmus.store import JsonStore
@@ -159,6 +166,20 @@ def test_选股限定概念板块_原话查不到用猜的名字(client, llm):
     assert body["spec"]["universe"]["board"]["code"] == board.code
 
 
+def test_半导体板块_能对上申万二级就用_只包含对上第三代半导体时让用户选(client, llm):
+    """2026-09-15 实测：「半导体板块」只包含对上「第三代半导体」，直接用了它，范围窄得离谱。"""
+    body = ask(client, llm, {**STOCK_LIST, "board_mention": "半导体板块", "board_guess": "芯片"})
+    if SW_INDUSTRY_L2 in _ds.available_targets():
+        assert body["status"] == "ok", body
+        assert body["spec"]["universe"]["industry"] == "半导体"
+        assert texts(body)["universe.industry"].startswith(
+            "「半导体板块」理解为：半导体（申万二级行业"
+        )
+    else:  # 本地还没同步二级
+        assert body["status"] == "needs_clarification", body
+        assert {"第三代半导体", "芯片"} <= {c["name"] for c in body["board_candidates"]}
+
+
 def test_概念板块猜了几个名字_都对得上就让用户选(client, llm):
     if CONCEPT not in _ds.available_targets():
         pytest.skip("概念板块不可用")
@@ -174,7 +195,7 @@ def test_概念板块原话和猜测名都查不到_列出名字相近的让用�
     output = {**STOCK_LIST, "board_mention": "机器人灵巧手", "board_guess": "没有这个板块"}
     body = ask(client, llm, output)
     assert body["status"] == "needs_clarification", body
-    assert body["message"].startswith("没找到叫「机器人灵巧手」的概念板块")
+    assert body["message"].startswith("没找到叫「机器人灵巧手」的行业或板块")
     assert "机器人概念" in {c["name"] for c in body["board_candidates"]}
 
     # 连名字相近的都没有：不给接口地址，让用户换个说法或者去表单里选

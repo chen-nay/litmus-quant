@@ -31,6 +31,7 @@ from litmus.data.fields import (
     INTERNAL_COLUMNS,
     STOCK,
     SW_INDUSTRY,
+    SW_INDUSTRY_L2,
     TARGET_CAPABILITIES,
     available_targets,
     check_available,
@@ -80,8 +81,15 @@ _EVENT_SOURCES: dict[str, tuple[str, str]] = {
     "is_forecast_date": (FORECAST_TABLE, "ann_date"),
 }
 
-#: 板块标的 → 板块日线表
-_BOARD_DAILY: dict[str, str] = {SW_INDUSTRY: SW_DAILY_TABLE, CONCEPT: TDX_DAILY_TABLE}
+#: 板块标的 → 板块日线表。申万一级、二级在同一张表里，读的时候按层级筛行业代码
+_BOARD_DAILY: dict[str, str] = {
+    SW_INDUSTRY: SW_DAILY_TABLE,
+    SW_INDUSTRY_L2: SW_DAILY_TABLE,
+    CONCEPT: TDX_DAILY_TABLE,
+}
+
+#: 申万标的 → 行业清单、归属表里的层级
+_SW_LEVELS: dict[str, str] = {SW_INDUSTRY: "L1", SW_INDUSTRY_L2: "L2"}
 
 #: 涨跌停相关的布尔列
 _LIMIT_FLAGS = frozenset({"is_limit_up", "is_limit_down", "open_limit_up"})
@@ -106,7 +114,8 @@ class Kline:
 class BoardInfo:
     code: str
     name: str
-    board_type: str  # sw_industry / concept
+    board_type: str  # sw_industry / sw_industry_l2 / concept
+    parent: str | None = None  # 申万二级行业的上级一级行业名
 
 
 @dataclass(frozen=True)
@@ -164,7 +173,7 @@ class DataService:
           就用当天生效的那条（开始日期最大的一条，§2.6）；否则用股票列表里的现用名。
           曾用名表有滞后——2026-09-14 实测 688189.SH 已改名「ST南新」、000595.SZ 已改名「新能股份」，
           曾用名表都还没收录——所以最近一次改名还没收录时，显示的是现用名
-        - 行业按当天的归属，规则同按行业选股（universe.industry_of）
+        - 行业是申万一级，按当天的归属，规则同按行业选股（universe.industry_of）
         """
         chosen = sorted(set(codes))
         frame = pl.DataFrame({"code": chosen}, schema={"code": pl.String})
@@ -188,7 +197,7 @@ class DataService:
             .group_by("code", maintain_order=True)
             .agg(pl.col("name").last().alias("_name_then"))
         )
-        sw_member = self._scan_table(SW_MEMBER_TABLE).filter(pl.col("code").is_in(chosen)).collect()
+        sw_member = self._sw_member("L1").filter(pl.col("code").is_in(chosen))
         industry_names = (
             self._scan_table(SW_INDUSTRY_TABLE)
             .select(pl.col("code").alias("industry_code"), pl.col("name").alias("industry"))
@@ -248,7 +257,7 @@ class DataService:
                 raise MissingDataError("本地还没有股票日频数据，先同步")
             return date.fromisoformat(status.history_from), date.fromisoformat(status.data_through)
         first, last = (
-            self._scan_table(_BOARD_DAILY[target])
+            self._board_daily(target)
             .select(pl.col("date").min(), pl.col("date").max().alias("last"))
             .collect()
             .row(0)
@@ -330,7 +339,7 @@ class DataService:
             table = self._stock_fields(chosen, start, end, wanted, lookback)
         else:
             # 板块日线整张才十万行上下，直接读到 end 再截
-            query = self._scan_table(_BOARD_DAILY[target]).filter(pl.col("date") <= end)
+            query = self._board_daily(target).filter(pl.col("date") <= end)
             if chosen is not None:
                 query = query.filter(pl.col("code").is_in(chosen))
             table = _trim_before(query.select("date", "code", *wanted).collect(), start, lookback)
@@ -496,7 +505,7 @@ class DataService:
         历史计算必须用它，不能拿某一天的名单去套整段历史——那是幸存者偏差。规则见 universe.py。
 
         - base：all_a（沪深 A 股，不含北交所）/ hs300 / zz500
-        - industry：申万一级行业名，按每天当时的归属
+        - industry：申万一级或二级行业名（二级要同步过），按每天当时的归属
         - board：`{"type": "concept", "code": "880728.TDX"}`，P0 用快照日的当前成分
         - exclude：ST / suspended / new_listing_<N>d
         """
@@ -504,16 +513,17 @@ class DataService:
             raise ValueError(f"不认识的股票池 {base!r}，可选 {list(BASES)}")
         self._check_range(start, end, STOCK)
         traded = self._read_panel(start, end, None, ["date", "code", "is_st"])
+        industry_code, level = (None, None) if industry is None else self._industry(industry)
         return universe_mask(
             traded,
             base=base,
             exclude=exclude or (),
-            industry_code=None if industry is None else self._industry_code(industry),
+            industry_code=industry_code,
             board_codes=None if board is None else self._concept_members(board),
             list_dates=self._scan_table(STOCK_BASIC_TABLE).select("code", "list_date").collect(),
             calendar=self.get_trading_calendar(date.min, date.max),
             weights=None if BASES[base] is None else self._index_weights(end),
-            sw_member=None if industry is None else self._scan_table(SW_MEMBER_TABLE).collect(),
+            sw_member=None if level is None else self._sw_member(level),
         )
 
     def get_universe(
@@ -538,13 +548,18 @@ class DataService:
         paths = [self._store.month_path(INDEX_WEIGHT_DATASET, month) for month in months]
         return pl.scan_parquet(paths).select("index_code", "code", "date").collect()
 
-    def _industry_code(self, name: str) -> str:
-        industries = self._scan_table(SW_INDUSTRY_TABLE).select("code", "name").collect()
-        match = industries.filter(pl.col("name") == name)
-        if match.is_empty():
-            choices = "、".join(industries.get_column("name").to_list())
-            raise ValueError(f"没有叫 {name!r} 的申万一级行业，可选：{choices}")
-        return match.get_column("code")[0]
+    def _industry(self, name: str) -> tuple[str, str]:
+        """申万行业名 → (代码, 层级)。一级、二级都认，二级要同步过；两级重名时取一级。"""
+        kinds = [SW_INDUSTRY]
+        if SW_INDUSTRY_L2 in self.available_targets():
+            kinds.append(SW_INDUSTRY_L2)
+        choices = []
+        for kind in kinds:
+            for board in self.list_boards(kind):
+                if board.name == name:
+                    return board.code, _SW_LEVELS[kind]
+                choices.append(board.name)
+        raise ValueError(f"没有叫 {name!r} 的申万行业，可选：{'、'.join(choices)}")
 
     def _concept_members(self, board: Mapping[str, str]) -> list[str]:
         if board.get("type") != CONCEPT:
@@ -557,15 +572,21 @@ class DataService:
     # ── 板块 ────────────────────────────────────────────────────
 
     def list_boards(self, board_type: str) -> list[BoardInfo]:
-        """板块清单，按代码排序。sw_industry：申万一级行业；concept：通达信概念板块，需要能力可用。"""
-        if board_type == SW_INDUSTRY:
-            table = SW_INDUSTRY_TABLE
-        elif board_type == CONCEPT:
-            self._check_target(CONCEPT, Manifest.load(self._store))
-            table = TDX_CONCEPT_TABLE
-        else:
-            raise ValueError(f"不认识的板块类型 {board_type!r}，可选 sw_industry、concept")
-        boards = self._scan_table(table).select("code", "name").sort("code").collect()
+        """板块清单，按代码排序。sw_industry：申万一级行业；sw_industry_l2：申万二级行业，带上级一级行业名，
+        要同步过；concept：通达信概念板块，需要能力可用。"""
+        if board_type in _SW_LEVELS:
+            self._check_target(board_type, Manifest.load(self._store))
+            industries = self._sw_industries(_SW_LEVELS[board_type])
+            return [
+                BoardInfo(code, name, board_type, parent)
+                for code, name, parent in industries.iter_rows()
+            ]
+        if board_type != CONCEPT:
+            raise ValueError(
+                f"不认识的板块类型 {board_type!r}，可选 sw_industry、sw_industry_l2、concept"
+            )
+        self._check_target(CONCEPT, Manifest.load(self._store))
+        boards = self._scan_table(TDX_CONCEPT_TABLE).select("code", "name").sort("code").collect()
         return [BoardInfo(code, name, board_type) for code, name in boards.iter_rows()]
 
     def resolve_stock(self, text: str) -> list[StockMatch]:
@@ -582,14 +603,17 @@ class DataService:
         return match_stocks(text, basic, renames)
 
     def resolve_board(self, text: str, board_type: str | None = None) -> list[BoardMatch]:
-        """板块代码 / 名称 → 候选。不给 board_type 就两种口径都查（概念板块不可用时只查申万行业），
-        同一级里申万行业排在前面。"""
+        """板块代码 / 名称 → 候选。不给 board_type 就查全部能用的口径（申万一级、二级、概念板块），
+        同一级里申万排在前面。"""
         if board_type is None:
-            kinds = [SW_INDUSTRY, *([CONCEPT] if CONCEPT in self.available_targets() else [])]
-        elif board_type in (SW_INDUSTRY, CONCEPT):
+            available = self.available_targets()
+            kinds = [kind for kind in (SW_INDUSTRY, SW_INDUSTRY_L2, CONCEPT) if kind in available]
+        elif board_type in _BOARD_DAILY:
             kinds = [board_type]
         else:
-            raise ValueError(f"不认识的板块类型 {board_type!r}，可选 sw_industry、concept")
+            raise ValueError(
+                f"不认识的板块类型 {board_type!r}，可选 sw_industry、sw_industry_l2、concept"
+            )
         boards = [(b.code, b.name, b.board_type) for kind in kinds for b in self.list_boards(kind)]
         return match_boards(text, boards)
 
@@ -609,10 +633,12 @@ class DataService:
         申万行业按 as_of 当天的归属，默认本地最新一天。概念板块只有快照日的当前成分（§2.7），
         as_of 早于快照日直接报错——拿今天的成分回答过去，是幸存者偏差。
         """
-        industries = self._scan_table(SW_INDUSTRY_TABLE).select("code").collect()
-        if board_code in industries.get_column("code").to_list():
+        levels = dict(
+            self._scan_table(SW_INDUSTRY_TABLE).select("code", "level").collect().iter_rows()
+        )
+        if board_code in levels:
             day = as_of or self.latest_trading_day()
-            sw_member = self._scan_table(SW_MEMBER_TABLE).collect()
+            sw_member = self._sw_member(levels[board_code])
             pool = (
                 sw_member.filter(pl.col("industry_code") == board_code)
                 .select("code")
@@ -634,6 +660,42 @@ class DataService:
         return sorted({code for code in codes if not code.endswith(".BJ")})
 
     # ── 内部 ────────────────────────────────────────────────────
+
+    def _board_daily(self, target: str) -> pl.LazyFrame:
+        """板块日线。申万一级、二级在同一张表里，按这一级的行业代码筛。"""
+        query = self._scan_table(_BOARD_DAILY[target])
+        level = _SW_LEVELS.get(target)
+        if level is None:
+            return query
+        codes = self._sw_industries(level).get_column("code").to_list()
+        return query.filter(pl.col("code").is_in(codes))
+
+    def _sw_industries(self, level: str) -> pl.DataFrame:
+        """申万行业清单里的这一级：(code, name, parent)，按代码排。parent 是二级行业的上级一级行业名。
+
+        加二级之前同步的老清单没有 parent_code 列，里面也只有一级。
+        """
+        table = self._scan_table(SW_INDUSTRY_TABLE).collect()
+        if "parent_code" not in table.columns:
+            table = table.with_columns(pl.lit(None, dtype=pl.String).alias("parent_code"))
+        parents = table.select(pl.col("code").alias("parent_code"), pl.col("name").alias("parent"))
+        return (
+            table.filter(pl.col("level") == level)
+            .join(parents, on="parent_code", how="left")
+            .select("code", "name", "parent")
+            .sort("code")
+        )
+
+    def _sw_member(self, level: str) -> pl.DataFrame:
+        """申万行业归属里这一级的行：(code, industry_code, industry_name, in_date, out_date)。
+
+        「某天属于哪个行业」要在同一级里判断（universe.industry_of），两级混在一起就成了同时属于两个行业。
+        加二级之前同步的老归属表没有 level 列，里面只有一级。
+        """
+        table = self._scan_table(SW_MEMBER_TABLE)
+        if "level" not in table.collect_schema().names():
+            return table.collect() if level == "L1" else table.head(0).collect()
+        return table.filter(pl.col("level") == level).drop("level").collect()
 
     def _index_daily_through(self) -> date | None:
         """两个指数里较早的那个最新日：对照选哪个都要有。"""

@@ -15,15 +15,21 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from litmus.data.manifest import Manifest
 
-#: 标的类型
+#: 标的类型。申万一级、二级行业分成两类：板块表按哪一级排行、字段对哪一级可用，都按标的类型分
 STOCK = "stock"
 SW_INDUSTRY = "sw_industry"
+SW_INDUSTRY_L2 = "sw_industry_l2"
 CONCEPT = "concept"
-BOARD_TARGETS = (SW_INDUSTRY, CONCEPT)
+BOARD_TARGETS = (SW_INDUSTRY, SW_INDUSTRY_L2, CONCEPT)
 
-#: 要做能力探测的标的 → manifest 里的能力名。不在表里的（股票、申万行业）只要基础积分，总是可用
+#: 要在 manifest 里记为可用才能用的标的 → 能力名。不在表里的（股票、申万一级行业）只要基础积分，总是可用。
+#: 概念板块要探测权限；申万二级行业 2026-09-15 才加，重新同步过一次申万行业才有，老数据目录里没有
 CONCEPT_CAPABILITY = "concept"
-TARGET_CAPABILITIES: dict[str, str] = {CONCEPT: CONCEPT_CAPABILITY}
+SW_INDUSTRY_L2_CAPABILITY = "sw_industry_l2"
+TARGET_CAPABILITIES: dict[str, str] = {
+    SW_INDUSTRY_L2: SW_INDUSTRY_L2_CAPABILITY,
+    CONCEPT: CONCEPT_CAPABILITY,
+}
 
 
 @dataclass(frozen=True)
@@ -81,7 +87,14 @@ _FIELD_LIST: tuple[Field, ...] = (
     _f("pb", "市净率", "倍", "float", (STOCK, *_ALL_BOARDS)),
     _f("ps_ttm", "市销率TTM", "倍", "float", _STOCK_ONLY),
     _f("dv_ttm", "股息率TTM", "%", "float", _STOCK_ONLY),
-    _f("market_cap", "总市值", "元", "float", (STOCK, SW_INDUSTRY), "概念板块口径不同，不提供"),
+    _f(
+        "market_cap",
+        "总市值",
+        "元",
+        "float",
+        (STOCK, SW_INDUSTRY, SW_INDUSTRY_L2),
+        "概念板块口径不同，不提供",
+    ),
     _f("circ_mv", "流通市值", "元", "float", (STOCK, *_ALL_BOARDS)),
     # ── 财务（按披露日对齐）────────────────────────────────────
     _f("roe", "净资产收益率（年化）", "%", "float", _STOCK_ONLY),

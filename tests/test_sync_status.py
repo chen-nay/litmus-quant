@@ -8,7 +8,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from litmus.data.fields import CONCEPT_CAPABILITY
+from litmus.data.fields import CONCEPT_CAPABILITY, SW_INDUSTRY_L2_CAPABILITY
 from litmus.data.manifest import Manifest
 from litmus.data.storage import MarketStore
 from litmus.data.sync import (
@@ -176,12 +176,16 @@ def test_概念板块不可用时不拦提问并给出原因(store):
     result = status(store, ready_manifest(store))
 
     assert result.ready
-    assert result.unavailable == {CONCEPT_CAPABILITY: "需要 6000 积分"}
+    assert result.unavailable == {
+        SW_INDUSTRY_L2_CAPABILITY: "还没同步过，同步一次后可用",
+        CONCEPT_CAPABILITY: "需要 6000 积分",
+    }
 
 
 def test_没探测过的能力按不可用算(store):
     manifest = ready_manifest(store)
     del manifest.capabilities[CONCEPT_CAPABILITY]
+    manifest.record_capability(SW_INDUSTRY_L2_CAPABILITY, True)
 
     assert status(store, manifest).unavailable == {CONCEPT_CAPABILITY: "还没探测过这项数据"}
 

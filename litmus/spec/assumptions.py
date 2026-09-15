@@ -31,7 +31,11 @@ BASE_LABELS = {
     "zz500": "中证500成分股（按每天当时的成分）",
 }
 
-BOARD_TYPE_LABELS = {"sw_industry": "申万一级行业", "concept": "通达信概念板块"}
+BOARD_TYPE_LABELS = {
+    "sw_industry": "申万一级行业",
+    "sw_industry_l2": "申万二级行业",
+    "concept": "通达信概念板块",
+}
 
 BENCHMARK_LABELS = {
     "universe_equal_weight": "买入日全A等权平均（剔除 ST、停牌、次新股，持有期内退市的按最后价格算）",
@@ -73,6 +77,8 @@ class Facts:
     defaulted: frozenset[str] = frozenset()
     #: 这个问题用到的几类数据各自截至哪天：(叫法, 日期)，如 ("股票行情", 2026-09-14)
     data_dates: tuple[tuple[str, date], ...] = ()
+    #: 股票池限定的申万行业是哪一级，如「申万二级行业，属于电子」
+    industry_scope: str = ""
 
 
 @dataclass(frozen=True)
@@ -138,7 +144,10 @@ def _stock_list(spec: StockListSpec, facts: Facts, notes: _Notes) -> None:
     universe = spec.universe
     notes.add("universe.base", "股票池", BASE_LABELS[universe.base])
     if universe.industry:
-        notes.add("universe.industry", "申万行业", f"{universe.industry}（按每个交易日当时的归属）")
+        scope = f"{facts.industry_scope}，" if facts.industry_scope else ""
+        notes.add(
+            "universe.industry", "申万行业", f"{universe.industry}（{scope}按每个交易日当时的归属）"
+        )
     if universe.board:
         name = facts.board_name or universe.board.code
         notes.add("universe.board", "概念板块", name)

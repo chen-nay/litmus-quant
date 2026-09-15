@@ -12,6 +12,8 @@ from litmus.data.fields import (
     INTERNAL_COLUMNS,
     STOCK,
     SW_INDUSTRY,
+    SW_INDUSTRY_L2,
+    SW_INDUSTRY_L2_CAPABILITY,
 )
 from litmus.data.manifest import Manifest
 
@@ -48,6 +50,10 @@ def test_申万行业没有涨停家数和换手率():
     assert "limit_up_num" not in names
     assert "turnover" not in names
     assert "market_cap" in names
+
+
+def test_申万二级行业的字段和一级一样():
+    assert fields.names_for(SW_INDUSTRY_L2) == fields.names_for(SW_INDUSTRY)
 
 
 def test_字段对该标的不可用时报错():
@@ -89,6 +95,14 @@ def test_概念板块探测通过才可用():
     manifest.record_capability(CONCEPT_CAPABILITY, True)
 
     assert fields.available_targets(manifest) == (STOCK, SW_INDUSTRY, CONCEPT)
+
+
+def test_申万二级行业同步过才可用():
+    """2026-09-15 才加二级：老数据目录重新同步申万行业之前没有二级，不能让上层去读空表。"""
+    manifest = Manifest()
+    manifest.record_capability(SW_INDUSTRY_L2_CAPABILITY, True)
+
+    assert fields.available_targets(manifest) == (STOCK, SW_INDUSTRY, SW_INDUSTRY_L2)
 
 
 def test_概念板块没权限时不可用_股票和申万行业不受影响():

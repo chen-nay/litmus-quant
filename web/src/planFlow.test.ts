@@ -44,6 +44,8 @@ describe("选候选", () => {
       shape: "stock_list",
       universe: { industry: "电子", board: { type: "concept", code: "880500.TDX" } },
     });
+    const industry = { code: "801081.SI", name: "半导体", note: "申万二级行业", board_type: "sw_industry_l2" as const };
+    expect(withBoard(draft, industry)).toEqual({ shape: "stock_list", universe: { industry: "半导体" } });
   });
 });
 

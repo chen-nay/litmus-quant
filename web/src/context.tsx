@@ -54,6 +54,8 @@ export interface Catalog {
   events: EventsResponse | null;
   fields: FieldsResponse | null;
   sw: BoardsResponse | null;
+  /** 申万二级行业：还没同步过二级时为空 */
+  sw2: BoardsResponse | null;
   concept: BoardsResponse | null;
   /** 概念板块不可用的原因（没权限、还没同步） */
   conceptError: string | null;
@@ -64,6 +66,7 @@ const EMPTY_CATALOG: Catalog = {
   events: null,
   fields: null,
   sw: null,
+  sw2: null,
   concept: null,
   conceptError: null,
   error: null,
@@ -88,14 +91,16 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       api.events(),
       api.fields(),
       api.boards("sw_industry"),
+      api.boards("sw_industry_l2"),
       api.boards("concept"),
-    ]).then(([events, fields, sw, concept]) => {
+    ]).then(([events, fields, sw, sw2, concept]) => {
       if (!alive) return;
       const failed = [events, fields, sw].find((item) => item.status === "rejected");
       setCatalog({
         events: settled(events),
         fields: settled(fields),
         sw: settled(sw),
+        sw2: settled(sw2),
         concept: settled(concept),
         conceptError: concept.status === "rejected" ? errorText(concept.reason) : null,
         error: failed?.status === "rejected" ? errorText(failed.reason) : null,

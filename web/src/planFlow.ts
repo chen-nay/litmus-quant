@@ -32,6 +32,10 @@ export function withStock(spec: SpecDraft, candidate: Candidate): SpecDraft {
 
 export function withBoard(spec: SpecDraft, candidate: Candidate): SpecDraft {
   const universe = (spec.universe as Record<string, unknown> | undefined) ?? {};
+  // 候选里有申万行业也有概念板块（2026-09-15 定）：申万行业填股票池的行业，概念板块填板块
+  if (candidate.board_type === "sw_industry" || candidate.board_type === "sw_industry_l2") {
+    return { ...spec, universe: { ...universe, industry: candidate.name } };
+  }
   return { ...spec, universe: { ...universe, board: { type: "concept", code: candidate.code } } };
 }
 

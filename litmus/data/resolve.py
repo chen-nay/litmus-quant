@@ -45,7 +45,10 @@ RULE_LABELS = {
 MAX_SIMILAR = 10
 
 _SYMBOL = re.compile(r"\d{6}")
-_BOARD_SUFFIXES = ("概念股", "概念", "板块", "行业")
+_BOARD_SUFFIXES = ("概念股", "概念", "板块", "行业", "股")
+
+#: 同一级命中时的先后：申万一级、申万二级、概念板块（2026-09-15 定：能对上申万行业的优先用申万）
+_SOURCE_ORDER = {"sw_industry": 0, "sw_industry_l2": 1, "concept": 2}
 
 
 @dataclass(frozen=True)
@@ -149,7 +152,7 @@ def _board_rule(query: str, code: str, name: str) -> int | None:
 
 
 def match_boards(text: str, boards: Iterable[tuple[str, str, str]]) -> list[BoardMatch]:
-    """boards：(code, name, board_type)。同一级里申万行业排在概念板块前面。"""
+    """boards：(code, name, board_type)。同一级里申万一级、二级行业排在概念板块前面。"""
     query = normalize(text)
     if not query:
         return []
@@ -159,7 +162,7 @@ def match_boards(text: str, boards: Iterable[tuple[str, str, str]]) -> list[Boar
         rules = [rule for q in queries if (rule := _board_rule(q, code, name)) is not None]
         if rules:
             found.append(BoardMatch(code, name, board_type, min(rules)))
-    return sorted(found, key=lambda m: (m.rule, m.board_type != "sw_industry", m.code))
+    return sorted(found, key=lambda m: (m.rule, _SOURCE_ORDER.get(m.board_type, 9), m.code))
 
 
 def similar_boards(text: str, boards: Iterable[tuple[str, str, str]]) -> list[BoardMatch]:
@@ -175,7 +178,8 @@ def similar_boards(text: str, boards: Iterable[tuple[str, str, str]]) -> list[Bo
     for code, name, board_type in boards:
         shared = len(pairs & _pairs(_strip_suffix(normalize(name))))
         if shared:
-            scored.append(((-shared, board_type != "sw_industry", code), code, name, board_type))
+            order = _SOURCE_ORDER.get(board_type, 9)
+            scored.append(((-shared, order, code), code, name, board_type))
     scored.sort(key=lambda item: item[0])
     return [BoardMatch(code, name, kind, SIMILAR) for _, code, name, kind in scored[:MAX_SIMILAR]]
 

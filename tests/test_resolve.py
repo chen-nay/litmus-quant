@@ -123,6 +123,17 @@ def test_板块_名称一致排前面_同一级申万排在概念前面():
     assert boards("电子") == [("801080.SI", NAME), ("880503.TDX", CONTAINS)]
 
 
+def test_板块_申万一级二级排在概念板块前面_股字后缀也去掉():
+    with_l2 = [
+        *BOARDS,
+        ("801081.SI", "半导体", "sw_industry_l2"),
+        ("880608.TDX", "第三代半导体", "concept"),
+    ]
+    matches = match_boards("半导体板块", with_l2)
+    assert [(m.code, m.rule) for m in matches] == [("801081.SI", NAME), ("880608.TDX", CONTAINS)]
+    assert boards("银行股") == [("801780.SI", NAME)]
+
+
 def test_板块_代码_外号查不到():
     assert boards("880728.tdx") == [("880728.TDX", CODE)]
     assert boards("光模块") == []  # 通达信叫「光通信」：要靠大模型给猜测名

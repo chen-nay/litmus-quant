@@ -347,7 +347,7 @@ def test_触发同步_不重复开_停止_查看进度(tmp_path):
 
 def test_字段清单按标的类型分_带中文名和单位(tmp_path):
     fields = make_client(tmp_path, ds=NoData()).get("/api/fields").json()["fields"]
-    assert set(fields) == {"stock", "sw_industry", "concept"}
+    assert set(fields) == {"stock", "sw_industry", "sw_industry_l2", "concept"}
     close = next(item for item in fields["stock"] if item["name"] == "$amount")
     assert (close["label"], close["unit"]) == ("成交额", "元")
     assert all(item["name"] != "$close_raw" for item in fields["sw_industry"])
@@ -538,3 +538,39 @@ def test_候选里只有一个代码或名称完全一致的_直接用():
     assert _decisive([exact, loose]) == [exact]
     assert _decisive([loose, loose]) == [loose, loose]
     assert _decisive([exact, exact]) == [exact, exact]
+
+
+def test_板块口径规则_完全对上一个才直接用_其余让用户选():
+    from litmus.api.routes.plan import _pick_board
+    from litmus.data import BoardMatch
+    from litmus.llm import NameMention
+
+    name_rule, contains_rule = 2, 3
+    table = {
+        "半导体板块": [
+            BoardMatch("801081.SI", "半导体", "sw_industry_l2", name_rule),
+            BoardMatch("880608.TDX", "第三代半导体", "concept", contains_rule),
+        ],
+        "半导体": [BoardMatch("880608.TDX", "第三代半导体", "concept", contains_rule)],
+        "芯片": [BoardMatch("880500.TDX", "芯片", "concept", name_rule)],
+        "光通信": [BoardMatch("880670.TDX", "光通信", "concept", name_rule)],
+        "CPO概念": [BoardMatch("880656.TDX", "CPO概念", "concept", name_rule)],
+    }
+    ds = SimpleNamespace(resolve_board=lambda text: table.get(text, []))
+
+    def pick(mention, guess=None):
+        picked, candidates = _pick_board(ds, NameMention(mention, guess))
+        return (picked and picked.name), [c.name for c in candidates]
+
+    assert pick("半导体板块", "芯片") == ("半导体", [])  # 原话完全对上一个
+    # 原话只是名称包含对上：不直接用，连同猜的一起让用户选
+    assert pick("半导体", "芯片") == (None, ["第三代半导体", "芯片"])
+    assert pick("光模块", "光通信") == ("光通信", [])  # 原话没对上，猜的对上一个
+    assert pick("光模块", "光通信、CPO概念") == (None, ["光通信", "CPO概念"])
+
+
+def test_股票池的行业写明是几级():
+    from litmus.api.explain import _industry_scope
+
+    assert _industry_scope("银行", FakeData()) == "申万一级行业"
+    assert _industry_scope("半导体", FakeData()) == ""  # 这个替身没有二级

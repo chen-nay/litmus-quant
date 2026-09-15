@@ -17,6 +17,13 @@ import { useChecker } from "./useChecker";
 
 const FIELDS: FieldName[] = [...CONDITION_FIELDS, ["board_type"]];
 
+/** 清单还没读到时说明原因：概念板块可能没权限，申万二级行业可能还没同步过 */
+function unavailable(boardType: BoardType, conceptError: string | null): string {
+  if (boardType === "concept") return conceptError ?? "加载中";
+  if (boardType === "sw_industry_l2") return "还没有数据，同步一次后可用";
+  return "加载中";
+}
+
 export function BoardListForm({ initial, planId, issues, onChecked, onCancel }: FormProps<BoardListSpec>) {
   const [form] = Form.useForm<BoardListValues>();
   const initialValues = useMemo(() => boardListValues(initial ?? {}), [initial]);
@@ -24,7 +31,7 @@ export function BoardListForm({ initial, planId, issues, onChecked, onCancel }: 
   const catalog = useCatalog();
   const status = useStatus().data?.status;
   const checker = useChecker(form, FIELDS, { initial, planId, issues, onChecked });
-  const boards = boardType === "concept" ? catalog.concept : catalog.sw;
+  const boards = { sw_industry: catalog.sw, sw_industry_l2: catalog.sw2, concept: catalog.concept }[boardType];
   const range = boards?.range;
 
   useEffect(() => {
@@ -36,7 +43,7 @@ export function BoardListForm({ initial, planId, issues, onChecked, onCancel }: 
     ? `${BOARD_TYPE_LABELS[boardType]}：数据从 ${range[0]} 到 ${range[1]}，共 ${boards?.boards.length} 个${
         boardType === "concept" ? "。只含现在还在的板块，已经撤销的不在里面" : ""
       }`
-    : `${BOARD_TYPE_LABELS[boardType]}：${boardType === "concept" ? (catalog.conceptError ?? "加载中") : "加载中"}`;
+    : `${BOARD_TYPE_LABELS[boardType]}：${unavailable(boardType, catalog.conceptError)}`;
 
   return (
     <Form<BoardListValues>
@@ -51,6 +58,7 @@ export function BoardListForm({ initial, planId, issues, onChecked, onCancel }: 
           optionType="button"
           options={[
             { value: "sw_industry", label: BOARD_TYPE_LABELS.sw_industry },
+            { value: "sw_industry_l2", label: BOARD_TYPE_LABELS.sw_industry_l2, disabled: !catalog.sw2 },
             { value: "concept", label: BOARD_TYPE_LABELS.concept, disabled: !catalog.concept },
           ]}
         />

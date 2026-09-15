@@ -41,12 +41,14 @@ class CheckResponse(BaseModel):
 
 
 class Candidate(BaseModel):
-    """原话对应多只股票 / 多个概念板块时的一个候选。"""
+    """原话对应多只股票 / 多个板块时的一个候选。"""
 
     code: str
     name: str
     #: 股票：命中的规则（名称包含、拼音首字母、曾用名……），已退市的标出来；板块：口径
     note: str = ""
+    #: 板块候选的口径：sw_industry / sw_industry_l2 / concept。选中申万行业填进股票池的行业，概念板块填进板块
+    board_type: str | None = None
 
 
 class PlanQuestion(BaseModel):

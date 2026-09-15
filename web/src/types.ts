@@ -1,7 +1,7 @@
 /** 接口的请求、响应类型，对应 litmus/api（ARCHITECTURE §6）。 */
 
-export type Target = "stock" | "sw_industry" | "concept";
-export type BoardType = "sw_industry" | "concept";
+export type Target = "stock" | BoardType;
+export type BoardType = "sw_industry" | "sw_industry_l2" | "concept";
 
 // ── 查询条件（spec）────────────────────────────────────────────
 
@@ -231,6 +231,8 @@ export interface EventsResponse {
 export interface Board {
   code: string;
   name: string;
+  /** 申万二级行业的上级一级行业名 */
+  parent?: string;
 }
 
 export interface BoardsResponse {
@@ -290,6 +292,8 @@ export interface Candidate {
   code: string;
   name: string;
   note: string;
+  /** 板块候选的口径：选中申万行业填进股票池的行业，概念板块填进板块 */
+  board_type?: BoardType | null;
 }
 
 export interface PlanQuestion {

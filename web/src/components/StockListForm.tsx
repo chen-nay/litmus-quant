@@ -1,8 +1,8 @@
-import { Checkbox, Col, DatePicker, Form, InputNumber, Row, Select } from "antd";
+import { Checkbox, Col, DatePicker, Form, InputNumber, Row, Select, type SelectProps } from "antd";
 import dayjs from "dayjs";
 import { useEffect, useMemo } from "react";
 
-import { useCatalog, useStatus } from "../context";
+import { type Catalog, useCatalog, useStatus } from "../context";
 import { BASE_LABELS, excludeLabel } from "../format";
 import {
   DEFAULT_EXCLUDE,
@@ -23,6 +23,21 @@ const FIELDS: FieldName[] = [
   ["universe", "board"],
   ["universe", "exclude"],
 ];
+
+/** 申万行业下拉框：一级、二级分组，二级后面写上所属一级 */
+function industryOptions(catalog: Catalog): SelectProps["options"] {
+  const level1 = (catalog.sw?.boards ?? []).map((board) => ({ value: board.name, label: board.name }));
+  const level2 = (catalog.sw2?.boards ?? []).map((board) => ({
+    value: board.name,
+    label: board.parent ? `${board.name}（${board.parent}）` : board.name,
+  }));
+  return level2.length
+    ? [
+        { label: "一级", options: level1 },
+        { label: "二级", options: level2 },
+      ]
+    : level1;
+}
 
 export function StockListForm({ initial, planId, issues, onChecked, onCancel }: FormProps<StockListSpec>) {
   const [form] = Form.useForm<StockListValues>();
@@ -68,8 +83,9 @@ export function StockListForm({ initial, planId, issues, onChecked, onCancel }: 
             <Select
               allowClear
               showSearch
+              optionFilterProp="label"
               placeholder="全部行业"
-              options={(catalog.sw?.boards ?? []).map((board) => ({ value: board.name, label: board.name }))}
+              options={industryOptions(catalog)}
             />
           </Form.Item>
         </Col>

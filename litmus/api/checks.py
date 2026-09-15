@@ -17,7 +17,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from litmus.api.models import Issue
-from litmus.data import CONCEPT, STOCK, SW_INDUSTRY, DataService
+from litmus.data import CONCEPT, STOCK, SW_INDUSTRY, SW_INDUSTRY_L2, DataService
 from litmus.expr import ExprSyntaxError, parse, validate
 from litmus.signals import EventLibrary, EventParamError, render_event
 from litmus.spec import BoardListSpec, StockHistorySpec, StockListSpec, parse_spec
@@ -25,7 +25,12 @@ from litmus.spec import BoardListSpec, StockHistorySpec, StockListSpec, parse_sp
 Spec = StockListSpec | BoardListSpec | StockHistorySpec
 
 _SHAPES = ("stock_list", "board_list", "stock_history")
-_TARGET_LABELS = {STOCK: "股票", SW_INDUSTRY: "申万行业", CONCEPT: "概念板块"}
+_TARGET_LABELS = {
+    STOCK: "股票",
+    SW_INDUSTRY: "申万行业",
+    SW_INDUSTRY_L2: "申万二级行业",
+    CONCEPT: "概念板块",
+}
 _UNAVAILABLE = "{}当前不可用，原因见 /api/data/status"
 
 #: pydantic 的错误类型 → 中文说明。花括号里的由错误自带的上下文填
@@ -140,7 +145,7 @@ def _fill_dates(raw: dict[str, Any], ds: DataService) -> dict[str, Any]:
         first, last = ds.data_range(STOCK)
         return {**raw, "time_range": {"from": first.isoformat(), "to": last.isoformat()}}
     target = {"stock_list": STOCK, "board_list": raw.get("board_type")}.get(shape)
-    if raw.get("as_of") is None and target in (STOCK, SW_INDUSTRY, CONCEPT):
+    if raw.get("as_of") is None and target in (STOCK, SW_INDUSTRY, SW_INDUSTRY_L2, CONCEPT):
         if target in ds.available_targets():
             return {**raw, "as_of": ds.data_range(target)[1].isoformat()}
     return raw
@@ -226,12 +231,15 @@ def _universe_issues(spec: StockListSpec, ds: DataService) -> list[Issue]:
     issues = []
     industry = spec.universe.industry
     if industry is not None:
-        names = [board.name for board in ds.list_boards(SW_INDUSTRY)]
+        kinds = [SW_INDUSTRY]
+        if SW_INDUSTRY_L2 in ds.available_targets():
+            kinds.append(SW_INDUSTRY_L2)
+        names = [board.name for kind in kinds for board in ds.list_boards(kind)]
         if industry not in names:
             issues.append(
                 Issue(
                     path="universe.industry",
-                    message=f"没有叫「{industry}」的申万一级行业",
+                    message=f"没有叫「{industry}」的申万行业",
                     allowed="、".join(names),
                 )
             )

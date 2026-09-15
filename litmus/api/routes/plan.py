@@ -3,9 +3,9 @@
 1. 本地数据不够 → data_not_ready，不调大模型
 2. 大模型没配好 → failed，说明缺什么
 3. llm.plan()：大模型填查询条件草稿；表达式、事件、结构不对时带着问题重试一次（防线②）
-4. 防线③：股票、概念板块按原话查代码，原话查不到再用大模型猜的名字查（可以猜几个，用「、」隔开）。
-   只有一个、或者只有一个代码 / 名称完全一致的，直接用；对应多个转成澄清让用户选；概念板块都查不到时
-   列出名字相近的让用户选。再过和 /api/check 同一套检查，不过也转成澄清
+4. 防线③：股票按原话查代码，查不到再用大模型猜的名字查；只有一个、或者只有一个代码 / 名称完全一致的直接用，
+   对应多个转成澄清让用户选。板块在申万一级、二级行业和通达信概念里一起查，规则见 _pick_board（2026-09-15 定）；
+   都查不到时列出名字相近的让用户选。再过和 /api/check 同一套检查，不过也转成澄清
 5. 生成说明文字（带上原话里的说法），存下这次提问 → plan_id。确认卡上检查、运行时带上 plan_id，
    没改过的栏目继续用原话的说法（explain.plan_mentions）
 6. 追问：把 previous_plan_id 带回来，这次说的话当成对追问的回答
@@ -29,6 +29,7 @@ from litmus.data import (
     CONCEPT,
     STOCK,
     SW_INDUSTRY,
+    SW_INDUSTRY_L2,
     BoardMatch,
     DataService,
     DataStatus,
@@ -112,14 +113,20 @@ def make_plan(query: str, previous_plan_id: str | None, services: Services) -> P
     ds = services.ds
     first, last = ds.data_range(STOCK)
     today = date.today()
+    targets = ds.available_targets()
     context = PlanContext(
         today=today,
         latest_trading_day=last,
         history_from=first,
-        targets=ds.available_targets(),
+        targets=targets,
         industries=tuple(board.name for board in ds.list_boards(SW_INDUSTRY)),
         # 日期换算表要数到去年最后一个交易日（今年以来）
         trading_days=tuple(ds.get_trading_calendar(date(today.year - 1, 12, 1), last)),
+        industries_l2=tuple(
+            (board.parent or "", board.name) for board in ds.list_boards(SW_INDUSTRY_L2)
+        )
+        if SW_INDUSTRY_L2 in targets
+        else (),
     )
     result = plan(query, context, services.llm, services.events, previous)
     mentions = _with_names(result)
@@ -186,13 +193,10 @@ def _respond(result: PlanResult, mentions: tuple[Mention, ...], services: Servic
             "code": stocks[0].code,
         }
     if result.board is not None:
-        boards = _decisive(_lookup(lambda text: ds.resolve_board(text, CONCEPT), result.board))
-        if len(boards) != 1:
-            return _choose_board(spec, result.board, boards, ds)
-        spec["universe"] = {
-            **(spec.get("universe") or {}),
-            "board": {"type": "concept", "code": boards[0].code},
-        }
+        picked, candidates = _pick_board(ds, result.board)
+        if picked is None:
+            return _choose_board(spec, result.board, candidates, ds)
+        spec["universe"] = _with_board(spec.get("universe") or {}, picked)
 
     checked, issues = check_spec(spec, ds, services.events)
     if checked is None:
@@ -217,13 +221,50 @@ def _lookup(resolve, name: NameMention) -> list:
     """先按原话查，查不到再按大模型猜的名字查（外号：通达信没有「光模块」，叫「光通信」「CPO概念」）。
     猜测名可以有几个，用「、」隔开，查到的合在一起。"""
     matches = resolve(name.mention)
-    if matches or not name.guess:
+    if matches:
         return matches
-    found: dict[str, object] = {}
-    for guess in re.split(r"[、,，]", name.guess):
-        for match in resolve(guess.strip()) if guess.strip() else []:
-            found.setdefault(match.code, match)
-    return list(found.values())
+    return _unique([match for guess in _guesses(name.guess) for match in resolve(guess)])
+
+
+def _guesses(text: str | None) -> list[str]:
+    return [part.strip() for part in re.split(r"[、,，]", text or "") if part.strip()]
+
+
+def _unique(matches: list) -> list:
+    """去重，保持先后：同一个口径下的同一个代码只留第一次出现的。"""
+    seen, kept = set(), []
+    for match in matches:
+        key = (getattr(match, "board_type", ""), match.code)
+        if key not in seen:
+            seen.add(key)
+            kept.append(match)
+    return kept
+
+
+def _pick_board(ds: DataService, name: NameMention) -> tuple[BoardMatch | None, list[BoardMatch]]:
+    """板块口径的规则（2026-09-15 定）：申万一级、二级行业和通达信概念板块一起查。返回 (直接用的, 让用户选的)。
+
+    - 原话完全对上的只有一个，就用它：「半导体板块」→ 申万二级「半导体」，「银行股」→ 申万一级「银行」
+    - 原话一个都没对上，大模型猜的名字完全对上的只有一个，也用它：「光模块」→ 猜「光通信」
+    - 其他都交给用户选，候选写明口径：两边都完全对上的，只是名称包含对上的（「半导体」只包含在「第三代半导体」里，
+      2026-09-15 实测直接用了它，结果范围窄得离谱），猜了几个都对上的
+    """
+    said = ds.resolve_board(name.mention)
+    exact = [match for match in said if match.exact]
+    if len(exact) == 1:
+        return exact[0], []
+    guessed = [match for guess in _guesses(name.guess) for match in ds.resolve_board(guess)]
+    guessed_exact = _unique([match for match in guessed if match.exact])
+    if not said and len(guessed_exact) == 1:
+        return guessed_exact[0], []
+    return None, _unique(said + guessed)
+
+
+def _with_board(universe: dict, board: BoardMatch) -> dict:
+    """选中申万行业填股票池的行业，概念板块填板块。"""
+    if board.board_type == CONCEPT:
+        return {**universe, "board": {"type": "concept", "code": board.code}}
+    return {**universe, "industry": board.name}
 
 
 def _decisive(matches: list) -> list:
@@ -252,21 +293,43 @@ def _choose_board(
     spec: dict, name: NameMention, boards: list[BoardMatch], ds: DataService
 ) -> PlanResponse:
     if boards:
-        message = f"「{name.mention}」对应 {len(boards)} 个概念板块，选一个"
-        candidates = _board_candidates(boards, "通达信概念板块")
+        message = f"「{name.mention}」可能是下面这些行业或板块，选一个"
+        candidates = _board_candidates(boards)
         return PlanResponse(status=CLARIFY, spec=spec, message=message, board_candidates=candidates)
-    similar = ds.similar_boards(name.mention, CONCEPT)
+    available = ds.available_targets()
+    similar = [
+        match
+        for kind in (SW_INDUSTRY, SW_INDUSTRY_L2, CONCEPT)
+        if kind in available
+        for match in ds.similar_boards(name.mention, kind)
+    ]
     if not similar:
-        message = f"没找到「{name.mention}」这个概念板块：换个说法，或者打开表单在概念板块里选"
+        message = (
+            f"没找到「{name.mention}」这个行业或板块：换个说法，或者打开表单在行业、概念板块里选"
+        )
         return PlanResponse(status=CLARIFY, spec=spec, message=message)
-    message = f"没找到叫「{name.mention}」的概念板块，下面几个名字相近，选一个；都不是就换个说法"
+    message = f"没找到叫「{name.mention}」的行业或板块，下面几个名字相近，选一个；都不是就换个说法"
     candidates = _board_candidates(similar, "名字相近")
     return PlanResponse(status=CLARIFY, spec=spec, message=message, board_candidates=candidates)
 
 
-def _board_candidates(boards: list[BoardMatch], note: str) -> list[Candidate]:
+#: 候选上写明口径
+_BOARD_LABELS = {
+    SW_INDUSTRY: "申万一级行业",
+    SW_INDUSTRY_L2: "申万二级行业",
+    CONCEPT: "通达信概念板块",
+}
+
+
+def _board_candidates(boards: list[BoardMatch], extra: str = "") -> list[Candidate]:
     return [
-        Candidate(code=board.code, name=board.name, note=note) for board in boards[:MAX_CANDIDATES]
+        Candidate(
+            code=board.code,
+            name=board.name,
+            note=_BOARD_LABELS[board.board_type] + (f"，{extra}" if extra else ""),
+            board_type=board.board_type,
+        )
+        for board in boards[:MAX_CANDIDATES]
     ]
 
 

@@ -75,13 +75,13 @@ OUTPUT_SCHEMA: dict[str, Any] = {
         "sort_order": {"type": "string", "enum": ["asc", "desc"]},
         "sort_label": _STR,
         "limit": {"type": "integer"},
-        "board_type": {"type": "string", "enum": ["sw_industry", "concept"]},
+        "board_type": {"type": "string", "enum": ["sw_industry", "sw_industry_l2", "concept"]},
         "universe_base": {"type": "string", "enum": ["all_a", "hs300", "zz500"]},
-        "industry": _STR,
+        "industry": {"type": "string", "description": "申万一级或二级行业名，只从行业清单里选"},
         "board_mention": _STR,
         "board_guess": {
             "type": "string",
-            "description": "猜的通达信概念板块名，拿不准可以写 2~3 个，用「、」隔开",
+            "description": "猜的板块名：申万行业名或通达信概念板块名，拿不准可以写 2~3 个，用「、」隔开",
         },
         "stock_mention": _STR,
         "stock_guess": _STR,
@@ -219,10 +219,11 @@ def _read_ok(
         target = "stock"
         if shape == "board_list":
             target = _text(draft.get("board_type"))
-            if target not in ("sw_industry", "concept"):
-                problems.append("板块表要填 board_type：sw_industry 或 concept")
+            if target not in _BOARD_LABELS:
+                problems.append("板块表要填 board_type：sw_industry、sw_industry_l2 或 concept")
             elif target not in context.targets:
-                problems.append("概念板块当前不可用，board_type 只能是 sw_industry")
+                usable = "、".join(kind for kind in _BOARD_LABELS if kind in context.targets)
+                problems.append(f"{_BOARD_LABELS[target]}当前不可用，board_type 只能是 {usable}")
             spec["board_type"] = target
         _copy(draft, spec, "as_of")
         if expr := _text(draft.get("filter_expr")):
@@ -238,14 +239,15 @@ def _read_ok(
             if base := _text(draft.get("universe_base")):
                 universe["base"] = base
             if industry := _text(draft.get("industry")):
-                if industry not in context.industries:
-                    problems.append(f"industry 要从申万一级行业清单里选，收到「{industry}」")
+                if industry not in _industry_names(context):
+                    problems.append(
+                        f"industry 要从申万行业清单（一级或二级）里选，收到「{industry}」"
+                    )
                 universe["industry"] = industry
             if universe:
                 spec["universe"] = universe
             if mention := _text(draft.get("board_mention")):
-                if "concept" not in context.targets:
-                    problems.append("概念板块当前不可用，不要填 board_mention")
+                # 申万行业、概念板块都按它查，由 api 按规则挑口径；概念板块不可用时照样能对上申万行业
                 board = NameMention(mention, _text(draft.get("board_guess")) or None)
 
     elif shape == "stock_history":
@@ -386,7 +388,7 @@ def system_variables(context: PlanContext, events: EventLibrary) -> dict[str, st
         "board_fields": _board_fields(context),
         "operators": "\n".join(f"- {op['signature']}：{op['label']}" for op in operator_catalog()),
         "events": _events(events),
-        "industries": "、".join(context.industries),
+        "industries": _industries(context),
         "defaults": _defaults(context),
         "dates": _date_table(context),
     }
@@ -405,6 +407,10 @@ def _fields(target: str) -> str:
 
 def _board_fields(context: PlanContext) -> str:
     parts = [f"申万一级行业（board_type=sw_industry）：\n{_fields('sw_industry')}"]
+    if "sw_industry_l2" in context.targets:
+        parts.append("申万二级行业（board_type=sw_industry_l2）：字段和一级一样")
+    else:
+        parts.append("申万二级行业当前不可用：不要用 board_type=sw_industry_l2")
     if "concept" in context.targets:
         parts.append(f"通达信概念板块（board_type=concept）：\n{_fields('concept')}")
     else:
@@ -448,6 +454,32 @@ def _defaults(context: PlanContext) -> str:
             f"- 「小市值」没给数字：总市值低于 {small_cap}，写成 $market_cap < {small_cap}",
         ]
     )
+
+
+#: 板块表的口径
+_BOARD_LABELS = {
+    "sw_industry": "申万一级行业",
+    "sw_industry_l2": "申万二级行业",
+    "concept": "概念板块",
+}
+
+
+def _industry_names(context: PlanContext) -> tuple[str, ...]:
+    return (*context.industries, *(name for _, name in context.industries_l2))
+
+
+def _industries(context: PlanContext) -> str:
+    """申万行业清单：一级一行，二级按所属一级分组。"""
+    lines = [f"一级（{len(context.industries)} 个）：{'、'.join(context.industries)}"]
+    if not context.industries_l2:
+        lines.append("二级行业当前不可用")
+        return "\n".join(lines)
+    groups: dict[str, list[str]] = {}
+    for parent, name in context.industries_l2:
+        groups.setdefault(parent, []).append(name)
+    lines.append(f"二级（{len(context.industries_l2)} 个，按所属一级分组）：")
+    lines.extend(f"- {parent}：{'、'.join(names)}" for parent, names in groups.items())
+    return "\n".join(lines)
 
 
 _WEEKDAYS = "一二三四五六日"

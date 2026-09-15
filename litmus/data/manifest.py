@@ -18,7 +18,11 @@ from datetime import datetime
 
 import polars as pl
 
+from litmus.data.fields import SW_INDUSTRY_L2_CAPABILITY
 from litmus.data.storage import MarketStore, MissingDataError, StorageError, read_json, write_json
+
+#: 没记过的能力为什么不可用：概念板块是还没探测权限；申万二级行业不用探测，是还没同步过
+_NOT_RECORDED = {SW_INDUSTRY_L2_CAPABILITY: "还没同步过，同步一次后可用"}
 
 #: 结构变了就加一，老数据目录直接要求重新同步
 MANIFEST_VERSION = 1
@@ -162,5 +166,5 @@ class Manifest:
     def unavailable_reason(self, name: str) -> str:
         capability = self.capabilities.get(name)
         if capability is None:
-            return "还没探测过这项数据"
+            return _NOT_RECORDED.get(name, "还没探测过这项数据")
         return capability.reason

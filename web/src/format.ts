@@ -194,6 +194,7 @@ export const BASE_LABELS: Record<string, string> = {
 
 export const BOARD_TYPE_LABELS: Record<BoardType, string> = {
   sw_industry: "申万一级行业",
+  sw_industry_l2: "申万二级行业",
   concept: "通达信概念板块",
 };
 

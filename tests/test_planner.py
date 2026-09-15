@@ -205,7 +205,9 @@ def test_事件参数越界_问题里带上可选范围():
 
 def test_行业名要从清单里选_概念板块不可用时不能用():
     result, client = ask({**STOCK_LIST, "industry": "白酒"}, STOCK_LIST)
-    assert result.status == OK and "industry 要从申万一级行业清单里选" in client.calls[1][1]
+    assert (
+        result.status == OK and "industry 要从申万行业清单（一级或二级）里选" in client.calls[1][1]
+    )
 
     context = PlanContext(**{**CONTEXT.__dict__, "targets": ("stock", "sw_industry")})
     board = {"status": "ok", "shape": "board_list", "board_type": "concept", "sort_by": "$pct_chg"}

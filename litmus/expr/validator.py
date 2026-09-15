@@ -19,7 +19,15 @@ from __future__ import annotations
 import difflib
 from dataclasses import dataclass, field
 
-from litmus.data import CONCEPT, FIELDS, INTERNAL_COLUMNS, STOCK, SW_INDUSTRY, names_for
+from litmus.data import (
+    CONCEPT,
+    FIELDS,
+    INTERNAL_COLUMNS,
+    STOCK,
+    SW_INDUSTRY,
+    SW_INDUSTRY_L2,
+    names_for,
+)
 from litmus.expr.collector import collect_lookback
 from litmus.expr.operators import (
     ANY,
@@ -37,7 +45,12 @@ from litmus.expr.parser import Binary, Call, Field, Node, Number, Unary
 #: 用途 → 表达式结果必须是什么类型
 PURPOSES: dict[str, str] = {"filter": BOOL, "event": BOOL, "sort": NUM}
 
-_TARGET_LABELS = {STOCK: "股票", SW_INDUSTRY: "申万行业", CONCEPT: "概念板块"}
+_TARGET_LABELS = {
+    STOCK: "股票",
+    SW_INDUSTRY: "申万行业",
+    SW_INDUSTRY_L2: "申万二级行业",
+    CONCEPT: "概念板块",
+}
 _TYPE_LABELS = {NUM: "数值", BOOL: "条件（真/假）"}
 _ARITHMETIC = frozenset({"+", "-", "*", "/"})
 _ORDERING = frozenset({"<", "<=", ">", ">="})
@@ -78,7 +91,7 @@ class ValidationResult:
 
 
 def validate(node: Node, target: str, purpose: str) -> ValidationResult:
-    """校验表达式。target：stock / sw_industry / concept；purpose：filter / sort / event。"""
+    """校验表达式。target：stock / sw_industry / sw_industry_l2 / concept；purpose：filter / sort / event。"""
     if target not in _TARGET_LABELS:
         raise ValueError(f"不认识的标的类型 {target!r}")
     if purpose not in PURPOSES:

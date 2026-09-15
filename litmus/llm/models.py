@@ -31,6 +31,8 @@ class PlanContext:
     industries: tuple[str, ...]
     #: 本地交易日历里最近的一段（去年 12 月起到最近一个交易日），给日期换算表数交易日
     trading_days: tuple[date, ...] = ()
+    #: 申万二级行业：(上级一级行业名, 二级行业名)。二级不可用时为空
+    industries_l2: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

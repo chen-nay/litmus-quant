@@ -28,7 +28,11 @@ from datetime import datetime, timedelta
 
 import polars as pl
 
-from litmus.data.fields import CONCEPT_CAPABILITY, TARGET_CAPABILITIES
+from litmus.data.fields import (
+    CONCEPT_CAPABILITY,
+    SW_INDUSTRY_L2_CAPABILITY,
+    TARGET_CAPABILITIES,
+)
 from litmus.data.loaders.concept import (
     CONCEPT_POINTS,
     normalize_tdx_daily,
@@ -58,7 +62,7 @@ from litmus.data.loaders.industry import (
     CLASSIFY_FIELDS,
     MEMBER_FIELDS,
     SW_DAILY_FIELDS,
-    SW_LEVEL,
+    SW_LEVELS,
     SW_SRC,
     normalize_index_classify,
     normalize_industry_member,
@@ -575,10 +579,11 @@ class DataSync:
     def sync_industry(
         self, start: str, end: str, manifest: Manifest | None = None
     ) -> dict[str, int]:
-        """拉申万一级行业：清单、历史归属、行业日线。
+        """拉申万一级、二级行业：清单、历史归属、行业日线。
 
-        先取清单拿到 31 个行业代码，再按行业并发拉归属和日线。两者都按行业代码取，
-        **一个行业一次调用就覆盖十年**——`sw_daily` 单次 4000 行，而十年只有 2600 个交易日。
+        先按层级取清单（31 个一级、134 个二级），再并发拉归属和日线：归属按一级行业拉，每行本来就带着二级；
+        日线一级、二级每个行业一次调用，**一次就覆盖十年**——`sw_daily` 单次 4000 行，而十年只有 2600 个交易日。
+        一共约 229 次调用。拉到二级清单就把申万二级行业记为可用（老数据目录重新同步这一步才有）。
 
         `is_new` 是**过滤器**，不是「包含历史」的开关：`Y` 只返回当前成分，`N` 只返回
         已经调出的，所以**两个都要拉**。只拉 Y 会丢掉历史（换过行业的公司全按今天的归属算，
@@ -588,21 +593,33 @@ class DataSync:
         manifest = Manifest.load(self._store) if manifest is None else manifest
 
         classify = normalize_index_classify(
-            self._client.call("index_classify", {"level": SW_LEVEL, "src": SW_SRC}, CLASSIFY_FIELDS)
+            [
+                row
+                for level in SW_LEVELS
+                for row in self._client.call(
+                    "index_classify", {"level": level, "src": SW_SRC}, CLASSIFY_FIELDS
+                )
+            ]
         )
-        codes = classify.get_column("code").to_list()
-        if not codes:
+        l1_codes = classify.filter(pl.col("level") == "L1").get_column("code").to_list()
+        if not l1_codes:
             raise SyncError("申万行业清单是空的，归属和日线无从拉起")
+        orphans = classify.filter((pl.col("level") == "L2") & pl.col("parent_code").is_null())
+        if not orphans.is_empty():
+            sample = orphans.get_column("name").head(3).to_list()
+            raise SyncError(
+                f"{orphans.height} 个申万二级行业找不到上级一级行业，如 {sample}；不落盘"
+            )
 
-        # Y 只给当前成分、N 只给已调出的，两个都要，缺一边都是错的
+        # Y 只给当前成分、N 只给已调出的，两个都要，缺一边都是错的。按一级拉，每行带着二级
         member_tasks = [
             ("index_member_all", {"l1_code": code, "is_new": flag}, MEMBER_FIELDS)
-            for code in codes
+            for code in l1_codes
             for flag in ("Y", "N")
         ]
         daily_tasks = [
             ("sw_daily", {"ts_code": code, "start_date": start, "end_date": end}, SW_DAILY_FIELDS)
-            for code in codes
+            for code in classify.get_column("code").to_list()
         ]
         results = self._pull_concurrently(member_tasks + daily_tasks)
         members = [row for rows in results[: len(member_tasks)] for row in rows]
@@ -610,7 +627,7 @@ class DataSync:
 
         written = {
             SW_INDUSTRY_TABLE: self._write_table(
-                SW_INDUSTRY_TABLE, classify, manifest, f"申万 {SW_SRC} 一级"
+                SW_INDUSTRY_TABLE, classify, manifest, f"申万 {SW_SRC} 一级、二级"
             ),
             SW_MEMBER_TABLE: self._write_table(
                 SW_MEMBER_TABLE,
@@ -622,6 +639,10 @@ class DataSync:
                 SW_DAILY_TABLE, normalize_sw_daily(dailies), manifest, f"{start}~{end}"
             ),
         }
+        has_l2 = classify.filter(pl.col("level") == "L2").height > 0
+        manifest.record_capability(
+            SW_INDUSTRY_L2_CAPABILITY, has_l2, "" if has_l2 else "申万二级行业清单是空的"
+        )
         manifest.save(self._store)
         logger.info(
             "申万行业：%s", "，".join(f"{name} {rows} 行" for name, rows in written.items())

@@ -81,7 +81,7 @@ class BoardRef(_Strict):
 
 class Universe(_Strict):
     base: Literal["all_a", "hs300", "zz500"] = "all_a"
-    industry: str | None = None  # 申万一级行业名，按每个交易日当时的归属
+    industry: str | None = None  # 申万一级或二级行业名，按每个交易日当时的归属
     board: BoardRef | None = None
     exclude: tuple[str, ...] = DEFAULTS["exclude"]  # type: ignore[assignment]
 
@@ -148,7 +148,7 @@ class BoardListSpec(_Common):
     """板块表：某一天某个口径的全部板块里筛选 → 排序 → 取前 N。"""
 
     shape: Literal["board_list"]
-    board_type: Literal["sw_industry", "concept"]
+    board_type: Literal["sw_industry", "sw_industry_l2", "concept"]
     as_of: Day
     filter: Condition | None = None
     sort: Sort | None = None

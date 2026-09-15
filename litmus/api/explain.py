@@ -13,7 +13,7 @@ from dataclasses import replace
 from datetime import date
 from typing import Any
 
-from litmus.data import CONCEPT, STOCK, DataService
+from litmus.data import CONCEPT, STOCK, SW_INDUSTRY, SW_INDUSTRY_L2, DataService
 from litmus.expr import collect_fields, collect_lookback, compares_below, describe, parse
 from litmus.research import statistics_range
 from litmus.spec import (
@@ -69,12 +69,36 @@ def plan_mentions(spec: Mapping[str, Any], record: PlanRecord | None) -> list[Me
 _COMPARED = {"target": "target.code"}
 
 
+def _industry_scope(name: str, ds: DataService) -> str:
+    """股票池限定的申万行业是哪一级：「申万一级行业」「申万二级行业，属于电子」。"""
+    if name in {board.name for board in ds.list_boards(SW_INDUSTRY)}:
+        return "申万一级行业"
+    if SW_INDUSTRY_L2 in ds.available_targets():
+        for board in ds.list_boards(SW_INDUSTRY_L2):
+            if board.name == name:
+                return f"申万二级行业，属于{board.parent}" if board.parent else "申万二级行业"
+    return ""
+
+
+def _industry_mentions(spec: StockListSpec, mentions: tuple[Mention, ...]) -> tuple[Mention, ...]:
+    """「半导体板块」大模型记在 universe.board 上；按规则对上的是申万行业时，说明写在行业那一栏。"""
+    if spec.universe.board is not None or not spec.universe.industry:
+        return mentions
+    return tuple(
+        Mention(m.phrase, "universe.industry") if m.field == "universe.board" else m
+        for m in mentions
+    )
+
+
 def _used_data(spec: Spec, texts: Iterable[str]) -> set[str]:
     """这个问题用到哪几类数据（DataService.latest_dates 的 key）。概念板块成分另有一条说明，这里不列。"""
     fields = set().union(*(collect_fields(parse(text)) for text in texts))
     finance = {"finance"} if fields & _FINANCE_FIELDS else set()
     if isinstance(spec, BoardListSpec):
-        return {spec.board_type}
+        # 申万一级、二级的行情在同一张表里，latest_dates 只列一项
+        return {
+            "sw_industry" if spec.board_type in (SW_INDUSTRY, SW_INDUSTRY_L2) else spec.board_type
+        }
     if isinstance(spec, StockHistorySpec):
         return {"stock", *finance, *(("index",) if spec.benchmark.startswith("index:") else ())}
     return {"stock", *finance, *(("index_weight",) if spec.universe.base != "all_a" else ())}
@@ -132,6 +156,8 @@ def _facts(spec: Spec, ds: DataService, mentions: tuple[Mention, ...]) -> Facts:
         )
 
     target = STOCK if isinstance(spec, StockListSpec) else spec.board_type
+    if isinstance(spec, StockListSpec):
+        mentions = _industry_mentions(spec, mentions)
     written = {
         "filter.expr": spec.filter.expr if spec.filter else None,
         "sort.by": spec.sort.by if spec.sort else None,
@@ -147,6 +173,8 @@ def _facts(spec: Spec, ds: DataService, mentions: tuple[Mention, ...]) -> Facts:
     )
     if isinstance(spec, BoardListSpec):
         return replace(facts, board_range=ds.data_range(spec.board_type))
+    if spec.universe.industry:
+        facts = replace(facts, industry_scope=_industry_scope(spec.universe.industry, ds))
     board = spec.universe.board
     if board is None:
         return facts
