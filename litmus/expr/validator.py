@@ -28,11 +28,12 @@ from litmus.data import (
     SW_INDUSTRY_L2,
     names_for,
 )
-from litmus.expr.collector import collect_lookback
+from litmus.expr.collector import anchor_date, collect_lookback
 from litmus.expr.operators import (
     ANY,
     BOOL,
     CROSS_SECTION,
+    DATE,
     MAX_LOOKBACK,
     MAX_WINDOW,
     NUM,
@@ -243,6 +244,14 @@ class _Checker:
         for kind, arg in zip(op.args, node.args, strict=True):
             if kind == WINDOW:
                 self._window(op.name, op.min_window, arg)
+                types.append(NUM)
+                continue
+            if kind == DATE:
+                if anchor_date(arg) is None:
+                    self.add(
+                        f"{op.name} 的日期要写成 YYYYMMDD 的 8 位整数，比如 {op.name}($close, 20251231)",
+                        arg.position,
+                    )
                 types.append(NUM)
                 continue
             actual = self.type_of(arg, inner)

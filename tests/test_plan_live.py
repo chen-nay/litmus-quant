@@ -123,8 +123,9 @@ def test_今年以来_交易日数用代码算好的(ask):
     """2026-09-15 实测：不给日期换算表时，大模型自己数交易日，8000 个 token 用完也没给出结果。"""
     body = ask("今年以来涨幅最大的 50 只股票")
     assert body["status"] == "ok", body
-    days = len(_ds.get_trading_calendar(date(date.today().year, 1, 1), _last))
-    assert body["spec"]["sort"]["by"].replace(" ", "") == f"Pct($close,{days})"
+    year = date.today().year
+    anchor = _ds.get_trading_calendar(date(year - 1, 12, 1), date(year - 1, 12, 31))[-1]
+    assert body["spec"]["sort"]["by"].replace(" ", "") == f"PctSince($close,{anchor:%Y%m%d})"
 
 
 def test_小市值_没给数字按默认30亿_标成默认值(ask):

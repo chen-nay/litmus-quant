@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import date
 
 import polars as pl
 
@@ -23,6 +24,15 @@ def ref(x: pl.Expr, n: int) -> pl.Expr:
 
 def pct(x: pl.Expr, n: int) -> pl.Expr:
     return finite(x / ref(x, n) - 1)
+
+
+def pct_since(x: pl.Expr, day: date) -> pl.Expr:
+    """x 较 day 那天的涨跌幅：按日期取值，不按条数——那天停牌就用它之前最后一个交易日的值。
+
+    day 当天及以前为空，不拿之后的数据当起点。那天之前没有行情（之后才上市）的也为空。
+    """
+    base = x.filter(pl.col("date") <= day).last().over(BY)
+    return pl.when(pl.col("date") > day).then(finite(x / base - 1))
 
 
 def cross(x: pl.Expr, y: pl.Expr) -> pl.Expr:

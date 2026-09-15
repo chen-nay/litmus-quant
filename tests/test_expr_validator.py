@@ -44,6 +44,8 @@ def one_issue(text: str, target: str = "stock", purpose: str = "filter") -> str:
         ("$is_st == $is_new", "stock", "filter"),
         ("If($is_st, 0, $amount) / Abs(Log($close))", "stock", "sort"),
         ("EMA($close, 125) > $close", "stock", "filter"),
+        ("PctSince($close, 20251231) > 0.1", "stock", "filter"),
+        ("Rank(PctSince($close, 20251231))", "stock", "sort"),
     ],
 )
 def test_合法的写法通过(text, target, purpose):
@@ -64,6 +66,23 @@ def test_内部列不对表达式开放():
 
 def test_字段不属于这类标的():
     assert "不能用在申万行业上" in one_issue("$pe_ttm > 10", target="sw_industry")
+
+
+@pytest.mark.parametrize(
+    "text", ["PctSince($close, 2025)", "PctSince($close, 20251340)", "PctSince($close, $open)"]
+)
+def test_从某天起的日期要写成8位整数(text):
+    assert "YYYYMMDD" in one_issue(text, purpose="sort")
+
+
+def test_找出从某天起的最早起点():
+    from datetime import date
+
+    from litmus.expr.collector import collect_since
+
+    text = "Rank(PctSince($close, 20251231)) > 0.9 & PctSince($amount, 20260227) > 0"
+    assert collect_since(parse(text)) == date(2025, 12, 31)
+    assert collect_since(parse("Pct($close, 5)")) is None
 
 
 def test_没有的算子_大小写写错给提示():

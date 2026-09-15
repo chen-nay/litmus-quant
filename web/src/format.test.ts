@@ -39,6 +39,7 @@ describe("三种单位", () => {
     expect(formatCell(meta.name, 0.1234, meta.unit)).toBe("+12.34%");
     expect(cellColor(meta.name, -0.02, meta.unit)).toBe(DOWN_COLOR);
     expect(sortColumn({ by: "Pct($close, 20) / Std($pct_chg, 20)", label: "" }, new Map()).unit).toBe("");
+    expect(sortColumn({ by: "PctSince($close, 20251231)", label: "今年以来" }, new Map()).unit).toBe("小数");
   });
 
   it("成本是基点：30 就是 0.30%", () => {

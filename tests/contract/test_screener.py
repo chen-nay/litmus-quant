@@ -8,7 +8,7 @@ import polars as pl
 import pytest
 
 from litmus.data import CONCEPT, DataService, MissingDataError
-from litmus.expr import evaluate
+from litmus.expr import ExprDataError, evaluate
 from litmus.research.screener import SORT_VALUE, run_board_list, run_stock_list
 from litmus.spec import parse_spec
 
@@ -32,6 +32,28 @@ def stock_list(**fields) -> object:
 
 def sort_values(result) -> list[float]:
     return [row[SORT_VALUE] for row in result.rows]
+
+
+def test_从某天起的涨幅按日期取值_停过牌的股票不再算偏():
+    """2026-09-15 实测：Pct($close, 170) 数条数，江丰电子、有研硅今年停过牌，数到去年更早的日子
+    （江丰电子 +145.5%，按日期是 +158.2%）。PctSince 和 2025-12-31 的收盘价比，用 Polars 另算一遍对照。"""
+    day, base = date(2026, 9, 14), date(2025, 12, 31)
+    if _last < day:
+        pytest.skip(f"用例要 {day} 的数据，本地只到 {_last}")
+    codes = [_ds.resolve_stock(name)[0].code for name in ("江丰电子", "有研硅")]
+    universe = _ds.get_universe_mask(day, day).filter(pl.col("code").is_in(codes))
+    result = evaluate("PctSince($close, 20251231)", "sort", universe, day, day, _ds)
+    got = dict(result.values.select("code", "value").rows())
+
+    closes = _ds.get_fields(codes, date(2025, 11, 3), day, ["close"])
+    for code in codes:
+        rows = closes.filter(pl.col("code") == code)
+        start = rows.filter(pl.col("date") <= base).get_column("close")[-1]
+        end = rows.filter(pl.col("date") == day).get_column("close")[0]
+        assert got[code] == pytest.approx(end / start - 1)
+
+    with pytest.raises(ExprDataError, match="要早于"):
+        evaluate("PctSince($close, 20260914)", "sort", universe, day, day, _ds)
 
 
 def test_概念板块限定股票池_查询日早于快照日时提示按哪天的成分():

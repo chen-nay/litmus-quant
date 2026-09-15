@@ -503,10 +503,7 @@ def _date_table(context: PlanContext) -> str:
         return "\n".join(lines)
     recent = "、".join(f"{day}（{_WEEKDAYS[day.weekday()]}）" for day in reversed(days[-10:]))
     lines.append(f"- 最近 10 个交易日，从近到远：{recent}")
-    lines.append(
-        "- 从某天起算的涨跌写成 Pct($close, N)：和起点前一个交易日的收盘价比，"
-        f"N 是起点到 {latest} 的交易日数"
-    )
+    lines.append("- 从某天起算的涨跌写成 PctSince($close, 起始日前一个交易日)，按日期取值：")
     starts = {
         "本周以来": today - timedelta(days=today.weekday()),
         "本月以来": today.replace(day=1),
@@ -519,7 +516,10 @@ def _date_table(context: PlanContext) -> str:
             continue  # 本地日历不够早，数不出来
         count = sum(day >= start for day in days)
         if count:
-            lines.append(f"  - {label}：N={count}（比 {before[-1]} 收盘）")
+            anchor = before[-1].strftime("%Y%m%d")
+            lines.append(
+                f"  - {label}：PctSince($close, {anchor})（和 {before[-1]} 收盘比，到 {latest} 共 {count} 个交易日）"
+            )
         else:
             lines.append(f"  - {label}：本地数据截至 {latest}，还没有这段的行情")
     return "\n".join(lines)

@@ -24,8 +24,8 @@ EMA_WARMUP = 8
 
 TIMESERIES, CROSS_SECTION, ELEMENTWISE = "timeseries", "cross_section", "elementwise"
 
-#: 参数类型：num 数值、bool 条件、any 都行、window 窗口天数（正整数字面量）
-WINDOW, ANY = "window", "any"
+#: 参数类型：num 数值、bool 条件、any 都行、window 窗口天数（正整数字面量）、date 日期（YYYYMMDD 整数字面量）
+WINDOW, ANY, DATE = "window", "any", "date"
 
 
 @dataclass(frozen=True)
@@ -89,6 +89,16 @@ _OPERATORS: tuple[Operator, ...] = (
         "Pct(x, n)",
         "x / Ref(x, n) - 1，返回小数（0.05 表示 5%）；要百分数直接用 $pct_chg",
         _window,
+    ),
+    # 2026-09-15 加：「今年以来涨幅」用 Pct($close, 170) 数条数，停过牌的股票会数到去年更早（有研硅、江丰电子实测算偏）
+    Operator(
+        "PctSince",
+        TIMESERIES,
+        (NUM, DATE),
+        NUM,
+        "PctSince(x, 20251231)",
+        "x 较某一天的涨跌幅：和 YYYYMMDD 那天的值比（那天停牌就用它之前最后一个交易日），返回小数，那天及以前为空。"
+        "「今年以来」「从 3 月 1 日起」用它，日期写起始日的前一天",
     ),
     _ts(
         "TsRank",

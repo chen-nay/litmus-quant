@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from litmus.data import FIELDS, STOCK
+from litmus.expr.collector import anchor_date
 from litmus.expr.parser import COMPARISONS, Binary, Call, Field, Node, Number, Unary, parse
 
 _PRECEDENCE = {
@@ -103,6 +104,9 @@ class _Describer:
                 return f"{x}较 {y} 个交易日前的变化"
             if name == "Pct":
                 return f"{x}较 {y} 个交易日前的涨跌幅"
+            if name == "PctSince":
+                day = anchor_date(args[1])
+                return f"{x}从 {day or args[1]} 到当天的涨跌幅"
             if name == "TsRank":
                 return f"{x}在近 {y} 日里的分位"
             if name == "Count":
@@ -136,7 +140,7 @@ def _number(node: Number) -> str:
 
 def _percent(value: Node, other: Node) -> str | None:
     """和 Pct(...) 比较的数写成百分比：0.1 → 10%，-0.05 → -5%。别的情况返回 None。"""
-    if not (isinstance(other, Call) and other.name == "Pct"):
+    if not (isinstance(other, Call) and other.name in ("Pct", "PctSince")):
         return None
     sign = ""
     if isinstance(value, Unary) and value.op == "-":

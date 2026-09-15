@@ -13,8 +13,42 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
+
 from litmus.expr.operators import OPERATORS
 from litmus.expr.parser import Binary, Call, Field, Node, Number, Unary
+
+
+def anchor_date(node: Node) -> date | None:
+    """PctSince 的日期参数：YYYYMMDD 整数字面量 → 日期；写得不对返回 None（由校验器报错）。"""
+    if not (isinstance(node, Number) and node.is_int and len(node.text) == 8):
+        return None
+    try:
+        return datetime.strptime(node.text, "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def collect_since(node: Node) -> date | None:
+    """表达式里 PctSince 最早的起点日：从这天起的行情都要读进来，按日期取、不按条数。没有 PctSince 为 None。"""
+    found: list[date] = []
+
+    def walk(current: Node) -> None:
+        if isinstance(current, Call):
+            if current.name == "PctSince" and len(current.args) == 2:
+                day = anchor_date(current.args[1])
+                if day is not None:
+                    found.append(day)
+            for arg in current.args:
+                walk(arg)
+        elif isinstance(current, Unary):
+            walk(current.operand)
+        elif isinstance(current, Binary):
+            walk(current.left)
+            walk(current.right)
+
+    walk(node)
+    return min(found, default=None)
 
 
 def collect_fields(node: Node) -> set[str]:

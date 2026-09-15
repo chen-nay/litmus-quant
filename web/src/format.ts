@@ -128,11 +128,12 @@ export function sortColumn(
   };
 }
 
-/** 排序依据整个就是一次 Pct(...)：算出来是小数。Pct(...) / Std(...) 这种不算 */
+/** 排序依据整个就是一次 Pct(...) 或 PctSince(...)：算出来是小数。Pct(...) / Std(...) 这种不算 */
 function isPctCall(by: string): boolean {
-  if (!by.startsWith("Pct(")) return false;
+  const open = by.indexOf("(");
+  if (!["Pct", "PctSince"].includes(by.slice(0, open))) return false;
   let depth = 0;
-  for (let i = 3; i < by.length; i += 1) {
+  for (let i = open; i < by.length; i += 1) {
     if (by[i] === "(") depth += 1;
     if (by[i] === ")") {
       depth -= 1;

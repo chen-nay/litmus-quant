@@ -99,10 +99,19 @@ def test_日期换算表_交易日数由代码按本地日历数好():
     text = system_variables(context, EVENTS)["dates"]
     assert "今天：2026-09-15（星期二）" in text
     assert "最近 10 个交易日，从近到远：2026-09-14（一）、2026-09-11（五）" in text
-    assert "本周以来：N=1（比 2026-09-11 收盘）" in text
-    assert "本月以来：N=3（比 2026-08-31 收盘）" in text
-    assert "本季度以来：N=5（比 2026-06-30 收盘）" in text
-    assert "今年以来：N=7（比 2025-12-31 收盘）" in text
+    assert (
+        "本周以来：PctSince($close, 20260911)（和 2026-09-11 收盘比，到 2026-09-14 共 1 个交易日）"
+        in text
+    )
+    assert "本月以来：PctSince($close, 20260831)" in text
+    assert (
+        "本季度以来：PctSince($close, 20260630)（和 2026-06-30 收盘比，到 2026-09-14 共 5 个交易日）"
+        in text
+    )
+    assert (
+        "今年以来：PctSince($close, 20251231)（和 2025-12-31 收盘比，到 2026-09-14 共 7 个交易日）"
+        in text
+    )
 
     # 一周没同步：本地还没有这周的数据，不拿旧数据凑
     stale = PlanContext(**{**context.__dict__, "today": date(2026, 9, 22)})

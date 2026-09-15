@@ -49,6 +49,7 @@ from litmus.expr.operators import OPERATORS
         ("Pct($close, 20) > 0.1", "收盘价较 20 个交易日前的涨跌幅 > 10%"),
         ("Pct($close, 5) < -0.05", "收盘价较 5 个交易日前的涨跌幅 < -5%"),
         ("0.155 <= Pct($close, 60)", "15.5% ≤ 收盘价较 60 个交易日前的涨跌幅"),
+        ("PctSince($close, 20251231) > 0.5", "收盘价从 2025-12-31 到当天的涨跌幅 > 50%"),
     ],
 )
 def test_说法(expr, text):
@@ -70,6 +71,7 @@ def test_全部算子都有说法_不会原样吐出算子名():
         "Ref": "Ref($close, 5)",
         "Delta": "Delta($close, 5)",
         "Pct": "Pct($close, 5)",
+        "PctSince": "PctSince($close, 20251231)",
         "TsRank": "TsRank($close, 5)",
         "Count": "Count($is_st, 5)",
         "Cross": "Cross($close, $open)",

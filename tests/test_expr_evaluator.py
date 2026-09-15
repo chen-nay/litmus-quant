@@ -57,6 +57,20 @@ def test_前值_差值_涨幅():
     assert on("Pct($close, 1)", close=close) == [None, 0.1, 0.1]  # 小数，不是百分数
 
 
+def test_从某天起的涨幅_按日期取值_那天停牌用之前最后一个收盘():
+    panel = pl.DataFrame(
+        {
+            "code": ["A", "A", "A", "B", "B"],
+            "date": [date(2025, 12, 30), date(2025, 12, 31), date(2026, 1, 5)]
+            + [date(2025, 12, 29), date(2026, 1, 5)],
+            "close": [9.0, 10.0, 12.0, 20.0, 25.0],
+        }
+    )
+    # A：12-31 收盘 10 → 1-05 的 12，+20%；B：12-31 停牌，用 12-29 的 20 → 25，+25%。那天及以前为空
+    assert values("PctSince($close, 20251231)", panel) == [None, None, 0.2, None, 0.25]
+    assert collect_lookback(parse("PctSince($close, 20251231)")) == 0  # 不按条数往前读
+
+
 def test_指数均线从第一条算起():
     """α = 2/(3+1) = 0.5：1 → 0.5·2 + 0.5·1 = 1.5 → 0.5·3 + 0.5·1.5 = 2.25。"""
     assert on("EMA($close, 3)", close=[1.0, 2.0, 3.0]) == [1.0, 1.5, 2.25]

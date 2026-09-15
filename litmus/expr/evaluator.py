@@ -11,11 +11,11 @@ from datetime import date
 import polars as pl
 
 from litmus.data import STOCK, DataService
-from litmus.expr.collector import collect_fields, collect_lookback
+from litmus.expr.collector import anchor_date, collect_fields, collect_lookback, collect_since
 from litmus.expr.operators import BOOL
 from litmus.expr.operators.cross_section import IN_POOL, rank
 from litmus.expr.operators.logic import BINARY, ELEMENTWISE, UNARY
-from litmus.expr.operators.timeseries import WINDOWED, cross
+from litmus.expr.operators.timeseries import WINDOWED, cross, pct_since
 from litmus.expr.parser import Binary, Call, Field, Node, Number, Unary, parse
 from litmus.expr.validator import PURPOSES, validate
 
@@ -40,6 +40,11 @@ def compile_expr(node: Node, ready: dict[int, str] | None = None) -> pl.Expr:
         return UNARY[node.op](compile_expr(node.operand, ready))
     if isinstance(node, Binary):
         return BINARY[node.op](compile_expr(node.left, ready), compile_expr(node.right, ready))
+    if node.name == "PctSince":
+        subject, anchor = node.args
+        day = anchor_date(anchor)
+        assert day is not None
+        return pct_since(compile_expr(subject, ready), day)
     if node.name in WINDOWED:
         subject, window = node.args
         assert isinstance(window, Number)
@@ -130,6 +135,8 @@ def evaluate(
       required 一般是完整的预热条数；上市以来行情全在本地的标的（读进来的比要的少、第一条又晚于本地数据起点）
       EMA 从上市第一天算起就是准的，和交易软件一致，不必再等 8n 条
     - start 早于本地数据起点时从起点算；扣掉预热期后一天都算不出来就报错，不给空结果
+    - PctSince 按日期取值：从起点那天读起，再往前带一条（那天停牌就用之前最后一个交易日）；
+      起点早于本地数据、或者不早于 end，报错
     """
     if start > end:
         raise ValueError(f"起始日 {start} 晚于结束日 {end}")
@@ -140,6 +147,12 @@ def evaluate(
     short = collect_lookback(node, ema_warmup=False)
     coverage_start = ds.data_range(target)[0]
     start = max(start, coverage_start)
+    since = collect_since(node)
+    if since is not None and not coverage_start <= since < end:
+        raise ExprDataError(
+            f"PctSince 的日期 {since} 要早于 {end}、不早于本地数据起点 {coverage_start}："
+            "日期写起始日的前一天，比如从 2026-01-01 起写 20251231"
+        )
 
     is_condition = PURPOSES[purpose] == BOOL
     pool = universe.select("date", "code").filter(pl.col("date").is_between(start, end))
@@ -152,7 +165,10 @@ def evaluate(
         return Evaluation(pl.DataFrame(schema=schema), None, full)
 
     codes = pool.get_column("code").unique().to_list()
-    panel = ds.get_fields(codes, start, end, fields, target, lookback=full)
+    # PctSince 从起点那天读起，再往前带一条：那天停牌就用它之前最后一个交易日
+    read_from = start if since is None else min(start, since)
+    lookback = full if since is None else max(full, 1)
+    panel = ds.get_fields(codes, read_from, end, fields, target, lookback=lookback)
     required = (
         panel.group_by("code")
         .agg((pl.col("date") < start).sum().alias("_before"), pl.col("date").min().alias("_first"))
