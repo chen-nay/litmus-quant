@@ -10,6 +10,7 @@ from fastapi import Request
 
 from litmus.api.sync_job import SyncJob
 from litmus.data import DataService, DataStatus, DataSync, MarketStore
+from litmus.llm import AnthropicClient, LLMClient, LLMConfig, LLMError
 from litmus.signals import EventLibrary, load_events
 from litmus.store import JsonStore, Store
 
@@ -23,10 +24,12 @@ class Services:
     sync_job: SyncJob
     #: 本地数据状态，只读 manifest 和文件
     data_status: Callable[[], DataStatus]
+    #: 大模型客户端；.env 没配好时为空，/api/plan 返回 failed 并说明缺什么
+    llm: LLMClient | None = None
 
     @classmethod
     def from_env(cls) -> Services:
-        """数据目录取 LITMUS_DATA_DIR 或仓库下的 data/：行情在 market/，运行记录在 store/。"""
+        """数据目录取 LITMUS_DATA_DIR 或仓库下的 data/：行情在 market/，提问和运行记录在 store/。"""
         market = MarketStore.from_env()
         return cls(
             ds=DataService(market),
@@ -34,7 +37,15 @@ class Services:
             events=load_events(),
             sync_job=SyncJob(partial(DataSync.open, market)),
             data_status=DataSync(None, market).status,
+            llm=_llm_from_env(),
         )
+
+
+def _llm_from_env() -> LLMClient | None:
+    try:
+        return AnthropicClient(LLMConfig.from_env())
+    except LLMError:
+        return None
 
 
 def services_of(request: Request) -> Services:

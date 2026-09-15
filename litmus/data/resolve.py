@@ -53,6 +53,11 @@ class StockMatch:
     def rule_label(self) -> str:
         return RULE_LABELS[self.rule]
 
+    @property
+    def exact(self) -> bool:
+        """代码或名称完全一致。"""
+        return self.rule in (CODE, NAME)
+
 
 @dataclass(frozen=True)
 class BoardMatch:
@@ -60,6 +65,11 @@ class BoardMatch:
     name: str
     board_type: str  # sw_industry / concept
     rule: int
+
+    @property
+    def exact(self) -> bool:
+        """代码或名称完全一致。"""
+        return self.rule in (CODE, NAME)
 
 
 def normalize(text: str) -> str:

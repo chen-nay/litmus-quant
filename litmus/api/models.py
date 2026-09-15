@@ -40,6 +40,39 @@ class CheckResponse(BaseModel):
     data: dict[str, Any] | None = None
 
 
+class Candidate(BaseModel):
+    """原话对应多只股票 / 多个概念板块时的一个候选。"""
+
+    code: str
+    name: str
+    #: 股票：命中的规则（名称包含、拼音首字母、曾用名……），已退市的标出来；板块：口径
+    note: str = ""
+
+
+class PlanQuestion(BaseModel):
+    question: str
+    options: list[str]
+
+
+class PlanResponse(BaseModel):
+    status: Literal[
+        "ok", "needs_clarification", "unsupported", "not_an_event", "data_not_ready", "failed"
+    ]
+    #: 这次提问的记录编号：回答追问时作为 previous_plan_id 带回来；确认卡上检查、运行时作为 plan_id 带上
+    plan_id: str | None = None
+    #: ok：整理好的查询条件，确认后原样交给 /api/run。
+    #: 要选股票、板块或者条件要改时（needs_clarification）是草稿，改好后调 /api/check
+    spec: dict[str, Any] | None = None
+    assumptions: list[AssumptionItem] = Field(default_factory=list)
+    questions: list[PlanQuestion] = Field(default_factory=list)
+    stock_candidates: list[Candidate] = Field(default_factory=list)
+    board_candidates: list[Candidate] = Field(default_factory=list)
+    #: unsupported / not_an_event：系统能回答的问法，点一下当成新的提问
+    alternatives: list[str] = Field(default_factory=list)
+    message: str | None = None
+    data: dict[str, Any] | None = None
+
+
 class RunResponse(BaseModel):
     status: Literal["done", "needs_revision", "data_not_ready", "failed"]
     #: needs_revision：要改的地方，逐条列出

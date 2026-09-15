@@ -66,7 +66,7 @@ def test_用户原话的说法_理解为栏目里的定义():
     texts = [item.text for item in render_assumptions(stock_list(), facts)]
     assert texts[:2] == [
         "「昨天」理解为：2026-09-14",
-        "「涨停」理解为：涨幅超过 9%（当日涨跌幅 > 9）",
+        "「涨停」理解为：当日涨跌幅 > 9",  # 有原话时不再重复条件名称
     ]
 
 
@@ -111,7 +111,8 @@ def test_个股回看():
     facts = Facts(stock_name="贵州茅台", first_date=date(2017, 1, 5))
     assert rows(render_assumptions(spec, facts)) == [
         ("target", "股票：贵州茅台（600519.SH）", False),
-        ("event", "事件：突破 250 日均线（只算由不满足变为满足的那一天，连续成立不重复计）", True),
+        ("event", "事件：突破 250 日均线", True),
+        (None, "事件只算由不满足变为满足的那一天，连续成立不重复计", False),
         (
             "time_range",
             "回看区间：2016-01-01 ~ 2025-12-31，实际从 2017-01-05 算起（裁到本地数据、扣掉预热期之后）",

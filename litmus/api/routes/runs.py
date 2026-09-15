@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 
 from litmus.api.checks import Spec, check_spec
-from litmus.api.explain import explain
+from litmus.api.explain import explain, plan_mentions
 from litmus.api.models import AssumptionItem, CheckResponse, Issue, RunResponse
 from litmus.api.serialize import result_to_dict, to_jsonable
 from litmus.api.services import Services, services_of
@@ -42,7 +42,7 @@ async def post_check(request: Request) -> CheckResponse:
     body, issues = await _read_body(request)
     if body is None:
         return CheckResponse(status="needs_revision", issues=issues)
-    return await run_in_threadpool(check, body["spec"], services_of(request))
+    return await run_in_threadpool(check, body["spec"], body.get("plan_id"), services_of(request))
 
 
 @router.post("/api/run")
@@ -55,7 +55,7 @@ async def post_run(request: Request) -> RunResponse:
     return await run_in_threadpool(execute, body["spec"], body.get("plan_id"), services_of(request))
 
 
-def check(raw_spec: object, services: Services) -> CheckResponse:
+def check(raw_spec: object, plan_id: str | None, services: Services) -> CheckResponse:
     status = services.data_status()
     if not status.ready:
         return CheckResponse(
@@ -65,7 +65,7 @@ def check(raw_spec: object, services: Services) -> CheckResponse:
     if spec is None:
         return CheckResponse(status="needs_revision", issues=issues)
     try:
-        spec, assumptions = _explained(spec, services)
+        spec, assumptions = _explained(spec, services, plan_id)
     except (MissingDataError, ExprDataError) as exc:
         return CheckResponse(status="needs_revision", issues=[Issue(message=str(exc))])
     return CheckResponse(
@@ -90,7 +90,7 @@ def execute(raw_spec: object, plan_id: str | None, services: Services) -> RunRes
 
     started = time.perf_counter()
     try:
-        spec, _ = _explained(spec, services)
+        spec, _ = _explained(spec, services, plan_id)
         result = run_research(spec, services.ds)
     except (MissingDataError, ExprDataError) as exc:
         return _revise(Issue(message=str(exc)))
@@ -135,9 +135,14 @@ async def _read_body(request: Request) -> tuple[dict[str, Any] | None, list[Issu
     return (None, issues) if issues else (body, [])
 
 
-def _explained(spec: Spec, services: Services) -> tuple[Spec, list[Assumption]]:
-    """说明文字写进 spec.assumptions，运行记录里存的就是确认卡上那份。"""
-    assumptions = explain(spec, services.ds)
+def _explained(
+    spec: Spec, services: Services, plan_id: str | None
+) -> tuple[Spec, list[Assumption]]:
+    """说明文字写进 spec.assumptions，运行记录里存的就是确认卡上那份。
+    带 plan_id 时，没改过的栏目继续用提问原话的说法。"""
+    record = services.store.get_plan(plan_id) if plan_id else None
+    mentions = plan_mentions(spec.model_dump(mode="json", by_alias=True), record)
+    assumptions = explain(spec, services.ds, mentions)
     texts = tuple(item.text for item in assumptions)
     return spec.model_copy(update={"assumptions": texts}), assumptions
 

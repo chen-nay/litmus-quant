@@ -8,8 +8,9 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from typing import Any
 
 from litmus.data import CONCEPT, STOCK, DataService
 from litmus.expr import collect_lookback, describe, parse
@@ -23,6 +24,7 @@ from litmus.spec import (
     StockListSpec,
     render_assumptions,
 )
+from litmus.store import PlanRecord
 
 Spec = StockListSpec | BoardListSpec | StockHistorySpec
 
@@ -33,6 +35,32 @@ _RANK = re.compile(r"\bRank\s*\(")
 def explain(spec: Spec, ds: DataService, mentions: Sequence[Mention] = ()) -> list[Assumption]:
     """读数据时的缺口、预热期不够（MissingDataError、ExprDataError）照常往外抛，由调用方转成 needs_revision。"""
     return render_assumptions(spec, _facts(spec, ds, tuple(mentions)))
+
+
+def plan_mentions(spec: Mapping[str, Any], record: PlanRecord | None) -> list[Mention]:
+    """提问时原话里的说法，只留还适用的：确认卡上改过的栏目，不再说「「昨天」理解为……」。
+
+    提问时这一栏还没定下来的（比如要用户从候选里选股票），用户后来选好的照样适用。
+    """
+    if record is None:
+        return []
+    saved = record.spec or {}
+    kept = []
+    for item in record.detail.get("mentions", []):
+        phrase, field = item.get("phrase"), item.get("field")
+        if not phrase or not field:
+            continue
+        before = _at(saved, field)
+        if before is None or before == _at(spec, field):
+            kept.append(Mention(phrase, field))
+    return kept
+
+
+def _at(spec: Mapping[str, Any], path: str) -> object:
+    value: object = spec
+    for key in path.split("."):
+        value = value.get(key) if isinstance(value, Mapping) else None
+    return value
 
 
 def _facts(spec: Spec, ds: DataService, mentions: tuple[Mention, ...]) -> Facts:

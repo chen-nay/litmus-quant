@@ -82,7 +82,7 @@
    DataService 只有一个实现，expr、research 是纯函数，都直接暴露类或函数
 6. **API 语义靠契约测试保证**。DataService、Store 各有一套契约测试，见 §2.4、§7
 7. **用 import-linter 自动检查**，违反依赖规则时 `lint-imports` 直接报错（第 2 步起接入 `make check`；
-   下面的完整配置里和 llm 有关的两处等 llm 模块出现再补上，其余已在 pyproject.toml 里；
+   下面的完整配置在第 7b 步随 llm 模块全部落进 pyproject.toml；
    另有「只用下层模块的公开接口」的禁止规则，逐个模块列出不许碰的内部子模块）：
 
 ```toml
@@ -1167,6 +1167,14 @@ LLM_TEMPERATURE=0
 
 **分工**：api 决定"什么时候调"，llm 决定"怎么调"（提示词、模型、重试、结果检查）。api 不接触任何提示词。
 
+**第 7b 步实测补充**（2026-09-15，glm-5.3-flash）：
+
+- anthropic SDK 1.5 的 `messages.create` 没有 `temperature` 参数，放进请求体（`extra_body`）
+- 这个模型**不能关闭思考**（`thinking.type=disabled` 返回 400），一次提问 12~49 秒：页面上要显示在想，
+  超时 `LLM_TIMEOUT` 默认 120 秒
+- 格式里的必填项接口不强制：模型偶尔漏填 `status`。代码按内容推断——有追问就是澄清，填了形状就是 ok
+- 不写明「没说的栏目不填」，模型会自己编持有天数（问「之后表现怎么样」给出 1/5/10/20 天）；写明之后不再出现
+
 ### 5.2 llm.plan()：提问 → QuerySpec
 
 **输入上下文**（每次调用都注入，全部由代码生成）：
@@ -1189,6 +1197,12 @@ LLM_TEMPERATURE=0
 | `unsupported` | 数据没有 / 不回答的问题 | message、alternatives（改写建议） |
 | `not_an_event` | 想回看，但条件不是事件 | message、alternatives |
 | `failed` | 重试后仍拿不到合法输出 | — |
+
+**大模型填的是扁平格式，由代码转成 QuerySpec**（2026-09-15 定）：QuerySpec 本身的格式定义有 6000 字符、10 个子定义、
+按形状分支（oneOf），火山引擎没实测过；扁平格式（`llm/planner.py` 的 `OUTPUT_SCHEMA`：shape、as_of、filter_expr、
+sort_by、stock_mention / stock_guess、event_id / event_params、mentions、questions、alternatives……）实测能用。
+转换时只留大模型填了的栏目；股票、概念板块只带原话和猜测名；默认值由 api 补上并标出，说明文字由模板生成。
+表达式、事件参数、结构不对时，把问题清单交给 `planner.repair` 重试一次，还不对返回 failed。
 
 **改写建议（alternatives）**：status 不是 ok 时，LLM 额外给 2~3 条**系统能回答的问句**，用户点一下就当成新的提问重走
 `/api/plan`。它只是几句问句，不含任何数字和结论；代码会检查条数、长度、是否含禁用词或百分比数字，不通过就丢弃。
@@ -1287,7 +1301,8 @@ LLM 既不写也不审查。
 ```
 litmus/llm/prompts/
 ├── planner.system.md       # llm.plan() 主提示词
-└── planner.repair.md       # 校验失败后带错误信息重试
+├── planner.repair.md       # 校验失败后带错误信息重试
+└── planner.followup.md     # 回答追问：原问题 + 问过的问题 + 用户的回答（第 7b 步加）
 ```
 
 **规则**：
@@ -1324,12 +1339,14 @@ litmus/llm/prompts/
 
 ```
 POST /api/plan
-  body: { "query": "...", "previous_plan_id": "..." }   # previous_plan_id 可选，用于多轮澄清与改意思
+  body: { "query": "...", "previous_plan_id": "..." }   # previous_plan_id 可选：回答追问时带上
   resp: { "status": "ok|needs_clarification|unsupported|not_an_event|data_not_ready|failed",
-          "plan_id": "...", "spec": QuerySpec, "assumptions": [...],
-          "questions": [...], "alternatives": [...], "target_candidates": [...] }
-  说明：调 llm.plan()，再做确定性兜底核对；保存原话与 spec 得到 plan_id；
-        返回未执行的 QuerySpec，前端渲染成确认卡或澄清卡
+          "plan_id": "...", "spec": QuerySpec, "assumptions": [{ "field", "text", "default" }],
+          "questions": [{ "question", "options" }], "stock_candidates": [...], "board_candidates": [...],
+          "alternatives": [...], "message": "..." }
+  说明：本地数据不够不调大模型；调 llm.plan()，再做确定性兜底核对（股票、概念板块按原话查代码，
+        没找到或对应多个转成澄清让用户选；再过 /api/check 同一套检查）；保存原话与 spec 得到 plan_id。
+        确认卡上检查、运行时带上 plan_id，没改过的栏目继续用原话的说法。请求体写错返回 400
 
 POST /api/check
   body: 同 /api/run
@@ -1531,7 +1548,7 @@ litmus/
 │   ├── explain.py          # 说明文字要用的表达式中文、名称、快照日、实际统计起点
 │   ├── serialize.py        # 研究结果 → JSON
 │   ├── sync_job.py         # 后台同步：一次一个、可停止、出错停下、进度
-│   ├── routes/             # runs.py / catalog.py / data.py
+│   ├── routes/             # plan.py / runs.py / catalog.py / data.py / stocks.py
 │   └── models.py           # HTTP 请求/响应模型
 ├── env.py                  # 读 .env，入口调用
 ├── __main__.py             # python -m litmus
@@ -1616,8 +1633,9 @@ def test_mean():
 | screener | 股票表 / 板块表：筛选、排序、取前 N；板块字段正确路由到板块数据表 |
 | 名称解析 | 小表格逐条覆盖六条规则、同一只只出现一次、不含北交所、含退市、全角和空格、板块去后缀（`tests/test_resolve.py`）；真实数据上「平安」多个候选、茅台的名称 / 代码 / 拼音、「招行」「中石油」、曾用名「龙净环保」、板块「光模块」查不到（`tests/contract/test_resolve.py`） |
 | describe | 每个算子的中文说法、括号与运算先后、全部算子都有说法（`tests/test_expr_describe.py`） |
-| prompts | 所有 prompt 能渲染；变量不缺不多；id 与文件名一致 |
-| llm.plan | 用假 LLMClient：编造字段被拦截；缺必填项转澄清；状态条件要求回看时返回 not_an_event；改写建议含禁用词时被丢弃 |
+| prompts | 所有 prompt 能渲染；变量不缺不多；id 与文件名一致；系统提示词的变量都由代码填（`tests/test_llm_client.py`、`tests/test_planner.py`） |
+| llm.plan | 用假 LLMClient：编造字段、写错表达式、事件参数越界时带着问题重试一次，还不对返回 failed；漏填 status 按内容推断；澄清的选项最多三个；改写建议去掉买卖建议、百分比、太长的；追问把原问题和回答一起交给大模型（`tests/test_planner.py`）。客户端：认证方式按域名选、401 自动换、强制工具调用、跳过思考块、超时（`tests/test_llm_client.py`） |
+| /api/plan | 本地数据不够不调大模型；请求体写错 400（`tests/test_api.py`）。真实数据 + 假大模型：股票按原话解析、「平安」给候选、查不到让用户换说法、概念板块原话查不到用猜的名字、说明文字带原话、改过的栏目不再用原话、追问、日期不是交易日转澄清（`tests/contract/test_plan_api.py`） |
 | assumptions | 改了参数说明文字跟着变；默认值栏目标出"默认值"；原话说法写成「理解为」；概念板块成分、排名范围、长窗口、实际统计起点的说明（`tests/test_assumptions.py`）；检查接口不计算、请求里带来的说明和默认值标记不作数、确认卡上的实际统计起点和结果对得上（`tests/test_api.py`、`tests/contract/test_run_api.py`） |
 
 ---

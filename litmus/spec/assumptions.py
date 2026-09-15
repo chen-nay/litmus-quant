@@ -97,10 +97,11 @@ class _Notes:
         self._defaults = defaults
         self._mentions = mentions
 
-    def add(self, field: str, label: str, value: str) -> None:
+    def add(self, field: str, label: str, value: str, definition: str | None = None) -> None:
+        """有原话说法时写成「「放量」理解为：定义」，definition 是去掉名称的定义，避免和原话重复。"""
         phrases = [m.phrase for m in self._mentions if _under(m.field, field)]
         if phrases:
-            text = f"{'、'.join(f'「{p}」' for p in phrases)}理解为：{value}"
+            text = f"{'、'.join(f'「{p}」' for p in phrases)}理解为：{definition or value}"
         else:
             text = f"{label}：{value}"
         default = any(_under(path, field) for path in self._defaults)
@@ -150,8 +151,8 @@ def _board_list(spec: BoardListSpec, facts: Facts, notes: _Notes) -> None:
 def _history(spec: StockHistorySpec, facts: Facts, notes: _Notes) -> None:
     code = spec.target.code or ""
     notes.add("target", "股票", f"{facts.stock_name}（{code}）" if facts.stock_name else code)
-    event = spec.event.label or spec.event.expr
-    notes.add("event", "事件", f"{event}（只算由不满足变为满足的那一天，连续成立不重复计）")
+    notes.add("event", "事件", spec.event.label or spec.event.expr)
+    notes.note("事件只算由不满足变为满足的那一天，连续成立不重复计")
     window = f"{spec.time_range.start} ~ {spec.time_range.end}"
     if facts.first_date and facts.first_date > spec.time_range.start:
         window += f"，实际从 {facts.first_date} 算起（裁到本地数据、扣掉预热期之后）"
@@ -175,24 +176,33 @@ def _history(spec: StockHistorySpec, facts: Facts, notes: _Notes) -> None:
 
 def _day_and_conditions(spec: StockListSpec | BoardListSpec, facts: Facts, notes: _Notes) -> None:
     notes.add("as_of", "日期", spec.as_of.isoformat())
-    notes.add("filter", "筛选条件", _condition(spec.filter, facts.expressions.get("filter.expr")))
-    notes.add("sort", "排序", _sort(spec.sort, facts.expressions.get("sort.by")))
+    described = facts.expressions.get("filter.expr")
+    notes.add(
+        "filter",
+        "筛选条件",
+        _condition(spec.filter, described),
+        _condition(spec.filter, described, labeled=False),
+    )
+    described = facts.expressions.get("sort.by")
+    notes.add(
+        "sort", "排序", _sort(spec.sort, described), _sort(spec.sort, described, labeled=False)
+    )
     notes.add("limit", "取前", f"{spec.limit} 名")
 
 
-def _condition(condition: Condition | None, described: str | None) -> str:
+def _condition(condition: Condition | None, described: str | None, labeled: bool = True) -> str:
     if condition is None:
         return "不筛选"
     text = described or condition.expr
-    return f"{condition.label}（{text}）" if condition.label else text
+    return f"{condition.label}（{text}）" if labeled and condition.label else text
 
 
-def _sort(sort: Sort | None, described: str | None) -> str:
+def _sort(sort: Sort | None, described: str | None, labeled: bool = True) -> str:
     if sort is None:
         return "成交额从高到低（没有指定排序）"
     text = described or sort.by
     order = "从高到低" if sort.order == "desc" else "从低到高"
-    return f"{sort.label}（{text}），{order}" if sort.label else f"{text}，{order}"
+    return f"{sort.label}（{text}），{order}" if labeled and sort.label else f"{text}，{order}"
 
 
 def _expression_notes(facts: Facts, rank_scope: str, notes: _Notes) -> None:

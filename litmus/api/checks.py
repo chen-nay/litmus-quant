@@ -60,6 +60,7 @@ def check_spec(
     raw, event_issues, event_defaults = _render_event(raw, events)
     # 用了哪些默认值、说明文字都由代码定，请求里带来的不作数（§5.4）
     raw = {**raw, "defaults_used": [*_missing_defaults(raw), *event_defaults], "assumptions": []}
+    raw = _fill_dates(raw, ds)
     try:
         spec = parse_spec(raw)
     except ValidationError as exc:
@@ -109,9 +110,15 @@ def _render_event(
 
 #: 请求里没给、由默认值补上的栏目（spec.DEFAULTS），确认卡据此标「默认值，可修改」
 _DEFAULTABLE: dict[str, tuple[tuple[str, ...], ...]] = {
-    "stock_list": (("sort",), ("limit",), ("universe", "base"), ("universe", "exclude")),
-    "board_list": (("sort",), ("limit",)),
-    "stock_history": (("horizons",), ("benchmark",), ("cost_bps",)),
+    "stock_list": (
+        ("as_of",),
+        ("sort",),
+        ("limit",),
+        ("universe", "base"),
+        ("universe", "exclude"),
+    ),
+    "board_list": (("as_of",), ("sort",), ("limit",)),
+    "stock_history": (("time_range",), ("horizons",), ("benchmark",), ("cost_bps",)),
 }
 
 
@@ -124,6 +131,19 @@ def _missing_defaults(raw: dict[str, Any]) -> list[str]:
         if value is None:
             missing.append(".".join(path))
     return missing
+
+
+def _fill_dates(raw: dict[str, Any], ds: DataService) -> dict[str, Any]:
+    """没给日期的补上：股票表、板块表用这类数据的最新一天，个股回看用本地全部数据。已经记进 defaults_used。"""
+    shape = str(raw.get("shape"))
+    if shape == "stock_history" and raw.get("time_range") is None:
+        first, last = ds.data_range(STOCK)
+        return {**raw, "time_range": {"from": first.isoformat(), "to": last.isoformat()}}
+    target = {"stock_list": STOCK, "board_list": raw.get("board_type")}.get(shape)
+    if raw.get("as_of") is None and target in (STOCK, SW_INDUSTRY, CONCEPT):
+        if target in ds.available_targets():
+            return {**raw, "as_of": ds.data_range(target)[1].isoformat()}
+    return raw
 
 
 # ── 2. 结构 ─────────────────────────────────────────────────────
@@ -243,6 +263,16 @@ def _history_issues(spec: StockHistorySpec, ds: DataService) -> list[Issue]:
 
 
 # ── 工具 ────────────────────────────────────────────────────────
+
+
+def issue_text(issue: Issue) -> str:
+    """一条问题写成一句话：带上栏目、表达式里的位置、可选范围。"""
+    where = f"{issue.path}：" if issue.path else ""
+    position = f"第 {issue.position + 1} 个字符，" if issue.position is not None else ""
+    allowed = (
+        f"（可选：{issue.allowed}）" if issue.allowed and issue.allowed not in issue.message else ""
+    )
+    return f"{where}{position}{issue.message}{allowed}"
 
 
 def _under(path: str | None, prefix: str) -> bool:

@@ -10,12 +10,14 @@ import threading
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
 from litmus.api import Services, SyncJob, create_app
 from litmus.data import STOCK, SW_INDUSTRY, BoardInfo, DataStatus, MissingDataError, MonthResult
+from litmus.llm import LLMClient
 from litmus.research import ListResult
 from litmus.signals import load_events
 from litmus.store import JsonStore
@@ -67,13 +69,14 @@ def no_sync():
     raise AssertionError("这个测试不该同步")
 
 
-def make_client(tmp_path, ds=None, status=READY, job=None) -> TestClient:
+def make_client(tmp_path, ds=None, status=READY, job=None, llm=None) -> TestClient:
     services = Services(
         ds=ds or FakeData(),
         store=JsonStore(tmp_path),
         events=EVENTS,
         sync_job=job or SyncJob(no_sync),
         data_status=lambda: status,
+        llm=llm,
     )
     return TestClient(create_app(services))
 
@@ -376,6 +379,15 @@ def test_检查接口_不计算_给出说明文字_没给的栏目标成默认�
     assert body["spec"]["assumptions"] == [item["text"] for item in body["assumptions"]]
 
 
+def test_检查接口_没给日期用最近交易日_标成默认值(tmp_path):
+    body = make_client(tmp_path).post("/api/check", json={"spec": {"shape": "stock_list"}}).json()
+    assert body["status"] == "ok", body
+    assert body["spec"]["as_of"] == "2026-09-11"
+    assert body["spec"]["defaults_used"][0] == "as_of"
+    first = body["assumptions"][0]
+    assert (first["field"], first["text"], first["default"]) == ("as_of", "日期：2026-09-11", True)
+
+
 def test_检查接口_请求里带来的说明文字和默认值标记不作数(tmp_path):
     spec = stock_list(limit=10, assumptions=["乱写的说明"], defaults_used=["as_of"])
     body = make_client(tmp_path).post("/api/check", json={"spec": spec}).json()
@@ -404,3 +416,59 @@ def test_找股票要给关键词(tmp_path):
     client = make_client(tmp_path, ds=NoData())
     assert client.get("/api/stocks?q=%20").status_code == 400
     assert client.get("/api/stocks").status_code == 400
+
+
+# ── 提问 ────────────────────────────────────────────────────────
+
+
+class NoLLM(LLMClient):
+    def structured(self, system, user, schema):
+        raise AssertionError("这个请求不该调大模型")
+
+
+def test_提问_本地数据不够时不调大模型(tmp_path):
+    status = replace(READY, ready=False, reason="还没有股票日频数据")
+    client = make_client(tmp_path, ds=NoData(), status=status, llm=NoLLM())
+    body = client.post("/api/plan", json={"query": "昨天涨停的股票"}).json()
+    assert (body["status"], body["message"]) == ("data_not_ready", "还没有股票日频数据")
+
+
+def test_提问_大模型没配好时说明原因(tmp_path):
+    body = (
+        make_client(tmp_path, ds=NoData())
+        .post("/api/plan", json={"query": "昨天涨停的股票"})
+        .json()
+    )
+    assert body["status"] == "failed" and "大模型没有配置好" in body["message"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "detail"),
+    [
+        ({}, "query 要填问题"),
+        ({"query": "  "}, "query 要填问题"),
+        ({"query": "x", "extra": 1}, "不认识的栏目"),
+        ({"query": "问" * 501}, "问题太长"),
+        ({"query": "x", "previous_plan_id": 5}, "previous_plan_id"),
+    ],
+)
+def test_提问_请求体写错返回400(tmp_path, payload, detail):
+    response = make_client(tmp_path, ds=NoData(), llm=NoLLM()).post("/api/plan", json=payload)
+    assert response.status_code == 400 and detail in response.json()["detail"]
+
+
+def test_提问_追问的提问记录不存在(tmp_path):
+    client = make_client(tmp_path, ds=NoData(), llm=NoLLM())
+    payload = {"query": "20 个交易日", "previous_plan_id": "p20260915000000abcdef"}
+    body = client.post("/api/plan", json=payload).json()
+    assert body["status"] == "failed" and "p20260915000000abcdef" in body["message"]
+
+
+def test_候选里只有一个代码或名称完全一致的_直接用():
+    from litmus.api.routes.plan import _decisive
+
+    exact = SimpleNamespace(exact=True, code="601318.SH")
+    loose = SimpleNamespace(exact=False, code="000001.SZ")
+    assert _decisive([exact, loose]) == [exact]
+    assert _decisive([loose, loose]) == [loose, loose]
+    assert _decisive([exact, exact]) == [exact, exact]
