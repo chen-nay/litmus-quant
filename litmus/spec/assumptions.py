@@ -71,6 +71,8 @@ class Facts:
     #: 用了默认门槛的栏目（「小市值」→ 总市值 < 30 亿），和 spec.defaults_used 一样标「默认值，可修改」。
     #: 不放进 defaults_used：那里的栏目缺了才补，前端会把没改过的整栏去掉不发，筛选条件不能这么丢
     defaulted: frozenset[str] = frozenset()
+    #: 这个问题用到的几类数据各自截至哪天：(叫法, 日期)，如 ("股票行情", 2026-09-14)
+    data_dates: tuple[tuple[str, date], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,9 @@ def render_assumptions(
         _stock_list(spec, facts, notes)
     else:
         _board_list(spec, facts, notes)
+    if facts.data_dates:
+        dates = "，".join(f"{label} {day}" for label, day in facts.data_dates)
+        notes.note(f"本地数据截至：{dates}")
     return notes.items
 
 

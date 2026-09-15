@@ -14,6 +14,7 @@ import {
   formatFraction,
   formatTime,
   formatYuan,
+  latestText,
   sortColumn,
   trendColor,
   visibleColumns,
@@ -117,6 +118,17 @@ describe("其他", () => {
   it("顺延说明", () => {
     expect(formatDelay({ days: 1, reason: "涨停" }, "买入")).toBe("买入顺延 1 天（涨停）");
     expect(formatDelay(null, "卖出")).toBe("");
+  });
+
+  it("各类数据截至哪天：同一天的并在一起", () => {
+    expect(
+      latestText([
+        { key: "stock", label: "股票行情", date: "2026-09-14" },
+        { key: "concept", label: "概念板块行情", date: "2026-09-11" },
+        { key: "index", label: "指数行情", date: "2026-09-14" },
+      ]),
+    ).toBe("股票行情、指数行情 2026-09-14；概念板块行情 2026-09-11");
+    expect(latestText(undefined)).toBe("");
   });
 
   it("时间取到秒，不换时区", () => {

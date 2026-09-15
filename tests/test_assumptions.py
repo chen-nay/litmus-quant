@@ -70,6 +70,17 @@ def test_用户原话的说法_理解为栏目里的定义():
     ]
 
 
+def test_用到的数据各自截至哪天_列在最后():
+    dates = (("股票行情", date(2026, 9, 14)), ("财务公告", date(2026, 9, 10)))
+    last = render_assumptions(stock_list(), Facts(expressions=FACTS.expressions, data_dates=dates))[
+        -1
+    ]
+    assert (last.field, last.text) == (
+        None,
+        "本地数据截至：股票行情 2026-09-14，财务公告 2026-09-10",
+    )
+
+
 def test_条件里用了默认门槛_这一栏标默认值():
     spec = stock_list(filter={"expr": "$market_cap < 30亿", "label": "小市值"})
     facts = Facts(expressions={"filter.expr": "总市值 < 30 亿"}, defaulted=frozenset({"filter"}))

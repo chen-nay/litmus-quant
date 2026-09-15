@@ -6,7 +6,7 @@
  * 颜色按 A 股习惯：红涨绿跌。
  */
 
-import type { BoardType, Cell, Delay, FieldInfo, Sort, SyncState } from "./types";
+import type { BoardType, Cell, DataDate, Delay, FieldInfo, Sort, SyncState } from "./types";
 
 export const UP_COLOR = "#d9363e";
 export const DOWN_COLOR = "#2f9e44";
@@ -151,6 +151,13 @@ export function visibleColumns(columns: string[], sort: FieldMeta): string[] {
 
 export function formatDelay(delay: Delay | null | undefined, action: "买入" | "卖出"): string {
   return delay ? `${action}顺延 ${delay.days} 天（${delay.reason}）` : "";
+}
+
+/** 各类数据截至哪天，同一天的并在一起：「股票行情、指数行情 2026-09-14；概念板块行情 2026-09-11」 */
+export function latestText(latest: DataDate[] | undefined): string {
+  const byDay = new Map<string, string[]>();
+  for (const item of latest ?? []) byDay.set(item.date, [...(byDay.get(item.date) ?? []), item.label]);
+  return [...byDay].map(([day, labels]) => `${labels.join("、")} ${day}`).join("；");
 }
 
 /** 接口给的是服务端本地时间（带时区），取到秒：2026-09-14T21:59:43+08:00 → 2026-09-14 21:59:43 */

@@ -83,6 +83,13 @@ def test_停牌日没有行(ds):
     assert table.get_column("date").to_list() == [D(2025, 4, 30)]
 
 
+def test_各类数据最新到哪天_股票行情就是数据截至(ds):
+    latest = {item.key: item.day for item in ds.latest_dates()}
+    assert latest["stock"] == ds.data_range()[1]
+    assert {"stock", "sw_industry", "index", "index_weight", "finance"} <= set(latest)
+    assert latest["index_weight"] <= latest["stock"]  # 指数成分每月发一两次，常常晚几天
+
+
 def test_最新交易日就是数据截至(ds):
     status = DataSync(None, _store).status()
     assert ds.latest_trading_day().isoformat() == status.data_through

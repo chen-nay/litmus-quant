@@ -18,7 +18,7 @@ import { useState } from "react";
 
 import { api, errorText } from "../api";
 import { useStatus } from "../context";
-import { SYNC_STATE_LABELS, formatTime, stepLabel } from "../format";
+import { SYNC_STATE_LABELS, formatTime, latestText, stepLabel } from "../format";
 import type { SyncState } from "../types";
 
 const STATE_COLORS: Record<SyncState, string> = {
@@ -150,7 +150,11 @@ export function SyncPage() {
                 <Tag color="warning">还不能：{status.reason}</Tag>
               ),
             },
-            { key: "through", label: "数据截至", children: status.data_through ?? "还没有数据" },
+            {
+              key: "through",
+              label: "数据截至",
+              children: latestText(data.latest) || status.data_through || "还没有数据",
+            },
             {
               key: "history",
               label: "历史已补到",

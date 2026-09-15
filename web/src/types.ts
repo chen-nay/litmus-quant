@@ -184,8 +184,17 @@ export interface SyncProgress {
   error: string | null;
 }
 
+/** 一类数据本地最新到哪天：股票行情、概念板块成分…… */
+export interface DataDate {
+  key: string;
+  label: string;
+  date: string;
+}
+
 export interface StatusResponse {
   status: DataStatus;
+  /** 各类数据最新到哪天，本地没有的那类不列 */
+  latest: DataDate[];
   sync: SyncProgress;
 }
 

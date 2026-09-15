@@ -12,9 +12,18 @@ router = APIRouter()
 
 @router.get("/api/data/status")
 def data_status(request: Request) -> dict[str, object]:
-    """本地数据状态（能不能提问、数据截至、历史补到哪、不可用的可选数据）和后台同步进度。只读本地，不联网。"""
+    """本地数据状态（能不能提问、数据截至、历史补到哪、不可用的可选数据）、各类数据最新到哪天、后台同步进度。
+    只读本地，不联网。"""
     services = services_of(request)
-    return {"status": to_jsonable(services.data_status()), "sync": services.sync_job.snapshot()}
+    latest = [
+        {"key": item.key, "label": item.label, "date": item.day.isoformat()}
+        for item in services.ds.latest_dates()
+    ]
+    return {
+        "status": to_jsonable(services.data_status()),
+        "latest": latest,
+        "sync": services.sync_job.snapshot(),
+    }
 
 
 @router.post("/api/data/sync")

@@ -19,7 +19,7 @@ from litmus.data.fields import (
 )
 from litmus.data.loaders.tushare import TushareError
 from litmus.data.resolve import BoardMatch, StockMatch
-from litmus.data.service import BoardInfo, DataService, Kline
+from litmus.data.service import BoardInfo, DataDate, DataService, Kline
 from litmus.data.storage import MarketStore, MissingDataError
 from litmus.data.sync import (
     HISTORY_START,
@@ -42,6 +42,7 @@ __all__ = [
     "AmbiguousDataError",
     "BoardInfo",
     "BoardMatch",
+    "DataDate",
     "DataService",
     "DataStatus",
     "DataSync",

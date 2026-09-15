@@ -8,12 +8,13 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
+from datetime import date
 from typing import Any
 
 from litmus.data import CONCEPT, STOCK, DataService
-from litmus.expr import collect_lookback, compares_below, describe, parse
+from litmus.expr import collect_fields, collect_lookback, compares_below, describe, parse
 from litmus.research import statistics_range
 from litmus.spec import (
     DEFAULTS,
@@ -32,6 +33,11 @@ Spec = StockListSpec | BoardListSpec | StockHistorySpec
 # 只认 Rank(，不认 TsRank(
 _RANK = re.compile(r"\bRank\s*\(")
 _DIGIT = re.compile(r"\d")
+
+#: 用到这些字段，确认卡上就列出财务数据截至哪天
+_FINANCE_FIELDS = frozenset(
+    {"roe", "revenue_yoy", "profit_yoy", "is_report_date", "is_forecast_date"}
+)
 
 
 def explain(spec: Spec, ds: DataService, mentions: Sequence[Mention] = ()) -> list[Assumption]:
@@ -61,6 +67,22 @@ def plan_mentions(spec: Mapping[str, Any], record: PlanRecord | None) -> list[Me
 
 #: 比较时只看这一项：股票比代码，表单改过条件后只带代码回来，原话和猜测名会丢
 _COMPARED = {"target": "target.code"}
+
+
+def _used_data(spec: Spec, texts: Iterable[str]) -> set[str]:
+    """这个问题用到哪几类数据（DataService.latest_dates 的 key）。概念板块成分另有一条说明，这里不列。"""
+    fields = set().union(*(collect_fields(parse(text)) for text in texts))
+    finance = {"finance"} if fields & _FINANCE_FIELDS else set()
+    if isinstance(spec, BoardListSpec):
+        return {spec.board_type}
+    if isinstance(spec, StockHistorySpec):
+        return {"stock", *finance, *(("index",) if spec.benchmark.startswith("index:") else ())}
+    return {"stock", *finance, *(("index_weight",) if spec.universe.base != "all_a" else ())}
+
+
+def _data_dates(ds: DataService, used: set[str]) -> tuple[tuple[str, date], ...]:
+    """用到的几类数据各自截至哪天（2026-09-15 定：数据旧了不特殊提醒，确认卡上写出来，用户自己决定同步不同步）。"""
+    return tuple((item.label, item.day) for item in ds.latest_dates() if item.key in used)
 
 
 def _defaulted(texts: Mapping[str, str], mentions: Sequence[Mention]) -> frozenset[str]:
@@ -94,7 +116,12 @@ def _facts(spec: Spec, ds: DataService, mentions: tuple[Mention, ...]) -> Facts:
         code = spec.target.code or ""
         name = ds.stock_info([code], ds.data_range(STOCK)[1]).row(0, named=True)["name"]
         first, _ = statistics_range(spec, ds)
-        return Facts(stock_name=name, first_date=first, mentions=mentions)
+        return Facts(
+            stock_name=name,
+            first_date=first,
+            mentions=mentions,
+            data_dates=_data_dates(ds, _used_data(spec, [spec.event.expr])),
+        )
 
     target = STOCK if isinstance(spec, StockListSpec) else spec.board_type
     written = {
@@ -108,6 +135,7 @@ def _facts(spec: Spec, ds: DataService, mentions: tuple[Mention, ...]) -> Facts:
         lookback=max((collect_lookback(parse(text)) for text in texts.values()), default=0),
         mentions=mentions,
         defaulted=_defaulted(texts, mentions),
+        data_dates=_data_dates(ds, _used_data(spec, texts.values())),
     )
     if isinstance(spec, BoardListSpec):
         return replace(facts, board_range=ds.data_range(spec.board_type))

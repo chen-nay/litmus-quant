@@ -12,7 +12,7 @@ A 股数据的坑——后复权、财务按公告日对齐、停牌、ST、次�
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 
@@ -107,6 +107,15 @@ class BoardInfo:
     code: str
     name: str
     board_type: str  # sw_industry / concept
+
+
+@dataclass(frozen=True)
+class DataDate:
+    """一类数据本地最新到哪天，见 DataService.latest_dates。"""
+
+    key: str  # stock / sw_industry / concept / concept_members / index / index_weight / finance
+    label: str  # 页面上的叫法：股票行情、概念板块成分……
+    day: date
 
 
 def _previous_month(month: str) -> str:
@@ -245,6 +254,32 @@ class DataService:
             .row(0)
         )
         return first, last
+
+    def latest_dates(self) -> list[DataDate]:
+        """各类数据本地最新到哪天。本地还没有、当前不可用的那类不列。
+
+        几类数据发布时间不同，最新日期常常不一样：2026-09-14 晚上同步完，股票、申万行业、指数行情到 09-14，
+        概念板块到 09-11，指数成分到 08-31（每月发一两次），财务最新公告 09-10。
+        数据旧了不特殊提醒（2026-09-15 定）：页面顶部和确认卡上写出来，用户自己决定同步不同步。
+        """
+        readers: tuple[tuple[str, str, Callable[[], date | None]], ...] = (
+            ("stock", "股票行情", lambda: self.data_range(STOCK)[1]),
+            ("sw_industry", "申万行业行情", lambda: self.data_range(SW_INDUSTRY)[1]),
+            ("concept", "概念板块行情", lambda: self.data_range(CONCEPT)[1]),
+            ("concept_members", "概念板块成分", self.concept_snapshot_date),
+            ("index", "指数行情", self._index_daily_through),
+            ("index_weight", "指数成分", self._index_weight_through),
+            ("finance", "财务公告", self._finance_through),
+        )
+        found = []
+        for key, label, read in readers:
+            try:
+                day = read()
+            except MissingDataError:
+                continue
+            if day is not None:
+                found.append(DataDate(key, label, day))
+        return found
 
     def get_trading_calendar(self, start: date, end: date) -> list[date]:
         """[start, end] 里的交易日，从早到晚。只含本地交易日历覆盖到的日子（同步时从 2016 年拉到同步当天）。"""
@@ -599,6 +634,23 @@ class DataService:
         return sorted({code for code in codes if not code.endswith(".BJ")})
 
     # ── 内部 ────────────────────────────────────────────────────
+
+    def _index_daily_through(self) -> date | None:
+        """两个指数里较早的那个最新日：对照选哪个都要有。"""
+        latest = self._scan_table(INDEX_DAILY_TABLE).group_by("code").agg(pl.col("date").max())
+        return latest.select(pl.col("date").min()).collect().item()
+
+    def _index_weight_through(self) -> date | None:
+        months = self._store.months(INDEX_WEIGHT_DATASET)[-2:]
+        if not months:
+            return None
+        paths = [self._store.month_path(INDEX_WEIGHT_DATASET, month) for month in months]
+        return pl.scan_parquet(paths).select(pl.col("date").max()).collect().item()
+
+    def _finance_through(self) -> date | None:
+        return (
+            self._scan_table(FINA_INDICATOR_TABLE).select(pl.col("ann_date").max()).collect().item()
+        )
 
     def _scan_table(self, name: str) -> pl.LazyFrame:
         if not self._store.has_table(name):

@@ -4,7 +4,7 @@ import { Alert, Typography } from "antd";
 import { Link } from "react-router-dom";
 
 import { useStatus } from "../context";
-import { stepLabel } from "../format";
+import { latestText, stepLabel } from "../format";
 
 export function StatusBar() {
   const { data, error } = useStatus();
@@ -36,7 +36,7 @@ export function StatusBar() {
 
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 24, marginBottom: 16, color: "#666" }}>
-      <span>数据截至 {status.data_through}</span>
+      <span>数据截至：{latestText(data.latest) || status.data_through}</span>
       <span>
         历史已补到 {status.history_from}
         {status.history_done ? "（已补完）" : "（仍在补）"}

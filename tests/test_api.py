@@ -16,7 +16,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from litmus.api import Services, SyncJob, create_app
-from litmus.data import STOCK, SW_INDUSTRY, BoardInfo, DataStatus, MissingDataError, MonthResult
+from litmus.data import (
+    STOCK,
+    SW_INDUSTRY,
+    BoardInfo,
+    DataDate,
+    DataStatus,
+    MissingDataError,
+    MonthResult,
+)
 from litmus.llm import LLMClient
 from litmus.research import ListResult
 from litmus.signals import load_events
@@ -48,6 +56,9 @@ class FakeData:
 
     def get_trading_calendar(self, start, end):
         return [start] if start == end and start.weekday() < 5 else []
+
+    def latest_dates(self):
+        return [DataDate("stock", "股票行情", DAY), DataDate("sw_industry", "申万行业行情", DAY)]
 
     def list_boards(self, board_type):
         if board_type != SW_INDUSTRY:
@@ -301,6 +312,14 @@ class GatedSync:
         return {}
 
 
+def test_数据状态带上各类数据截至哪天(tmp_path):
+    body = make_client(tmp_path).get("/api/data/status").json()
+    assert body["latest"] == [
+        {"key": "stock", "label": "股票行情", "date": "2026-09-11"},
+        {"key": "sw_industry", "label": "申万行业行情", "date": "2026-09-11"},
+    ]
+
+
 def test_触发同步_不重复开_停止_查看进度(tmp_path):
     fake = GatedSync()
 
@@ -309,7 +328,7 @@ def test_触发同步_不重复开_停止_查看进度(tmp_path):
         yield fake
 
     job = SyncJob(opener)
-    client = make_client(tmp_path, ds=NoData(), job=job)
+    client = make_client(tmp_path, job=job)  # 查进度会顺带读各类数据截至哪天
 
     body = client.post("/api/data/sync").json()
     assert body["started"] is True and body["sync"]["state"] == "running"
@@ -482,6 +501,17 @@ def test_原话的说法_改过的栏目不再用_股票只比代码():
     # 日期改过了不再用「昨天」；股票代码没变照样用「茅台」；提问时没定下来的「前 20」照样用
     assert [m.phrase for m in plan_mentions(edited, record)] == ["茅台", "前 20"]
     assert plan_mentions(edited, None) == []
+
+
+def test_确认卡只列这个问题用到的数据():
+    from litmus.api.explain import _used_data
+    from litmus.spec import parse_spec
+
+    assert _used_data(parse_spec(stock_list()), ["$pct_chg > 9"]) == {"stock"}
+    hs300 = parse_spec(stock_list(universe={"base": "hs300"}))
+    assert _used_data(hs300, ["$roe > 10"]) == {"stock", "finance", "index_weight"}
+    board = parse_spec({"shape": "board_list", "board_type": "sw_industry", "as_of": "2026-09-11"})
+    assert _used_data(board, []) == {"sw_industry"}
 
 
 def test_条件用了默认门槛_原话没给数字才标默认值():
