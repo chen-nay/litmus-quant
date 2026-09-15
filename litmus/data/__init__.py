@@ -18,7 +18,7 @@ from litmus.data.fields import (
     names_for,
 )
 from litmus.data.loaders.tushare import TushareError
-from litmus.data.service import BoardInfo, DataService
+from litmus.data.service import BoardInfo, DataService, Kline
 from litmus.data.storage import MarketStore, MissingDataError
 from litmus.data.sync import (
     HISTORY_START,
@@ -44,6 +44,7 @@ __all__ = [
     "DataStatus",
     "DataSync",
     "Field",
+    "Kline",
     "MarketStore",
     "MissingDataError",
     "MonthResult",

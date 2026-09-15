@@ -318,3 +318,38 @@ def test_触发同步_不重复开_停止_查看进度(tmp_path):
     body = client.get("/api/data/status").json()
     assert body["sync"]["state"] == "stopped"
     assert body["status"]["ready"] is True
+
+
+# ── 字段、板块区间、K 线 ────────────────────────────────────────
+
+
+def test_字段清单按标的类型分_带中文名和单位(tmp_path):
+    fields = make_client(tmp_path, ds=NoData()).get("/api/fields").json()["fields"]
+    assert set(fields) == {"stock", "sw_industry", "concept"}
+    close = next(item for item in fields["stock"] if item["name"] == "$amount")
+    assert (close["label"], close["unit"]) == ("成交额", "元")
+    assert all(item["name"] != "$close_raw" for item in fields["sw_industry"])
+
+
+def test_板块清单带数据可用区间(tmp_path):
+    body = make_client(tmp_path).get("/api/boards?type=sw_industry").json()
+    assert body["range"] == ["2016-01-04", "2026-09-11"]
+
+
+def test_事件清单带参数类型和范围(tmp_path):
+    events = make_client(tmp_path, ds=NoData()).get("/api/events").json()["events"]
+    ma = next(e for e in events if e["id"] == "breakout_ma")["params"][0]
+    assert (ma["kind"], ma["choices"], ma["min"], ma["max"]) == (
+        "choice",
+        [5, 10, 20, 60, 120, 250],
+        None,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "query", ["from=20260901&to=2026-09-11", "from=2026-09-11&to=2026-09-01", "to=2026-09-11"]
+)
+def test_K线参数写错不读数据直接400(tmp_path, query):
+    response = make_client(tmp_path, ds=NoData()).get(f"/api/stocks/600519.SH/kline?{query}")
+    assert response.status_code == 400

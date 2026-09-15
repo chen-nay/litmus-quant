@@ -245,6 +245,10 @@ def event_catalog(library: EventLibrary | None = None) -> list[dict[str, object]
                     "unit": spec.unit,
                     "allowed": spec.allowed,
                     "default": spec.default_value(),
+                    "kind": spec.kind,  # choice / int / float：页面据此给下拉框还是数字框
+                    "choices": list(spec.choices),
+                    "min": spec.min,
+                    "max": spec.max,
                 }
                 for name, spec in event.params.items()
             ],

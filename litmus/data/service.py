@@ -86,6 +86,16 @@ NO_LIMIT_PRICE = 10_000
 
 
 @dataclass(frozen=True)
+class Kline:
+    """个股 K 线，见 DataService.get_kline。"""
+
+    #: (date, open, high, low, close, open_raw, high_raw, low_raw, close_raw, amount, pct_chg)，按日期排序
+    rows: pl.DataFrame
+    #: 复权基准日：这只股票本地最后一个交易日，这一天的前复权价就是真实价格。区间之后都没有行情时为空
+    base_date: date | None
+
+
+@dataclass(frozen=True)
 class BoardInfo:
     code: str
     name: str
@@ -283,6 +293,33 @@ class DataService:
                 query = query.filter(pl.col("code").is_in(chosen))
             table = _trim_before(query.select("date", "code", *wanted).collect(), start, lookback)
         return table.select("date", "code", *wanted).sort("date", "code")
+
+    def get_kline(self, code: str, start: date, end: date) -> Kline:
+        """个股 K 线：前复权的开高低收、当天的真实成交价、成交额、涨跌幅（2026-09-15 定）。
+
+        - **前复权** = 后复权价 ÷ 这只股票本地最后一个交易日的复权因子。最后一天的价格就是真实价格，
+          和行情软件默认的显示方式一致；整段价格只差一个固定倍数，任何一段的涨跌幅都和后复权一样——
+          个股回看的收益是用后复权算的，图和表对得上。同步了新数据、期间又除权的话，整张图的价格会整体变一点
+        - **真实成交价** = 后复权价 ÷ 当天的复权因子（2026-09-14 实测和不复权收盘价的误差在 1e-13 以内）
+        - 不给成交量：它随复权调整过（原始股数 ÷ 复权因子），画量柱用成交额
+        - 区间超出本地数据报错；区间里没有行情（还没上市、已退市、长期停牌）返回空表
+        """
+        self._check_range(start, end, STOCK)
+        latest = self.data_range(STOCK)[1]
+        prices = ("open", "high", "low", "close")
+        columns = ["date", *prices, "adj_factor", "amount", "pct_chg"]
+        rows = self._read_panel(start, latest, [code], columns).sort("date")
+        base_date, base_factor = (
+            (None, 1.0) if rows.is_empty() else rows.select("date", "adj_factor").row(-1)
+        )
+        table = rows.filter(pl.col("date") <= end).select(
+            "date",
+            *[(pl.col(name) / base_factor).alias(name) for name in prices],
+            *[(pl.col(name) / pl.col("adj_factor")).alias(f"{name}_raw") for name in prices],
+            "amount",
+            "pct_chg",
+        )
+        return Kline(table, base_date)
 
     def _stock_fields(
         self, codes: list[str] | None, start: date, end: date, fields: list[str], lookback: int

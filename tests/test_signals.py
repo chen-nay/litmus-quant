@@ -253,6 +253,10 @@ def test_事件清单():
         "unit": "天",
         "allowed": "5/10/20/60",
         "default": 5,
+        "kind": "choice",
+        "choices": [5, 10, 20, 60],
+        "min": None,
+        "max": None,
     }
     assert golden["constraints"] == ["短均线天数要小于长均线天数"]
     assert golden["example"]["params"] == {"fast": 5, "slow": 20}

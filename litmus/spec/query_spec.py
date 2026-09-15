@@ -94,6 +94,7 @@ class Condition(_Strict):
 class Sort(_Strict):
     by: str = Field(min_length=1)
     order: Literal["asc", "desc"] = "desc"
+    label: str = ""  # 排序值那一列叫什么，如「放大倍数」；没填时页面按表达式显示
 
 
 class Target(_Strict):
