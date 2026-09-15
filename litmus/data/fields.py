@@ -10,12 +10,20 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from litmus.data.manifest import Manifest
 
 #: 标的类型
 STOCK = "stock"
 SW_INDUSTRY = "sw_industry"
 CONCEPT = "concept"
 BOARD_TARGETS = (SW_INDUSTRY, CONCEPT)
+
+#: 要做能力探测的标的 → manifest 里的能力名。不在表里的（股票、申万行业）只要基础积分，总是可用
+CONCEPT_CAPABILITY = "concept"
+TARGET_CAPABILITIES: dict[str, str] = {CONCEPT: CONCEPT_CAPABILITY}
 
 
 @dataclass(frozen=True)
@@ -80,14 +88,35 @@ _FIELD_LIST: tuple[Field, ...] = (
     _f("revenue_yoy", "营业收入同比", "%", "float", _STOCK_ONLY, "最新一期累计同比，披露日会跳变"),
     _f("profit_yoy", "归母净利润同比", "%", "float", _STOCK_ONLY, "最新一期累计同比，披露日会跳变"),
     # ── 事件 ──────────────────────────────────────────────────
-    _f("is_report_date", "财报实际披露日", "布尔", "bool", _STOCK_ONLY),
-    _f("is_forecast_date", "业绩预告公告日", "布尔", "bool", _STOCK_ONLY),
-    _f("is_ex_div", "除权除息日", "布尔", "bool", _STOCK_ONLY, "复权因子较前一交易日发生变化"),
+    _f(
+        "is_report_date",
+        "财报实际披露日",
+        "布尔",
+        "bool",
+        _STOCK_ONLY,
+        "披露日不是交易日或当天停牌的，标在它下一个有行情的交易日",
+    ),
+    _f(
+        "is_forecast_date",
+        "业绩预告公告日",
+        "布尔",
+        "bool",
+        _STOCK_ONLY,
+        "公告日不是交易日或当天停牌的，标在它下一个有行情的交易日",
+    ),
+    _f(
+        "is_ex_div",
+        "除权除息日",
+        "布尔",
+        "bool",
+        _STOCK_ONLY,
+        "复权因子比上一个交易日涨了 0.05% 以上；停牌期间除权的标在复牌那天",
+    ),
     # ── 状态 ──────────────────────────────────────────────────
     _f("is_st", "ST / *ST", "布尔", "bool", _STOCK_ONLY),
     _f("is_limit_up", "收盘涨停", "布尔", "bool", _STOCK_ONLY),
     _f("is_limit_down", "收盘跌停", "布尔", "bool", _STOCK_ONLY),
-    _f("is_new", "次新股", "布尔", "bool", _STOCK_ONLY),
+    _f("is_new", "次新股", "布尔", "bool", _STOCK_ONLY, "上市后的前 60 个交易日，含上市当天"),
     # ── 板块特有 ──────────────────────────────────────────────
     _f("up_num", "上涨家数", "个", "float", (CONCEPT,)),
     _f("limit_up_num", "涨停家数", "个", "float", (CONCEPT,)),
@@ -116,6 +145,20 @@ def get(name: str) -> Field:
 def names_for(target: str = STOCK) -> tuple[str, ...]:
     """某类标的可用的字段名，按定义顺序。"""
     return tuple(f.name for f in _FIELD_LIST if f.available_for(target))
+
+
+def available_targets(manifest: Manifest) -> tuple[str, ...]:
+    """按能力探测结果，当前可用的标的类型。
+
+    表达式校验、给 LLM 的字段清单、取数都从这里判断，三处才会一致——漏掉一处，
+    就会出现清单里没有、校验器却放行，然后去读一张没同步过的表、结果静默为空。
+    没探测过的能力按不可用算（见 Manifest.is_available）。
+    """
+    return tuple(
+        target
+        for target in (STOCK, *BOARD_TARGETS)
+        if target not in TARGET_CAPABILITIES or manifest.is_available(TARGET_CAPABILITIES[target])
+    )
 
 
 def check_available(names: Iterable[str], target: str = STOCK) -> None:

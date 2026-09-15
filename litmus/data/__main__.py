@@ -2,6 +2,7 @@
 
     uv run python -m litmus.data --start 20240101
     uv run python -m litmus.data --start 20160101 --only daily
+    uv run python -m litmus.data --status        # 只看本地数据的状态，不同步
 
 只做三件事：读 `.env`、解析参数、调 `DataSync`。同步的编排逻辑全在 sync.py，
 这里不放任何业务判断——将来网页上的「同步历史数据」按钮走的是同一个 `sync_all()`。
@@ -16,27 +17,19 @@ import logging
 import os
 import sys
 from datetime import date
-from pathlib import Path
 
-from litmus.data.loaders.tushare import TushareClient, TushareConfig
+from litmus.data.loaders.tushare import MAX_CONCURRENCY
 from litmus.data.manifest import Manifest
 from litmus.data.storage import MarketStore
-from litmus.data.sync import DEFAULT_WORKERS, SYNC_STEPS, DataSync, MonthResult
-
-#: 仓库根目录下的 .env
-ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
-
-
-def load_env(path: Path = ENV_FILE) -> None:
-    """把 .env 读进 os.environ。已经设过的环境变量优先，不覆盖。"""
-    if not path.exists():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip())
+from litmus.data.sync import (
+    HISTORY_START,
+    SYNC_STEPS,
+    UNLOCK_YEARS,
+    DataStatus,
+    DataSync,
+    MonthResult,
+)
+from litmus.env import load_env
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,7 +37,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m litmus.data",
         description="把 Tushare 数据同步到本地（Parquet + manifest）",
     )
-    parser.add_argument("--start", default="20160101", help="起始日期 YYYYMMDD（默认 20160101）")
+    parser.add_argument(
+        "--start", default=HISTORY_START, help=f"起始日期 YYYYMMDD（默认 {HISTORY_START}）"
+    )
     parser.add_argument("--end", default=None, help="结束日期 YYYYMMDD（默认今天）")
     parser.add_argument(
         "--only",
@@ -54,11 +49,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"只跑其中几步，可选：{' '.join(SYNC_STEPS)}（默认全跑）",
     )
     parser.add_argument(
-        "--workers", type=int, default=DEFAULT_WORKERS, help=f"并发路数（默认 {DEFAULT_WORKERS}）"
+        "--workers",
+        type=int,
+        default=MAX_CONCURRENCY,
+        help=f"线程数上限（默认 {MAX_CONCURRENCY}）；实际并发由自适应限速自己找",
     )
     parser.add_argument(
         "--data-dir", default=None, help="数据目录（默认取 LITMUS_DATA_DIR 或仓库下的 data/）"
     )
+    parser.add_argument("--status", action="store_true", help="只打印本地数据的状态，不同步")
     return parser
 
 
@@ -70,6 +69,21 @@ def report_month(result: MonthResult, index: int, total: int) -> None:
     )
 
 
+def report_status(status: DataStatus) -> None:
+    print("能提问" if status.ready else f"还不能提问：{status.reason}")
+    print(f"数据截至：{status.data_through or '无'}")
+    print(f"历史已补到：{status.history_from or '无'}{'（已补完）' if status.history_done else ''}")
+    if status.unlock_months:
+        done = len(status.unlock_months) - len(status.unlock_missing)
+        print(f"最近 {UNLOCK_YEARS} 年：{done}/{len(status.unlock_months)} 个月已落盘")
+    for name, reason in status.unavailable.items():
+        print(f"不可用：{name}（{reason}）")
+    if status.synced_at:
+        print("最近同步：")
+        for name, synced_at in sorted(status.synced_at.items()):
+            print(f"  {name:<20} {synced_at}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     load_env()
@@ -79,14 +93,17 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # 别把每个请求都打出来
 
-    end = args.end or date.today().strftime("%Y%m%d")
     store = MarketStore.from_env()
     print(f"数据目录：{store.root}")
+    if args.status:
+        report_status(DataSync(None, store).status())  # 只读本地，不需要 token
+        return 0
+
+    end = args.end or date.today().strftime("%Y%m%d")
     print(f"区间：{args.start} ~ {end}，步骤：{' '.join(args.only or SYNC_STEPS)}\n", flush=True)
 
     try:
-        with TushareClient(TushareConfig.from_env()) as client:
-            sync = DataSync(client, store, workers=args.workers)
+        with DataSync.open(store, workers=args.workers) as sync:
             summary = sync.sync_all(
                 args.start, end, Manifest.load(store), steps=args.only, on_month=report_month
             )
@@ -98,8 +115,8 @@ def main(argv: list[str] | None = None) -> int:
     print("\n=== 完成 ===")
     for step, detail in summary.items():
         print(f"  {step}: {detail}")
-    manifest = Manifest.load(store)
-    print(f"数据截至：{manifest.data_through('daily')}")
+    print()
+    report_status(sync.status())
     return 0
 
 

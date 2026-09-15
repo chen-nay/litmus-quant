@@ -1,0 +1,169 @@
+"""HTTP 接口在本地真实数据上跑出三种结果（第 5 步验收标准）。
+
+数据量都很小：单日股票表、单日申万行业表、一只股票一年的回看。运行记录写进临时目录，不动 data/store；
+不同步、不连 Tushare。没有本地数据就整个跳过。
+"""
+
+from __future__ import annotations
+
+from datetime import date
+
+import pytest
+from fastapi.testclient import TestClient
+
+from litmus.api import Services, SyncJob, create_app
+from litmus.data import DataService, DataSync, MarketStore, MissingDataError
+from litmus.signals import load_events
+from litmus.store import JsonStore
+
+DAY = date(2026, 9, 11)
+_market = MarketStore.from_env()
+try:
+    _first, _last = DataService(_market).data_range()
+except MissingDataError:
+    pytest.skip("本地没有同步过的股票日频数据", allow_module_level=True)
+if _first > date(2025, 1, 2) or _last < DAY:
+    pytest.skip(
+        f"用例要 2025-01-02 ~ {DAY} 的数据，本地只有 {_first} ~ {_last}", allow_module_level=True
+    )
+
+
+def no_sync():
+    raise AssertionError("契约测试不同步")
+
+
+@pytest.fixture
+def client(tmp_path) -> TestClient:
+    services = Services(
+        ds=DataService(_market),
+        store=JsonStore(tmp_path),
+        events=load_events(),
+        sync_job=SyncJob(no_sync),
+        data_status=DataSync(None, _market).status,
+    )
+    return TestClient(create_app(services))
+
+
+def run(client: TestClient, spec: dict) -> dict:
+    return client.post("/api/run", json={"spec": spec}).json()
+
+
+def test_股票表(client):
+    spec = {
+        "shape": "stock_list",
+        "as_of": DAY.isoformat(),
+        "filter": {"expr": "$pct_chg > 9"},
+        "sort": {"by": "$amount"},
+        "limit": 5,
+    }
+    body = run(client, spec)
+    assert body["status"] == "done", body
+    result = body["result"]
+    assert (result["shape"], result["as_of"]) == ("stock_list", "2026-09-11")
+    assert 0 < len(result["rows"]) == min(5, result["total"])
+    assert all(row["pct_chg"] > 9 and row["name"] for row in result["rows"])
+    amounts = [row["sort_value"] for row in result["rows"]]
+    assert amounts == sorted(amounts, reverse=True)
+    assert client.get(f"/api/run/{body['run_id']}").json()["result"] == result
+
+
+def test_板块表(client):
+    spec = {
+        "shape": "board_list",
+        "board_type": "sw_industry",
+        "as_of": DAY.isoformat(),
+        "sort": {"by": "$pct_chg"},
+        "limit": 3,
+    }
+    body = run(client, spec)
+    assert body["status"] == "done", body
+    assert len(body["result"]["rows"]) == 3
+    assert body["result"]["total"] == 31
+
+
+def test_个股回看_事件按事件库重新生成(client):
+    spec = {
+        "shape": "stock_history",
+        "target": {"code": "000001.SZ"},
+        "event": {"preset_id": "breakout_ma", "params": {"ma": 250}, "expr": "$close > 0"},
+        "time_range": {"from": "2025-01-01", "to": "2025-12-31"},
+        "horizons": [5],
+    }
+    body = run(client, spec)
+    assert body["status"] == "done", body
+    result = body["result"]
+    assert (result["shape"], result["code"]) == ("stock_history", "000001.SZ")
+    assert list(result["summary"]) == ["5"]  # 持有天数做 key，JSON 里是字符串
+
+    record = client.get(f"/api/run/{body['run_id']}").json()
+    event = record["spec"]["event"]
+    assert "250" in event["expr"] and event["expr"] != "$close > 0"  # 请求里带来的表达式不作数
+    assert record["library_version"] == event["library_version"] == load_events().version
+    assert result["event_label"] == event["label"]
+
+
+def test_查不到的东西让用户改(client):
+    spec = {"shape": "stock_list", "as_of": "2026-09-06", "universe": {"industry": "银行业"}}
+    issues = {issue["path"]: issue for issue in run(client, spec)["issues"]}
+    assert issues["as_of"]["message"] == "2026-09-06 不是交易日"
+    assert "银行" in issues["universe.industry"]["allowed"].split("、")
+
+    spec = {
+        "shape": "stock_history",
+        "target": {"code": "600519.XX"},
+        "event": {"preset_id": "limit_up"},
+        "time_range": {"from": "2025-01-01", "to": "2025-03-31"},
+    }
+    body = run(client, spec)
+    assert body["status"] == "needs_revision"
+    assert [issue["path"] for issue in body["issues"]] == ["target.code"]
+
+
+def test_数据状态与板块清单(client):
+    body = client.get("/api/data/status").json()
+    assert body["status"]["ready"] is True
+    assert body["status"]["data_through"] >= DAY.isoformat()
+    assert body["sync"]["state"] == "idle"
+    assert len(client.get("/api/boards?type=sw_industry").json()["boards"]) == 31
+
+
+def test_检查接口_个股回看的实际统计起点和结果对得上(client):
+    """年线要往前读 250 多条行情，本地数据从 2016-01-04 起，回看实际从 2017 年初才算得出来。"""
+    spec = {
+        "shape": "stock_history",
+        "target": {"code": "000001.SZ"},
+        "event": {"preset_id": "breakout_ma"},
+        "time_range": {"from": "2016-01-01", "to": "2017-06-30"},
+        "horizons": [5],
+    }
+    body = client.post("/api/check", json={"spec": spec}).json()
+    assert body["status"] == "ok", body
+    items = {item["field"]: item for item in body["assumptions"]}
+    assert items["target"]["text"] == "股票：平安银行（000001.SZ）"
+    assert items["event"]["default"] is True  # 均线天数没给，用了默认值
+    assert items["benchmark"]["default"] is True
+
+    run = client.post("/api/run", json={"spec": spec}).json()
+    assert run["status"] == "done", run
+    first = run["result"]["range"][0]
+    assert first.startswith("2017-")
+    assert f"实际从 {first} 算起" in items["time_range"]["text"]
+
+
+def test_检查接口_表达式翻成中文(client):
+    spec = {
+        "shape": "stock_list",
+        "as_of": DAY.isoformat(),
+        "filter": {"expr": "$amount > Mean(Ref($amount, 1), 20) * 2"},
+        "limit": 5,
+    }
+    body = client.post("/api/check", json={"spec": spec}).json()
+    items = {item["field"]: item["text"] for item in body["assumptions"]}
+    assert items["filter"] == "筛选条件：成交额 > 前 20 日成交额均值（不含当天） × 2"
+
+
+def test_找股票(client):
+    body = client.get("/api/stocks?q=平安").json()
+    assert {"000001.SZ", "601318.SH"} <= {match["code"] for match in body["matches"]}
+    first = client.get("/api/stocks?q=gzmt").json()["matches"][0]
+    assert (first["code"], first["rule"]) == ("600519.SH", "拼音首字母")

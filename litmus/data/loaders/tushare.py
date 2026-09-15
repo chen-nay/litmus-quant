@@ -73,6 +73,11 @@ TRANSPORT_BACKOFF = (1.0, 2.0, 4.0)
 #: 整次同步被拖垮；改成按分钟等待才能跨过配额窗口。
 RATE_LIMIT_BACKOFF = (15.0, 30.0, 60.0, 60.0)
 
+#: 自适应并发（AIMD）：撞限流减半、连续成功加一，让并发自己找水位——不为每个接口压测，也不写死路数。
+#: 起步给个保守值，涨上去只要几十秒；天花板只是线程数的上限，不是实测出来的值
+INITIAL_CONCURRENCY = 4
+MAX_CONCURRENCY = 16
+
 #: 一次 call() 最多翻多少页。
 #: 2026-09-13 实测代理的 offset 上限在 10 万上下：offset=60000 正常，offset=102000 返回
 #: 「参数校验失败, offset」，也就是**第 18 页**就会被拒。阈值必须落在它前面，否则我们这条
@@ -82,10 +87,19 @@ MAX_PAGES = 16
 
 #: 流控提示词。除了按分钟计的频率限制，代理还会限制同时在飞的连接数：
 #: 2026-09-13 实测 12 路并发时返回 code=429 msg=请勿使用过多线程，连接超限
-_RATE_LIMIT_HINTS = ("每分钟", "频率", "频次", "太频繁", "超限", "线程", "连接数")
+_RATE_LIMIT_HINTS = ("每分钟", "频率", "频次", "太频繁", "速度过快", "超限", "线程", "连接数")
+#: 限流里属于「连接数超限」的那种要收紧全局，其余算接口自己的频率配额。
+#: 两种的错误码都是 429，只能按内容分
+_CONNECTION_LIMIT_HINTS = ("线程", "连接")
 #: 流控错误码。按字符串比对，代理返回的可能是数字也可能是字符串
 _RATE_LIMIT_CODES = ("429",)
-_PERMISSION_HINTS = ("积分", "权限", "没有访问", "token")
+#: 没权限。2026-09-13 实测代理对没开通的接口返回 code=403 msg=请联系管理员添加此权限
+_PERMISSION_CODES = ("403",)
+_PERMISSION_HINTS = ("积分", "权限", "没有访问")
+#: token 填错。2026-09-13 实测代理返回 code=2002 msg=token不对，您传过来的是…请确认。
+#: 必须和「没权限」分开：否则能力探测会把填错 token 记成「概念板块不可用」，真正的原因被藏起来
+_TOKEN_CODES = ("2002",)
+_TOKEN_HINTS = ("token不对",)
 
 
 class TushareError(RuntimeError):
@@ -101,8 +115,31 @@ class TushareAuthError(TushareError):
     """积分或权限不足。不重试——能力探测据此判定某项数据不可用。"""
 
 
+class TushareTokenError(TushareError):
+    """token 无效。不重试，能力探测也不把它当成「没权限」。
+
+    token 错了什么都拉不到，得直接告诉用户，不能记成「某项数据不可用」。
+    """
+
+
 class TushareRateLimitError(TushareError):
-    """触发频率限制。可以退避后重试。"""
+    """触发频率限制。可以退避后重试。
+
+    `scope` 区分两种限流，自适应并发据此决定收紧哪一层：
+    - `connection`：代理同时在飞的连接太多（实测「请勿使用过多线程，连接超限」），收紧全局
+    - `quota`：这个接口自己的频率配额用完了（实测「您请求速度过快」），只收紧这个接口
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        api_name: str | None = None,
+        code: object = None,
+        scope: str = "quota",
+    ):
+        super().__init__(message, api_name=api_name, code=code)
+        self.scope = scope
 
 
 #: (url, payload, timeout) -> 解析后的 JSON。抽出来是为了测试时注入假实现
@@ -159,6 +196,96 @@ class RateLimiter:
             self._sleep(wait)
 
 
+class AimdLimit:
+    """一层 AIMD 并发上限，线程安全。
+
+    - **撞限流减半**，最低 1。同一时刻在飞的请求往往一起撞墙，只算一次：只有上次减半
+      **之后**才发出的请求撞墙才会再减——否则 8 个请求同时失败会连减 8 次，直接掉到 1
+    - **连续成功「当前上限」那么多次，加一**，最高到天花板。上限越高，涨一格要攒的成功越多
+    - 其他失败（网络、权限）不涨也不减
+    """
+
+    def __init__(self, initial: int, ceiling: int, label: str = ""):
+        self._ceiling = ceiling
+        self._limit = max(1, min(initial, ceiling))
+        self._label = label
+        self._in_flight = 0
+        self._streak = 0
+        self._epoch = 0  # 减半过几次；请求带着出发时的值回来，用来判断是不是同一批
+        self._cond = threading.Condition()
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def acquire(self) -> int:
+        """占一个名额，满了就等。返回出发时的减半次数，归还时带回来。"""
+        with self._cond:
+            while self._in_flight >= self._limit:
+                self._cond.wait()
+            self._in_flight += 1
+            return self._epoch
+
+    def release(self, epoch: int, outcome: str) -> None:
+        """归还名额。outcome 是 ok / throttled / failed。"""
+        with self._cond:
+            self._in_flight -= 1
+            if outcome == "throttled":
+                if epoch == self._epoch:
+                    old, self._limit = self._limit, max(1, self._limit // 2)
+                    self._epoch += 1
+                    self._streak = 0
+                    logger.info("撞限流，%s 并发上限 %d → %d", self._label, old, self._limit)
+            elif outcome == "ok":
+                self._streak += 1
+                if self._streak >= self._limit and self._limit < self._ceiling:
+                    self._limit += 1
+                    self._streak = 0
+            self._cond.notify_all()
+
+
+class AdaptiveConcurrency:
+    """两层 AIMD：全局一层管代理的连接数，每个接口一层管它自己的频率配额。
+
+    一次请求先占接口的名额、再占全局的名额，顺序固定。反过来的话，排队等「降到一路」的
+    接口名额的线程会攥着全局名额不放，把别的接口也饿死。
+    """
+
+    def __init__(self, initial: int = INITIAL_CONCURRENCY, ceiling: int = MAX_CONCURRENCY):
+        self._initial = initial
+        self._ceiling = ceiling
+        self._global = AimdLimit(initial, ceiling, "全局")
+        self._apis: dict[str, AimdLimit] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def global_limit(self) -> int:
+        return self._global.limit
+
+    def limit_of(self, api_name: str) -> int:
+        return self._api(api_name).limit
+
+    def _api(self, api_name: str) -> AimdLimit:
+        with self._lock:
+            if api_name not in self._apis:
+                self._apis[api_name] = AimdLimit(self._initial, self._ceiling, api_name)
+            return self._apis[api_name]
+
+    def acquire(self, api_name: str) -> tuple[int, int]:
+        api_epoch = self._api(api_name).acquire()
+        return api_epoch, self._global.acquire()
+
+    def release(self, api_name: str, ticket: tuple[int, int], outcome: str) -> None:
+        """outcome 是 ok / failed / connection（连接超限）/ quota（接口配额超限）。"""
+        api_epoch, global_epoch = ticket
+        self._global.release(
+            global_epoch, {"ok": "ok", "connection": "throttled"}.get(outcome, "failed")
+        )
+        self._api(api_name).release(
+            api_epoch, {"ok": "ok", "quota": "throttled"}.get(outcome, "failed")
+        )
+
+
 def _httpx_transport(client: httpx.Client) -> Transport:
     def send(url: str, payload: dict, timeout: float) -> dict:
         response = client.post(url, json=payload, timeout=timeout)
@@ -171,7 +298,7 @@ def _httpx_transport(client: httpx.Client) -> Transport:
 class TushareClient:
     """一个 Tushare 接入点。可以多线程共用：httpx.Client 线程安全，限速器带锁。
 
-    并发调度归 DataSync 管，这里不自己开线程。实测代理最多 8 路，再多会返回 429 连接超限。
+    线程归 DataSync 开；同时在飞多少个请求，由这里的自适应并发（AdaptiveConcurrency）决定。
     """
 
     def __init__(
@@ -180,6 +307,7 @@ class TushareClient:
         transport: Transport | None = None,
         limiter: RateLimiter | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        concurrency: AdaptiveConcurrency | None = None,
     ):
         self._config = config
         self._own_client: httpx.Client | None = None
@@ -189,6 +317,11 @@ class TushareClient:
         self._transport = transport
         self._limiter = limiter if limiter is not None else RateLimiter()
         self._sleep = sleep
+        self._concurrency = concurrency if concurrency is not None else AdaptiveConcurrency()
+
+    @property
+    def concurrency(self) -> AdaptiveConcurrency:
+        return self._concurrency
 
     # ── 生命周期 ────────────────────────────────────────────────
     def close(self) -> None:
@@ -219,18 +352,29 @@ class TushareClient:
         rate_limit_left = len(RATE_LIMIT_BACKOFF)
         while True:
             self._limiter.acquire(api_name)
+            # 只在真正发请求时占并发名额；退避等待时让出来，收紧后的上限马上生效
+            ticket = self._concurrency.acquire(api_name)
+            outcome = "failed"
             try:
                 body = self._transport(self._config.base_url, payload, self._config.timeout)
+                result = self._parse(api_name, body)
+                outcome = "ok"
+                return result
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-                transport_left = self._wait_or_raise(
-                    api_name, exc, transport_left, TRANSPORT_BACKOFF
-                )
-                continue
-            try:
-                return self._parse(api_name, body)
+                failure: Exception = exc
             except TushareRateLimitError as exc:
+                outcome = exc.scope
+                failure = exc
+            finally:
+                # 权限、token 这类不重试的错误也从这里归还名额再往外抛
+                self._concurrency.release(api_name, ticket, outcome)
+            if isinstance(failure, TushareRateLimitError):
                 rate_limit_left = self._wait_or_raise(
-                    api_name, exc, rate_limit_left, RATE_LIMIT_BACKOFF
+                    api_name, failure, rate_limit_left, RATE_LIMIT_BACKOFF
+                )
+            else:
+                transport_left = self._wait_or_raise(
+                    api_name, failure, transport_left, TRANSPORT_BACKOFF
                 )
 
     def _wait_or_raise(
@@ -267,10 +411,17 @@ class TushareClient:
 
     @staticmethod
     def _classify(api_name: str, code: object, msg: str) -> TushareError:
-        # 先判频率再判权限：频率提示里也可能出现"访问"字样
+        # 先判频率再判 token 和权限：频率提示里也可能出现"访问"字样。错误码优先，关键词只作后备
         if str(code) in _RATE_LIMIT_CODES or any(hint in msg for hint in _RATE_LIMIT_HINTS):
-            return TushareRateLimitError(f"{api_name}: {msg}", api_name=api_name, code=code)
-        if any(hint in msg for hint in _PERMISSION_HINTS):
+            scope = (
+                "connection" if any(hint in msg for hint in _CONNECTION_LIMIT_HINTS) else "quota"
+            )
+            return TushareRateLimitError(
+                f"{api_name}: {msg}", api_name=api_name, code=code, scope=scope
+            )
+        if str(code) in _TOKEN_CODES or any(hint in msg for hint in _TOKEN_HINTS):
+            return TushareTokenError(f"{api_name}: {msg}", api_name=api_name, code=code)
+        if str(code) in _PERMISSION_CODES or any(hint in msg for hint in _PERMISSION_HINTS):
             return TushareAuthError(f"{api_name}: {msg}", api_name=api_name, code=code)
         return TushareError(f"{api_name}: code={code} msg={msg}", api_name=api_name, code=code)
 
@@ -338,7 +489,7 @@ class TushareClient:
         """试调一次，判断这个接口当前账号能不能用。
 
         返回 (可用, 不可用的原因)。只有权限/积分不足才算"不可用"；
-        网络错误、返回格式异常一律抛出，不静默降级成"没有这项数据"。
+        token 填错、网络错误、返回格式异常一律抛出，不静默降级成"没有这项数据"。
         """
         try:
             self.call_page(api_name, {**(params or {}), "limit": 1})

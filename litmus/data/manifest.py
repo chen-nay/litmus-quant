@@ -61,7 +61,6 @@ class Capability:
 @dataclass
 class Manifest:
     source: str = "tushare"
-    first_sync_done: bool = False
     updated_at: str = ""
     version: int = MANIFEST_VERSION
     months: dict[str, dict[str, MonthRecord]] = field(default_factory=dict)
@@ -84,9 +83,10 @@ class Manifest:
                 f"{store.manifest_path} 是第 {version} 版，当前程序用第 {MANIFEST_VERSION} 版；"
                 f"删掉 {store.market} 重新同步"
             )
+        # 老账本里的 first_sync_done 不再读：历史补没补完从日频月份推导（DataSync.status），
+        # 另存一个标记只会和文件对不上。只是少读一个字段，不用升版本，也不用重新同步
         return cls(
             source=raw["source"],
-            first_sync_done=raw["first_sync_done"],
             updated_at=raw["updated_at"],
             months={
                 dataset: {m: MonthRecord(**rec) for m, rec in recs.items()}

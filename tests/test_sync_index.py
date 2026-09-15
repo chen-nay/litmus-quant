@@ -1,9 +1,10 @@
-"""指数同步的测试：日线一次到位、成分按月拉、两张表落在 index/ 下。不联网。"""
+"""指数同步的测试：日线一次到位、成分按整月拉并按月记账、再次同步只补没走完的月份。不联网。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 from litmus.data.manifest import Manifest
@@ -11,13 +12,15 @@ from litmus.data.storage import MarketStore
 from litmus.data.sync import (
     BENCHMARK_INDEXES,
     INDEX_DAILY_TABLE,
-    INDEX_WEIGHT_TABLE,
+    INDEX_WEIGHT_DATASET,
     DataSync,
     SyncError,
     month_ranges,
+    month_window,
 )
 
 START, END = "20240101", "20240315"
+MONTHS = ("2024-01", "2024-02", "2024-03")
 
 
 def daily_rows(ts_code: str) -> list[dict]:
@@ -51,8 +54,11 @@ def weight_rows(index_code: str, start_date: str) -> list[dict]:
 
 
 class FakeClient:
-    def __init__(self, *, empty: set[str] | None = None):
+    def __init__(
+        self, *, empty: set[str] | None = None, missing: set[tuple[str, str]] | None = None
+    ):
         self.empty = empty or set()
+        self.missing = missing or set()  # (指数, 月份)：这个月还没有快照
         self.calls: list[tuple[str, dict, str | None]] = []
 
     def call(self, api_name: str, params: dict | None = None, fields: str | None = None):
@@ -63,11 +69,19 @@ class FakeClient:
         if api_name == "index_daily":
             return daily_rows(params["ts_code"])
         if api_name == "index_weight":
+            month = f"{params['start_date'][:4]}-{params['start_date'][4:6]}"
+            if (params["index_code"], month) in self.missing:
+                return []
             return weight_rows(params["index_code"], params["start_date"])
         raise AssertionError(f"测试没准备 {api_name}")
 
     def params_for(self, api_name: str) -> list[dict]:
         return [params for name, params, _ in self.calls if name == api_name]
+
+    def weight_months(self) -> set[str]:
+        return {
+            f"{p['start_date'][:4]}-{p['start_date'][4:6]}" for p in self.params_for("index_weight")
+        }
 
 
 @pytest.fixture
@@ -112,6 +126,11 @@ def test_不足一个月也有一个区间():
     assert month_ranges("20240110", "20240115") == [("20240110", "20240115")]
 
 
+def test_整月窗口():
+    assert month_window("2024-02") == ("20240201", "20240229")
+    assert month_window("2023-12") == ("20231201", "20231231")
+
+
 # ── 拉取方式 ────────────────────────────────────────────────────
 
 
@@ -127,14 +146,14 @@ def test_日线一个指数一次调用覆盖整个区间(store):
         assert params["end_date"] == END
 
 
-def test_成分按自然月拉(store):
-    """按月拉，一个月正好一页装得下，彻底不需要翻页。"""
+def test_成分按整月拉_不按区间裁剪(store):
+    """END 是 3 月 15 日，3 月也拉整月：月文件要么不存在，要么是整月。"""
     client = FakeClient()
     run(store, client)
 
     windows = client.params_for("index_weight")
-    assert len(windows) == len(BENCHMARK_INDEXES) * len(month_ranges(START, END))
-    assert {(w["start_date"], w["end_date"]) for w in windows} == set(month_ranges(START, END))
+    assert len(windows) == len(BENCHMARK_INDEXES) * len(MONTHS)
+    assert {(w["start_date"], w["end_date"]) for w in windows} == {month_window(m) for m in MONTHS}
 
 
 def test_两个宽基指数都拉(store):
@@ -148,27 +167,74 @@ def test_两个宽基指数都拉(store):
 # ── 落盘与记账 ──────────────────────────────────────────────────
 
 
-def test_两张表落在index目录下(store):
+def test_日线是整表_成分按月落盘(store):
     run(store, FakeClient())
 
-    for table in (INDEX_DAILY_TABLE, INDEX_WEIGHT_TABLE):
-        assert store.has_table(table)
-        assert store.table_path(table).is_relative_to(store.market / "index")
+    assert store.table_path(INDEX_DAILY_TABLE).is_relative_to(store.market / "index")
+    assert store.dataset_dir(INDEX_WEIGHT_DATASET).is_relative_to(store.market / "index")
+    assert store.months(INDEX_WEIGHT_DATASET) == MONTHS
 
 
 def test_所有月份的快照都留下来(store):
     """只留最新一期就没法还原当时的股票池了。"""
     run(store, FakeClient())
 
-    weights = store.read_table(INDEX_WEIGHT_TABLE)
-    assert weights.get_column("date").n_unique() == len(month_ranges(START, END))
+    weights = pl.concat(store.read_month(INDEX_WEIGHT_DATASET, m) for m in MONTHS)
+    assert weights.get_column("date").n_unique() == len(MONTHS)
+    assert set(weights.get_column("index_code")) == set(BENCHMARK_INDEXES)
+
+
+def test_最近两个月记为没走完(store):
+    """发布有滞后：8/31 的快照 9/13 才看得到，月末那期也可能下个月才发。"""
+    _, manifest = run(store, FakeClient())
+
+    assert manifest.month(INDEX_WEIGHT_DATASET, "2024-01").complete
+    assert not manifest.month(INDEX_WEIGHT_DATASET, "2024-02").complete
+    assert not manifest.month(INDEX_WEIGHT_DATASET, "2024-03").complete
 
 
 def test_记账里有备注(store):
     _, manifest = run(store, FakeClient())
 
     assert "000300.SH" in manifest.tables[INDEX_DAILY_TABLE].note
-    assert manifest.tables[INDEX_WEIGHT_TABLE].note == "月度快照"
+
+
+# ── 增量同步 ────────────────────────────────────────────────────
+
+
+def test_再次同步只拉没走完的月份(store):
+    run(store, FakeClient())
+    client = FakeClient()
+    run(store, client)
+
+    assert client.weight_months() == {"2024-02", "2024-03"}
+
+
+def test_月文件被删了会补回来(store):
+    run(store, FakeClient())
+    store.month_path(INDEX_WEIGHT_DATASET, "2024-01").unlink()
+    client = FakeClient()
+    run(store, client)
+
+    assert "2024-01" in client.weight_months()
+    assert store.has_month(INDEX_WEIGHT_DATASET, "2024-01")
+
+
+def test_本月还没发布就不写文件也不记账(store):
+    missing = {(code, "2024-03") for code in BENCHMARK_INDEXES}
+    _, manifest = run(store, FakeClient(missing=missing))
+
+    assert not store.has_month(INDEX_WEIGHT_DATASET, "2024-03")
+    assert manifest.month(INDEX_WEIGHT_DATASET, "2024-03") is None
+    assert store.has_month(INDEX_WEIGHT_DATASET, "2024-02")
+
+
+def test_早就该有快照的月份空了直接报错(store):
+    """实测 2016 年以来每个月两个指数都有快照；早的月份空了说明数据源出了问题，一个月都不写。"""
+    with pytest.raises(SyncError, match="2024-01"):
+        run(store, FakeClient(missing={("000905.SH", "2024-01")}))
+
+    assert store.months(INDEX_WEIGHT_DATASET) == ()
 
 
 def test_拉空了不覆盖已有的表(store):

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from litmus.data.__main__ import build_parser, load_env
+from litmus.data.__main__ import build_parser, load_env, main
 from litmus.data.manifest import Manifest
 from litmus.data.storage import MarketStore
 from litmus.data.sync import SYNC_STEPS, DataSync, SyncError
@@ -25,6 +25,10 @@ class RecordingSync(DataSync):
     def sync_industry(self, start, end, manifest=None):
         self.called.append("industry")
         return {"meta/sw_industry": 1}
+
+    def sync_concept(self, start, end, manifest=None):
+        self.called.append("concept")
+        return {"meta/tdx_concept": 1}
 
     def sync_index(self, start, end, manifest=None):
         self.called.append("index")
@@ -47,7 +51,7 @@ def store(tmp_path: Path) -> MarketStore:
 # ── 编排 ────────────────────────────────────────────────────────
 
 
-def test_默认跑全部五步(store):
+def test_默认跑全部步骤(store):
     sync = RecordingSync()
     sync.sync_all("20240101", "20240331", Manifest.load(store))
 
@@ -116,6 +120,17 @@ def test_可以指定区间与并发():
     assert (args.start, args.end, args.workers) == ("20240101", "20240331", 4)
 
 
+def test_status只打印状态不联网(tmp_path, monkeypatch, capsys):
+    def no_network(*args, **kwargs):
+        raise AssertionError("--status 不该连 Tushare")
+
+    monkeypatch.setattr("litmus.data.sync.TushareClient", no_network)
+    monkeypatch.setenv("LITMUS_DATA_DIR", str(tmp_path))
+
+    assert main(["--status"]) == 0
+    assert "还不能提问：还没有股票日频数据" in capsys.readouterr().out
+
+
 # ── .env 加载 ───────────────────────────────────────────────────
 
 
@@ -150,3 +165,45 @@ def os_environ(key: str) -> str | None:
     import os
 
     return os.environ.get(key)
+
+
+# ── 同步锁 ──────────────────────────────────────────────────────
+
+
+class DummyClient:
+    def __init__(self, config):
+        self.config = config
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return None
+
+
+def test_同一个数据目录同时只能有一个同步_结束后可以再开(tmp_path, monkeypatch):
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    monkeypatch.setattr("litmus.data.sync.TushareClient", DummyClient)
+    store = MarketStore(tmp_path)
+
+    with DataSync.open(store) as sync:
+        assert isinstance(sync, DataSync)
+        with pytest.raises(SyncError, match="另一个同步"):
+            with DataSync.open(store):
+                pass
+    with DataSync.open(store):
+        pass
+
+
+def test_没配token时打开同步器报错_锁也放掉(tmp_path, monkeypatch):
+    from litmus.data import TushareError
+
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+    monkeypatch.setattr("litmus.data.sync.TushareClient", DummyClient)
+    store = MarketStore(tmp_path)
+    with pytest.raises(TushareError, match="TUSHARE_TOKEN"):
+        with DataSync.open(store):
+            pass
+    monkeypatch.setenv("TUSHARE_TOKEN", "test-token")
+    with DataSync.open(store):
+        pass
