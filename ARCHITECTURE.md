@@ -118,7 +118,7 @@ layers = [
 
 | 模块 | 对外暴露 |
 |---|---|
-| data | `DataService`：`ds.get_fields()` / `ds.get_trading_calendar()` / `ds.latest_trading_day()` / `ds.data_range()` / `ds.available_targets()` / `ds.stock_info()` / `ds.get_index_daily()` / `ds.get_universe()` / `ds.get_universe_mask()` / `ds.list_boards()` / `ds.board_members()` / `ds.concept_snapshot_date()` / `ds.resolve_stock()` / `ds.resolve_board()`（第 7 步）；`DataSync`：`open()`（按环境变量连上 Tushare，拿到数据目录的同步锁）/ `sync_all()` / `status()`（本地数据状态、能否提问）；字段目录 `data.FIELDS` |
+| data | `DataService`：`ds.get_fields()` / `ds.get_trading_calendar()` / `ds.latest_trading_day()` / `ds.data_range()` / `ds.available_targets()` / `ds.stock_info()` / `ds.get_index_daily()` / `ds.get_universe()` / `ds.get_universe_mask()` / `ds.list_boards()` / `ds.board_members()` / `ds.concept_snapshot_date()` / `ds.get_kline()` / `ds.resolve_stock()` / `ds.resolve_board()`（第 7 步）；`DataSync`：`open()`（按环境变量连上 Tushare，拿到数据目录的同步锁）/ `sync_all()` / `status()`（本地数据状态、能否提问）；字段目录 `data.FIELDS` |
 | spec | `spec.QuerySpec`（三种形状）、`spec.DEFAULTS`（默认值表）、`spec.render_assumptions()`（由 spec 生成确认卡说明） |
 | expr | `expr.parse()` / `expr.validate()` / `expr.collect_fields()` / `expr.collect_lookback()` / `expr.evaluate()`（返回结果与实际统计起点）；`expr.field_catalog()` / `expr.operator_catalog()`（供 llm 组装提示词） |
 | signals | `signals.load_events()` / `signals.render_event()` / `signals.event_catalog()`（事件库） |
@@ -174,7 +174,7 @@ api ──→ store.save_run(spec, result) → 返回 {run_id, result}
 
 | 层 | 选型 | 理由 |
 |---|---|---|
-| 前端 | React + Vite + ECharts | ECharts 对 K 线和 A 股红涨绿跌配色支持最好 |
+| 前端 | React + TypeScript + Vite + Ant Design + ECharts | ECharts 对 K 线和 A 股红涨绿跌配色支持最好；Ant Design 的表格、表单、日期选择、中文界面现成（2026-09-15 定） |
 | 后端 | FastAPI + Pydantic v2 | Pydantic 同时用于 API 校验和 LLM 输出 schema，一套定义两处复用 |
 | 计算 | Polars | 面板数据操作比 pandas 快数倍、内存占用低 |
 | 行情存储 | Parquet + DuckDB | 列式存储 + SQL 直查，用户可自行探索数据 |
@@ -931,6 +931,7 @@ def evaluate(expr: str, purpose: str, universe: pl.DataFrame, start: date, end: 
 **类型只收明确的写法**（2026-09-14 定）：pydantic 默认会把整数当时间戳转成日期、`true` 当成 1、`"5"` 当成 5，
 写错的值会悄悄变成另一个意思。所以日期只收 `YYYY-MM-DD`；整数不收布尔值、字符串和带小数的数（`50.0` 照收，和事件参数一致）；
 成本不收布尔值、字符串、NaN、无穷大。前端要把输入框里的文字转成数值、日期格式化成 `YYYY-MM-DD` 再发。
+`sort.label` 可选，是排序值那一列在结果页上的名称（如「放大倍数」），第 6 步的表单里填、第 7 步由大模型填。
 spec 只查结构，表达式对不对由 `expr.validate()` 管。`target.code` 可以为空（大模型的输出），研究计算时必须有
 
 ### 4.2 股票表与板块表
@@ -1327,8 +1328,17 @@ GET  /api/events
   说明：事件库列表（供 UI 标签与示例展示），和生成表达式用的是同一份定义
 
 GET  /api/boards?type=sw_industry|concept
-  resp: { "type": "...", "boards": [{ "code", "name" }] }
-  说明：可用板块清单。type 写错返回 400；概念板块不可用返回 409 和原因
+  resp: { "type": "...", "range": ["2025-03-28", "2026-09-14"], "boards": [{ "code", "name" }] }
+  说明：可用板块清单和板块数据的可用区间（页面上要标出口径和区间，§2.7）。type 写错返回 400；概念板块不可用返回 409 和原因
+
+GET  /api/fields
+  resp: { "fields": { "stock": [...], "sw_industry": [...], "concept": [...] } }
+  说明：字段的写法、中文名、单位、说明。结果表的列名、表单里的字段参考都用它，和给大模型的是同一份（expr.field_catalog）
+
+GET  /api/stocks/{code}/kline?from=YYYY-MM-DD&to=YYYY-MM-DD
+  resp: { "code", "name", "adjust": "前复权", "base_date", "range", "rows": [{ date, open, high, low, close,
+          open_raw, high_raw, low_raw, close_raw, amount, pct_chg }] }
+  说明：个股回看页的 K 线。超出本地数据的部分自动裁掉；参数写错 400，没有这只股票 404
 
 POST /api/data/sync
   resp: { "started": true|false, "sync": 同步进度 }
@@ -1358,8 +1368,17 @@ GET  /api/data/status
 - 运行记录成功、失败都存；`needs_revision`、`data_not_ready` 不存
 - 第 7 步之前 `target.code` 要直接填代码（带交易所后缀，如 `600519.SH`）
 
+**K 线的价格口径：前复权**（2026-09-15 定）。前复权 = 后复权价 ÷ 这只股票本地最后一个交易日的复权因子：
+- 最新价就是真实价格，和行情软件默认一致；后复权的茅台是 11049 元，用户会以为数据错了
+- 整段价格只差一个固定倍数，任何一段的涨跌幅都和后复权一样——个股回看的收益是后复权算的，图和表对得上。
+  不复权会在除权日画出假暴跌（000034.SZ 2026-05-19 送转：真实收盘 41.57 → 30.96，当天实际涨 4.45%）
+- 本地存了复权因子，前复权和真实价都能精确算出（实测「后复权 ÷ 当天复权因子」和真实收盘价误差在 1e-13 以内），不用重新同步
+- 代价：同步了新数据、期间又除权的话，整张图的价格数字整体变一点，形状和涨跌幅不变
+- 悬停时同时给当天真实成交价；量柱用成交额——成交量随复权调整过，画出来会失真
+
 **启动**：`uv run python -m litmus serve`，读仓库根目录的 `.env`，默认只监听 `127.0.0.1:8000`——接口没有登录，
-不对局域网开放。前端开发服务器的跨域第 6 步再配。
+不对局域网开放。前端开发时另开一个终端：`npm --prefix web ci`（第一次）、`npm --prefix web run dev`，打开
+http://127.0.0.1:5173。Vite 把 `/api` 转给 8000 端口，页面和接口同源，不用配跨域；打包成一个服务放到第 8 步。
 
 **用 curl 验收**（`tests/contract/test_run_api.py` 用的是同样的请求）：
 
@@ -1487,7 +1506,17 @@ litmus/
 ├── __main__.py             # python -m litmus
 └── cli.py                  # litmus serve；同步的开发调试入口是 python -m litmus.data
 
-web/                        # React 前端
+web/                        # React 前端（第 6 步）
+├── vite.config.ts          # 开发时把 /api 转给后端
+└── src/
+    ├── api.ts / types.ts   # 调接口、接口类型
+    ├── format.ts           # 数字怎么显示：三种单位（百分数、小数、基点）、亿 / 万、红涨绿跌
+    ├── specForm.ts         # 表单 → 查询条件；接口返回的问题 → 对应输入框
+    ├── specSummary.ts      # 结果页顶部的条件说明
+    ├── kline.ts            # K 线图配置
+    ├── context.tsx         # 数据状态（同步中 3 秒刷新）、清单（事件、字段、板块）
+    ├── pages/              # 查询页、同步页、结果页 /runs/<运行编号>
+    └── components/         # 三张表单、两种结果、K 线图、状态条
 tests/
 ├── contract/               # 契约测试：test_dataservice.py / test_store.py
 ├── fixtures/               # 合成数据集与生成脚本（推迟，见 §11）
@@ -1512,7 +1541,7 @@ Makefile
 | 3 | spec（三种形状 + 默认值表）+ research：股票表、板块表、个股回看 | 手工核对若干笔"之后 N 天涨跌"，含顺延与扣成本 |
 | 4 | signals：事件库 15 条 | TOML 加载，全部参数组合校验通过，都能跑出回看结果 |
 | 5 | store（JSON）+ FastAPI：`/api/run`（先不接 LLM，直接传 QuerySpec）、`/api/run/{run_id}`、`/api/events`、`/api/boards` + `/api/data/sync`、`/api/data/sync/stop`、`/api/data/status` | curl 能跑出三种结果（§6，`tests/contract/test_run_api.py` 用同样的请求）；能触发同步、查看进度、停止（离线用假同步器测；2026-09-14 经接口真实同步一次，从 09-11 补到 09-14，6 分 5 秒） |
-| 6 | 前端：同步页 + 三种结果页 | 页面上能完成同步，并看到三种结果 |
+| 6 | 前端：同步页 + 查询表单（第 7 步之前直接填条件）+ 三种结果页（个股回看带前复权 K 线） | 页面上能完成同步，并看到三种结果。浏览器里用本地真实数据跑三种结果，数据量小；页面上真实同步一次之前先确认 |
 | 7 | `llm.plan()` + prompt 管理 + `ds.resolve_stock()` / `ds.resolve_board()` + 确认卡 / 澄清卡（说明文字由模板生成） | 自然语言能正确生成三种形状；编造字段被拦截；"平安"返回多个候选；"最近哪个板块最强"先澄清；"现在能买茅台吗"给改写建议；改完参数说明文字跟着变 |
 | 8 | Docker 打包 | 全新环境按 README 能完成部署、同步并正常使用 |
 
@@ -1540,6 +1569,8 @@ def test_mean():
 | 同步锁与后台同步 | 离线：同一个数据目录同时只能开一个同步，结束或打开失败后锁会放掉；假同步器上按顺序跑完、同一时间一个、月份之间停下、最后一个月落盘后才点停止算完成、出错停下并记原因、概念板块出错接着跑后面的步骤、没配 token 打不开（`tests/test_sync_all.py`、`tests/test_sync_job.py`） |
 | store 契约 | 存了能原样取回；编号格式、同一秒不撞；非法编号读不到别的文件；一条记录一个文件、不留临时文件；存不进 JSON 的不留文件（`tests/contract/test_store.py`） |
 | api | TestClient + 替身：请求体写错返回 `needs_revision` 而不是 422；结构、事件有问题时不读数据；中文说明、栏目路径、可选范围；计算出错存失败记录并返回编号；同步启动、不重复开、停止、查进度（`tests/test_api.py`）。本地真实数据上跑三种结果，数据量都很小（`tests/contract/test_run_api.py`） |
+| K 线 | 本地真实数据：基准日前复权价等于真实价、涨跌幅和后复权一样、送转当天真实价断崖而前复权连续、还没上市返回空表；接口参数写错 400、没有这只股票 404（`tests/contract/test_kline.py`） |
+| 前端 | `make web`（接入 `make ready`）：类型检查 + 单元测试 + 构建。单元测试覆盖最容易出错的纯逻辑——三种单位的显示、红涨绿跌、列名、表单转查询条件（日期格式、文字转数值）、问题对到输入框、K 线配置（开收低高顺序、触发标记、高亮范围）。页面本身在浏览器里手工验收 |
 | validator | 未来函数必须被拦截：`Ref($close, -1)` 应抛错；字段不在白名单、能力不可用时报错 |
 | collector | lookback 推导：并列取最大、嵌套累加、EMA 按 4n |
 | operators | 每个算子用小表格验证，特别是 `Cross` 的边界和 `Rank` 的空值处理 |

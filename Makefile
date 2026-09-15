@@ -11,9 +11,10 @@
 # 用法：
 #   make check                            开发中：检查写法与模块依赖 + 跑全部离线测试
 #   make check TESTS=tests/test_sync.py   开发中：只跑指定的测试文件，更快
-#   make ready                            提交前：格式化改过的文件 + 检查 + 全部离线测试
+#   make web                              开发中：前端类型检查 + 单元测试 + 构建
+#   make ready                            提交前：格式化改过的文件 + 检查 + 全部离线测试 + 前端检查
 
-.PHONY: check ready
+.PHONY: check ready web
 
 # 这两个测试文件要连 Tushare，平时不跑
 OFFLINE = --ignore=tests/test_tushare_live.py --ignore=tests/test_panel_live.py
@@ -35,3 +36,9 @@ ready:
 	uv run ruff check litmus tests
 	uv run lint-imports
 	uv run pytest -q $(OFFLINE) tests
+	@$(MAKE) --no-print-directory web
+
+# 前端：类型检查 + 单元测试 + 构建。第一次先按 package-lock.json 装依赖（npm ci 不改版本）
+web:
+	@test -d web/node_modules || npm --prefix web ci
+	npm --prefix web run check
