@@ -79,7 +79,10 @@ OUTPUT_SCHEMA: dict[str, Any] = {
         "universe_base": {"type": "string", "enum": ["all_a", "hs300", "zz500"]},
         "industry": _STR,
         "board_mention": _STR,
-        "board_guess": _STR,
+        "board_guess": {
+            "type": "string",
+            "description": "猜的通达信概念板块名，拿不准可以写 2~3 个，用「、」隔开",
+        },
         "stock_mention": _STR,
         "stock_guess": _STR,
         "event_id": _STR,

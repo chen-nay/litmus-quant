@@ -135,6 +135,15 @@ def test_小市值_没给数字按默认30亿_标成默认值(ask):
     assert "总市值 < 30 亿" in row["text"] and row["default"], row
 
 
+def test_外号对不上的概念板块_能用上或者从候选里选(ask):
+    """2026-09-15 实测：「光模块」查不到时只回一句接口地址，本地其实有「光通信」「CPO概念」。"""
+    body = ask("光模块概念里最近 20 个交易日涨幅最大的股票")
+    if body["status"] == "ok":
+        assert body["spec"]["universe"]["board"]["code"], body
+    else:
+        assert body["status"] == "needs_clarification" and body["board_candidates"], body
+
+
 def test_个股回看_没说的栏目用默认值并标出来(ask):
     body = ask(HISTORY)
     assert body["status"] == "ok", body

@@ -13,8 +13,10 @@ from litmus.data.resolve import (
     NAME,
     ORDERED,
     PINYIN,
+    SIMILAR,
     match_boards,
     match_stocks,
+    similar_boards,
 )
 
 BASIC = pl.DataFrame(
@@ -124,3 +126,14 @@ def test_板块_名称一致排前面_同一级申万排在概念前面():
 def test_板块_代码_外号查不到():
     assert boards("880728.tdx") == [("880728.TDX", CODE)]
     assert boards("光模块") == []  # 通达信叫「光通信」：要靠大模型给猜测名
+
+
+def test_板块_查不到时给名字相近的_共有的字多的排前面():
+    def similar(text: str) -> list[tuple[str, int]]:
+        return [(match.code, match.rule) for match in similar_boards(text, BOARDS)]
+
+    assert similar("光模块") == [("880500.TDX", SIMILAR)]  # 共有「光」
+    # 5 个字至少共有 2 个：存储芯片共有 4 个、芯片 2 个
+    assert similar("芯片存储器") == [("880501.TDX", SIMILAR), ("880502.TDX", SIMILAR)]
+    assert similar("电子烟草概念") == [("880503.TDX", SIMILAR), ("801080.SI", SIMILAR)]
+    assert similar("黄金") == []

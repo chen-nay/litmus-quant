@@ -30,7 +30,7 @@
 - 「前一周平均」这类不含当天的均值写成 Mean(Ref(x, 1), 5)。
 - 「最近 N 个交易日涨了多少」写成 Pct($close, N)：和 N 个交易日前的收盘价比，正好包含这 N 天每天的涨跌。不要写成 N-1。
 - **股票不要填代码**：stock_mention 填用户原话（如「茅台」），stock_guess 填你猜的全称（如「贵州茅台」）。
-- **概念板块不要填代码**：选股时限定概念板块，board_mention 填用户原话，board_guess 填你猜的通达信概念板块名。
+- **概念板块不要填代码**：选股时限定概念板块，board_mention 填用户原话，board_guess 填你猜的通达信概念板块名，拿不准可以写 2~3 个，用「、」隔开。
   申万行业从下面的行业清单里选名字：选股时限定行业填 industry，问板块排行用 board_type=sw_industry。
 - 个股回看填 event_id 和 event_params。参数只能在可选范围里；用户没说的参数不填。
 - filter_label、sort_label 用几个字概括，比如「涨幅超过 9%」「放大倍数」。

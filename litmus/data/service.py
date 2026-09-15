@@ -36,7 +36,13 @@ from litmus.data.fields import (
     check_available,
 )
 from litmus.data.manifest import Manifest
-from litmus.data.resolve import BoardMatch, StockMatch, match_boards, match_stocks
+from litmus.data.resolve import (
+    BoardMatch,
+    StockMatch,
+    match_boards,
+    match_stocks,
+    similar_boards,
+)
 from litmus.data.storage import MarketStore, MissingDataError
 from litmus.data.sync import (
     BENCHMARK_INDEXES,
@@ -551,6 +557,11 @@ class DataService:
             raise ValueError(f"不认识的板块类型 {board_type!r}，可选 sw_industry、concept")
         boards = [(b.code, b.name, b.board_type) for kind in kinds for b in self.list_boards(kind)]
         return match_boards(text, boards)
+
+    def similar_boards(self, text: str, board_type: str) -> list[BoardMatch]:
+        """resolve_board 查不到时，名字相近的板块，最多 10 个（规则见 resolve.similar_boards）。"""
+        boards = [(b.code, b.name, b.board_type) for b in self.list_boards(board_type)]
+        return similar_boards(text, boards)
 
     def concept_snapshot_date(self) -> date:
         """概念板块清单与成分的快照日。P0 概念板块只有这一天的成分（§2.7），需要能力可用。"""

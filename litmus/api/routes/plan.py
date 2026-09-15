@@ -3,8 +3,9 @@
 1. 本地数据不够 → data_not_ready，不调大模型
 2. 大模型没配好 → failed，说明缺什么
 3. llm.plan()：大模型填查询条件草稿；表达式、事件、结构不对时带着问题重试一次（防线②）
-4. 防线③：股票、概念板块按原话查代码，原话查不到再用大模型猜的名字查。只有一个、或者只有一个代码 / 名称完全一致的，
-   直接用；没找到、对应多个都转成澄清让用户选。再过和 /api/check 同一套检查，不过也转成澄清
+4. 防线③：股票、概念板块按原话查代码，原话查不到再用大模型猜的名字查（可以猜几个，用「、」隔开）。
+   只有一个、或者只有一个代码 / 名称完全一致的，直接用；对应多个转成澄清让用户选；概念板块都查不到时
+   列出名字相近的让用户选。再过和 /api/check 同一套检查，不过也转成澄清
 5. 生成说明文字（带上原话里的说法），存下这次提问 → plan_id。确认卡上检查、运行时带上 plan_id，
    没改过的栏目继续用原话的说法（explain.plan_mentions）
 6. 追问：把 previous_plan_id 带回来，这次说的话当成对追问的回答
@@ -13,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 
 from fastapi import APIRouter, HTTPException, Request
@@ -28,6 +30,7 @@ from litmus.data import (
     STOCK,
     SW_INDUSTRY,
     BoardMatch,
+    DataService,
     DataStatus,
     MissingDataError,
     StockMatch,
@@ -169,7 +172,7 @@ def _respond(result: PlanResult, services: Services) -> PlanResponse:
     if result.board is not None:
         boards = _decisive(_lookup(lambda text: ds.resolve_board(text, CONCEPT), result.board))
         if len(boards) != 1:
-            return _choose_board(spec, result.board, boards)
+            return _choose_board(spec, result.board, boards, ds)
         spec["universe"] = {
             **(spec.get("universe") or {}),
             "board": {"type": "concept", "code": boards[0].code},
@@ -195,11 +198,16 @@ def _respond(result: PlanResult, services: Services) -> PlanResponse:
 
 
 def _lookup(resolve, name: NameMention) -> list:
-    """先按原话查，查不到再按大模型猜的名字查（外号：通达信没有「光模块」，叫「光通信」）。"""
+    """先按原话查，查不到再按大模型猜的名字查（外号：通达信没有「光模块」，叫「光通信」「CPO概念」）。
+    猜测名可以有几个，用「、」隔开，查到的合在一起。"""
     matches = resolve(name.mention)
-    if not matches and name.guess:
-        matches = resolve(name.guess)
-    return matches
+    if matches or not name.guess:
+        return matches
+    found: dict[str, object] = {}
+    for guess in re.split(r"[、,，]", name.guess):
+        for match in resolve(guess.strip()) if guess.strip() else []:
+            found.setdefault(match.code, match)
+    return list(found.values())
 
 
 def _decisive(matches: list) -> list:
@@ -224,16 +232,26 @@ def _choose_stock(spec: dict, name: NameMention, matches: list[StockMatch]) -> P
     return PlanResponse(status=CLARIFY, spec=spec, message=message, stock_candidates=candidates)
 
 
-def _choose_board(spec: dict, name: NameMention, boards: list[BoardMatch]) -> PlanResponse:
-    if not boards:
-        message = f"没找到「{name.mention}」这个概念板块，可选的见 /api/boards?type=concept"
+def _choose_board(
+    spec: dict, name: NameMention, boards: list[BoardMatch], ds: DataService
+) -> PlanResponse:
+    if boards:
+        message = f"「{name.mention}」对应 {len(boards)} 个概念板块，选一个"
+        candidates = _board_candidates(boards, "通达信概念板块")
+        return PlanResponse(status=CLARIFY, spec=spec, message=message, board_candidates=candidates)
+    similar = ds.similar_boards(name.mention, CONCEPT)
+    if not similar:
+        message = f"没找到「{name.mention}」这个概念板块：换个说法，或者打开表单在概念板块里选"
         return PlanResponse(status=CLARIFY, spec=spec, message=message)
-    candidates = [
-        Candidate(code=board.code, name=board.name, note="通达信概念板块")
-        for board in boards[:MAX_CANDIDATES]
-    ]
-    message = f"「{name.mention}」对应 {len(boards)} 个概念板块，选一个"
+    message = f"没找到叫「{name.mention}」的概念板块，下面几个名字相近，选一个；都不是就换个说法"
+    candidates = _board_candidates(similar, "名字相近")
     return PlanResponse(status=CLARIFY, spec=spec, message=message, board_candidates=candidates)
+
+
+def _board_candidates(boards: list[BoardMatch], note: str) -> list[Candidate]:
+    return [
+        Candidate(code=board.code, name=board.name, note=note) for board in boards[:MAX_CANDIDATES]
+    ]
 
 
 def _llm_missing() -> str:

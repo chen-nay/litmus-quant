@@ -14,7 +14,8 @@
 
 板块按代码、名称一致、名称包含、字按顺序出现查，不做拼音（概念板块清单没有拼音列，概念名也很少有人用拼音缩写）。
 「银行板块」「航运概念」这类说法去掉后缀再查一遍，取两次里更好的一级。外号对不上的（通达信没有「光模块」，
-叫「光通信」）由大模型给猜测名再查，这里不猜。
+叫「光通信」「CPO概念」）由大模型给猜测名再查，这里不猜。原话和猜测名都查不到时，similar_boards 按共有的字
+给几个名字相近的让用户选，不只回一句「没找到」。
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ from dataclasses import dataclass
 import polars as pl
 
 CODE, NAME, CONTAINS, PINYIN, FORMER, ORDERED = 1, 2, 3, 4, 5, 6
+#: 只用于板块：查不到时名字相近的
+SIMILAR = 7
 
 RULE_LABELS = {
     CODE: "代码",
@@ -35,7 +38,11 @@ RULE_LABELS = {
     PINYIN: "拼音首字母",
     FORMER: "曾用名",
     ORDERED: "简称",
+    SIMILAR: "名字相近",
 }
+
+#: 名字相近的板块最多给几个
+MAX_SIMILAR = 10
 
 _SYMBOL = re.compile(r"\d{6}")
 _BOARD_SUFFIXES = ("概念股", "概念", "板块", "行业")
@@ -144,16 +151,38 @@ def _board_rule(query: str, code: str, name: str) -> int | None:
 def match_boards(text: str, boards: Iterable[tuple[str, str, str]]) -> list[BoardMatch]:
     """boards：(code, name, board_type)。同一级里申万行业排在概念板块前面。"""
     query = normalize(text)
-    queries = [query]
-    for suffix in _BOARD_SUFFIXES:
-        if query.endswith(suffix) and len(query) > len(suffix):
-            queries.append(query[: -len(suffix)])
-            break
     if not query:
         return []
+    queries = list(dict.fromkeys([query, _strip_suffix(query)]))
     found = []
     for code, name, board_type in boards:
         rules = [rule for q in queries if (rule := _board_rule(q, code, name)) is not None]
         if rules:
             found.append(BoardMatch(code, name, board_type, min(rules)))
     return sorted(found, key=lambda m: (m.rule, m.board_type != "sw_industry", m.code))
+
+
+def similar_boards(text: str, boards: Iterable[tuple[str, str, str]]) -> list[BoardMatch]:
+    """原话和猜测名都查不到时，名字相近的板块：去掉后缀后和原话共有的字越多越靠前，至少共有一半的字（最少 1 个）。
+
+    「光模块」→ 光通信、光伏……让用户自己挑，比只回一句「没找到」好用（2026-09-15 实测本地有「光通信」「CPO概念」）。
+    """
+    chars = set(_strip_suffix(normalize(text)))
+    if not chars:
+        return []
+    need = max(1, len(chars) // 2)
+    scored = []
+    for code, name, board_type in boards:
+        shared = len(chars & set(_strip_suffix(normalize(name))))
+        if shared >= need:
+            scored.append(((-shared, board_type != "sw_industry", code), code, name, board_type))
+    scored.sort(key=lambda item: item[0])
+    return [BoardMatch(code, name, kind, SIMILAR) for _, code, name, kind in scored[:MAX_SIMILAR]]
+
+
+def _strip_suffix(query: str) -> str:
+    """「银行板块」→ 银行，「航运概念」→ 航运。只剩后缀本身时不去。"""
+    for suffix in _BOARD_SUFFIXES:
+        if query.endswith(suffix) and len(query) > len(suffix):
+            return query[: -len(suffix)]
+    return query

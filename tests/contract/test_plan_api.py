@@ -146,6 +146,26 @@ def test_选股限定概念板块_原话查不到用猜的名字(client, llm):
     assert body["spec"]["universe"]["board"]["code"] == board.code
 
 
+def test_概念板块猜了几个名字_都对得上就让用户选(client, llm):
+    if CONCEPT not in _ds.available_targets():
+        pytest.skip("概念板块不可用")
+    output = {**STOCK_LIST, "board_mention": "光模块", "board_guess": "光通信、CPO概念"}
+    body = ask(client, llm, output)
+    assert body["status"] == "needs_clarification", body
+    assert {"光通信", "CPO概念"} <= {c["name"] for c in body["board_candidates"]}
+
+
+def test_概念板块原话和猜测名都查不到_列出名字相近的让用户选(client, llm):
+    if CONCEPT not in _ds.available_targets():
+        pytest.skip("概念板块不可用")
+    output = {**STOCK_LIST, "board_mention": "光模块", "board_guess": "没有这个板块"}
+    body = ask(client, llm, output)
+    assert body["status"] == "needs_clarification", body
+    assert body["message"].startswith("没找到叫「光模块」的概念板块")
+    assert "光通信" in {c["name"] for c in body["board_candidates"]}
+    assert "/api/" not in body["message"]
+
+
 def test_澄清之后追问_把原问题和回答一起交给大模型(client, llm):
     question = {"question": "「最近」指多久？", "options": ["5 个交易日", "20 个交易日"]}
     first = ask(
