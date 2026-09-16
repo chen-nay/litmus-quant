@@ -205,6 +205,64 @@ def test_概念板块原话和猜测名都查不到_列出名字相近的让用�
     assert "打开表单" in body["message"] and "/api/" not in body["message"]
 
 
+def test_确认卡上改条件_把现在的条件交给大模型_选过的概念板块不会丢(client, llm):
+    """2026-09-16 加：改条件走追问那条路会从原话重新生成，「光模块」又变回一堆候选让人重选。"""
+    if CONCEPT not in _ds.available_targets():
+        pytest.skip("概念板块不可用")
+    board = next(b for b in _ds.list_boards(CONCEPT) if b.name == "光通信")
+    first = ask(
+        client,
+        llm,
+        {**STOCK_LIST, "board_mention": "光模块", "board_guess": "光通信"},
+        query="光模块里最近放量的股票",
+    )
+    assert first["status"] == "ok", first
+
+    # 大模型照抄板块代码、只改取前几名
+    second = ask(
+        client,
+        llm,
+        {**STOCK_LIST, "limit": 5, "board_code": board.code},
+        query="改成前 5",
+        previous_plan_id=first["plan_id"],
+        spec=first["spec"],
+    )
+    assert second["status"] == "ok", second
+    assert second["spec"]["universe"]["board"]["code"] == board.code
+    assert second["spec"]["limit"] == 5
+    # 照抄的代码不是用户原话，确认卡上不写「「884xxx.TI」理解为：光通信」
+    assert board.code not in "".join(item["text"] for item in second["assumptions"])
+
+    message = llm.calls[-1]
+    assert "现在的条件：" in message and board.code in message
+    assert "用户要改的地方：\n改成前 5" in message
+    assert "光模块里最近放量的股票" not in message
+
+
+def test_确认卡上改条件_股票照抄代码_确认卡上不写成原话(client, llm):
+    first = ask(client, llm, HISTORY, query="茅台放量突破年线之后怎样")
+    assert first["status"] == "ok", first
+    assert texts(first)["target"].startswith("「茅台」理解为")
+
+    code = first["spec"]["target"]["code"]
+    output = {key: value for key, value in HISTORY.items() if not key.startswith("stock_")}
+    second = ask(
+        client,
+        llm,
+        {**output, "stock_code": code, "horizons": [5, 10], "mentions": []},
+        query="看 5 天和 10 天",
+        previous_plan_id=first["plan_id"],
+        spec=first["spec"],
+    )
+    assert second["status"] == "ok", second
+    assert second["spec"]["target"]["code"] == code
+    assert second["spec"]["horizons"] == [5, 10]
+    # 照抄的代码不是用户原话：确认卡上写「股票：贵州茅台（600519.SH）」，不写「「600519.SH」理解为……」
+    assert "理解为" not in texts(second)["target"]
+    # 交给大模型的条件里股票只留代码：2026-09-16 实测留着 mention 它就照抄，于是又按名字重查一遍
+    assert code in llm.calls[-1] and "茅台" not in llm.calls[-1]
+
+
 def test_澄清之后追问_把原问题和回答一起交给大模型(client, llm):
     question = {"question": "「最近」指多久？", "options": ["5 个交易日", "20 个交易日"]}
     first = ask(

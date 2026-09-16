@@ -9,6 +9,8 @@
 5. 生成说明文字（带上原话里的说法），存下这次提问 → plan_id。确认卡上检查、运行时带上 plan_id，
    没改过的栏目继续用原话的说法（explain.plan_mentions）
 6. 追问：把 previous_plan_id 带回来，这次说的话当成对追问的回答
+7. 确认卡上用一句话改条件：把 spec（现在的条件）一起带回来，这次说的话当成「要改哪里」。
+   大模型在这份条件上改，不从原话重新生成——之前选过的候选、表单上改过的不会丢（2026-09-16 加）
 """
 
 from __future__ import annotations
@@ -64,8 +66,9 @@ MAX_CANDIDATES = 20
 
 @router.post("/api/plan")
 async def post_plan(request: Request) -> PlanResponse:
-    """body：{"query": "昨天哪个股票成交量明显放大？", "previous_plan_id": "..."}，回答追问时带 previous_plan_id。
+    """body：{"query": "...", "previous_plan_id": "...", "spec": {...}}。
 
+    回答追问时带 previous_plan_id；确认卡上改条件时再带一个 spec（现在的条件），这次说的话当成要改哪里。
     大模型带思考，一次十几到几十秒（§5.1）。请求体写错返回 400。"""
     try:
         body = json.loads(await request.body())
@@ -73,20 +76,27 @@ async def post_plan(request: Request) -> PlanResponse:
         raise HTTPException(status_code=400, detail='请求体要是 JSON，如 {"query": "..."}') from exc
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail='请求体要是一个对象，如 {"query": "..."}')
-    unknown = sorted(set(body) - {"query", "previous_plan_id"})
+    unknown = sorted(set(body) - {"query", "previous_plan_id", "spec"})
     if unknown:
         raise HTTPException(status_code=400, detail=f"不认识的栏目：{'、'.join(unknown)}")
-    query, previous = body.get("query"), body.get("previous_plan_id")
+    query, previous, spec = body.get("query"), body.get("previous_plan_id"), body.get("spec")
     if not isinstance(query, str) or not query.strip():
         raise HTTPException(status_code=400, detail="query 要填问题")
     if len(query) > MAX_QUERY:
         raise HTTPException(status_code=400, detail=f"问题太长了，最多 {MAX_QUERY} 个字")
     if previous is not None and not isinstance(previous, str):
         raise HTTPException(status_code=400, detail="previous_plan_id 要是文字")
-    return await run_in_threadpool(make_plan, query.strip(), previous, services_of(request))
+    if spec is not None and not isinstance(spec, dict):
+        raise HTTPException(status_code=400, detail="spec 要是一个对象，就是确认卡上现在的条件")
+    return await run_in_threadpool(make_plan, query.strip(), previous, services_of(request), spec)
 
 
-def make_plan(query: str, previous_plan_id: str | None, services: Services) -> PlanResponse:
+def make_plan(
+    query: str,
+    previous_plan_id: str | None,
+    services: Services,
+    spec: dict[str, object] | None = None,
+) -> PlanResponse:
     status = services.data_status()
     if not status.ready:
         return PlanResponse(
@@ -95,20 +105,23 @@ def make_plan(query: str, previous_plan_id: str | None, services: Services) -> P
     if services.llm is None:
         return PlanResponse(status="failed", message=_llm_missing())
 
-    previous = None
+    previous, before = None, None
     if previous_plan_id:
         record = services.store.get_plan(previous_plan_id)
         if record is None:
             return PlanResponse(
                 status="failed", message=f"没有编号为 {previous_plan_id} 的提问记录"
             )
-        previous = PreviousTurn(
-            str(record.detail.get("question") or record.query),
-            tuple(
-                Question(str(item["question"]), tuple(item["options"]))
-                for item in record.detail.get("questions", [])
-            ),
-        )
+        before = str(record.detail.get("question") or record.query)
+        # 带了 spec 就是在现有条件上改，不走追问：那条路会让大模型从原话重新生成
+        if spec is None:
+            previous = PreviousTurn(
+                before,
+                tuple(
+                    Question(str(item["question"]), tuple(item["options"]))
+                    for item in record.detail.get("questions", [])
+                ),
+            )
 
     ds = services.ds
     first, last = ds.data_range(STOCK)
@@ -128,13 +141,14 @@ def make_plan(query: str, previous_plan_id: str | None, services: Services) -> P
         if SW_INDUSTRY_L2 in targets
         else (),
     )
-    result = plan(query, context, services.llm, services.events, previous)
+    revise = _for_revise(spec) if spec is not None else None
+    result = plan(query, context, services.llm, services.events, previous, revise)
     mentions = _with_names(result)
     response = _respond(result, mentions, services)
 
     detail = {
-        # 多轮追问时把回答接在原问题后面，下一轮追问用它
-        "question": query if previous is None else f"{previous.query}；用户补充：{query}",
+        # 多轮追问、多次修改时把这次说的话接在后面，下一轮追问用它
+        "question": _chained(before, query, spec is not None),
         "previous_plan_id": previous_plan_id,
         "questions": to_jsonable(list(result.questions)),
         "mentions": [{"phrase": m.phrase, "field": m.field} for m in mentions],
@@ -152,6 +166,33 @@ def make_plan(query: str, previous_plan_id: str | None, services: Services) -> P
     return response.model_copy(update={"plan_id": plan_id})
 
 
+#: 确认卡上的条件里，这两栏是后端算出来的结果，不给大模型看
+_SPEC_META = ("assumptions", "defaults_used")
+
+
+def _for_revise(spec: dict[str, object]) -> dict[str, object]:
+    """确认卡上现在的条件，交给大模型改。
+
+    默认值由前端去掉（specForm.dropUntouchedDefaults），这样没改到的栏目重新走一遍补默认值，
+    确认卡上照样标「默认值，可修改」；没去掉也只是少标几栏，不影响算出来的结果。
+
+    股票只留代码，原话和猜测名去掉：2026-09-16 实测大模型看见 target 里的 mention 就照抄，
+    于是又按名字重查一遍——换成「平安」这种对应多只的，改一次条件就要重选一次股票。
+    """
+    trimmed = {key: value for key, value in spec.items() if key not in _SPEC_META}
+    target = trimmed.get("target")
+    if isinstance(target, dict) and target.get("code"):
+        trimmed["target"] = {"code": target["code"]}
+    return trimmed
+
+
+def _chained(before: str | None, query: str, revised: bool) -> str:
+    """存进记录的问题：多轮下来接成一句，下一轮追问要用它当「原来的问题」。"""
+    if before is None:
+        return query
+    return f"{before}；用户{'又改' if revised else '补充'}：{query}"
+
+
 def _with_names(result: PlanResult) -> tuple[Mention, ...]:
     """股票、概念板块的原话大模型已经单独给了（stock_mention、board_mention），它没在 mentions 里再记一遍的由代码补上。
 
@@ -159,9 +200,9 @@ def _with_names(result: PlanResult) -> tuple[Mention, ...]:
     """
     fields = {mention.field for mention in result.mentions}
     extra = []
-    if result.stock is not None and "target" not in fields:
+    if result.stock is not None and not result.stock.is_code and "target" not in fields:
         extra.append(Mention(result.stock.mention, "target"))
-    if result.board is not None and "universe.board" not in fields:
+    if result.board is not None and not result.board.is_code and "universe.board" not in fields:
         extra.append(Mention(result.board.mention, "universe.board"))
     return (*result.mentions, *extra)
 
@@ -187,11 +228,16 @@ def _respond(result: PlanResult, mentions: tuple[Mention, ...], services: Servic
         stocks = _decisive(_lookup(ds.resolve_stock, result.stock))
         if len(stocks) != 1:
             return _choose_stock(spec, result.stock, stocks)
-        spec["target"] = {
-            "mention": result.stock.mention,
-            "guess": result.stock.guess,
-            "code": stocks[0].code,
-        }
+        # 照抄代码进来的（改现有条件）没有原话，和表单改过条件后一样只带代码
+        spec["target"] = (
+            {"code": stocks[0].code}
+            if result.stock.is_code
+            else {
+                "mention": result.stock.mention,
+                "guess": result.stock.guess,
+                "code": stocks[0].code,
+            }
+        )
     if result.board is not None:
         picked, candidates = _pick_board(ds, result.board)
         if picked is None:

@@ -46,9 +46,9 @@ class FakeClient(LLMClient):
         return StructuredReply(outcome, 0.1)
 
 
-def ask(*outcomes, query="问题", previous=None, context=CONTEXT):
+def ask(*outcomes, query="问题", previous=None, revise=None, context=CONTEXT):
     client = FakeClient(*outcomes)
-    return plan(query, context, client, EVENTS, previous), client
+    return plan(query, context, client, EVENTS, previous, revise), client
 
 
 STOCK_LIST = {
@@ -71,6 +71,7 @@ def test_提示词文件都能加载_系统提示词的变量都有代码填():
         "planner.system",
         "planner.repair",
         "planner.followup",
+        "planner.revise",
     }
     text = load_prompt("planner.system").render(**system_variables(CONTEXT, EVENTS))
     for expected in (
@@ -282,6 +283,36 @@ def test_回答不了_改写建议去掉买卖建议和百分比_最多三句():
 
 def test_改写建议太长的丢掉():
     assert clean_alternatives(["长" * 41, "短句"]) == ("短句",)
+
+
+def test_改条件_交给大模型的是现在的条件和要改的地方_不提原来的问题():
+    """确认卡上用一句话改条件：不走追问那条路，那条路会让大模型从原话重新生成（2026-09-16 加）。"""
+    now = {"shape": "stock_list", "as_of": "2026-09-14", "limit": 20}
+    previous = PreviousTurn("最近哪个板块最强", ())
+    _, client = ask(STOCK_LIST, query="改成前 5", previous=previous, revise=now)
+    message = client.calls[0][1]
+    assert '"limit": 20' in message and "现在的条件：" in message
+    assert "用户要改的地方：\n改成前 5" in message
+    assert "最近哪个板块最强" not in message
+
+
+def test_改条件_股票没换时照抄代码_按代码查也不当成原话():
+    draft = {
+        "status": "ok",
+        "shape": "stock_history",
+        "stock_code": "600519.SH",
+        "event_id": "breakout_ma_volume",
+        "event_params": {"ma": 250},
+    }
+    result, _ = ask(draft, revise={"shape": "stock_history"})
+    assert result.status == OK
+    assert result.stock == NameMention("600519.SH", is_code=True)
+
+
+def test_改条件_概念板块没换时照抄代码():
+    result, _ = ask({**STOCK_LIST, "board_code": "884001.TI"}, revise={"shape": "stock_list"})
+    assert result.status == OK
+    assert result.board == NameMention("884001.TI", is_code=True)
 
 
 def test_追问_把原问题_问过的问题和回答一起交给大模型():

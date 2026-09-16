@@ -183,6 +183,28 @@ describe("查询条件 → 表单（确认卡上点修改时预填）", () => {
     });
     expect(dropUntouchedDefaults(edited, undefined)).toEqual(edited);
   });
+
+  it("确认卡上用一句话改条件：整份条件和自己比，默认值全去掉，交给大模型的只剩用户说过的", () => {
+    const confirmed: StockHistorySpec = {
+      shape: "stock_history",
+      target: { code: "600519.SH" },
+      event: { preset_id: "breakout_ma_volume", params: { ma: 250, volume_ratio: 2 } },
+      time_range: { from: "2016-01-04", to: "2026-09-14" },
+      horizons: [5, 20, 60],
+      benchmark: "universe_equal_weight",
+      cost_bps: 30,
+      assumptions: ["股票：贵州茅台（600519.SH）"],
+      defaults_used: ["time_range", "horizons", "benchmark", "cost_bps", "event.params.volume_ratio"],
+    };
+    // 后端再补一遍默认值，确认卡上照样标「默认值，可修改」；assumptions、defaults_used 由后端丢掉
+    expect(dropUntouchedDefaults(confirmed, confirmed)).toEqual({
+      shape: "stock_history",
+      target: { code: "600519.SH" },
+      event: { preset_id: "breakout_ma_volume", params: { ma: 250 } },
+      assumptions: ["股票：贵州茅台（600519.SH）"],
+      defaults_used: ["time_range", "horizons", "benchmark", "cost_bps", "event.params.volume_ratio"],
+    });
+  });
 });
 
 describe("问题 → 输入框", () => {

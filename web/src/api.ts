@@ -66,6 +66,13 @@ export const api = {
       "/api/plan",
       previousPlanId ? { query, previous_plan_id: previousPlanId } : { query },
     ),
+  /** 确认卡上用一句话改条件：现在的条件一起交给大模型，它在这份条件上改，没说到的栏目照抄 */
+  revise: (spec: Spec | SpecDraft, change: string, planId?: string | null) =>
+    post<PlanResponse>("/api/plan", {
+      query: change,
+      spec,
+      ...(planId ? { previous_plan_id: planId } : {}),
+    }),
   /** 只检查、不计算：生成确认卡。带 plan_id 时没改过的栏目继续用提问原话的说法 */
   check: (spec: Spec | SpecDraft, planId?: string | null) =>
     post<CheckResponse>("/api/check", planId ? { spec, plan_id: planId } : { spec }),

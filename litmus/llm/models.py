@@ -47,6 +47,9 @@ class NameMention:
 
     mention: str
     guess: str | None = None
+    #: mention 里放的是代码不是原话——改现有条件时大模型照抄了代码（planner.revise）。
+    #: 照样走 resolve_* 核对，但确认卡上不写「「600519.SH」理解为：贵州茅台」
+    is_code: bool = False
 
 
 @dataclass(frozen=True)

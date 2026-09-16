@@ -469,6 +469,7 @@ def test_提问_大模型没配好时说明原因(tmp_path):
         ({"query": "x", "extra": 1}, "不认识的栏目"),
         ({"query": "问" * 501}, "问题太长"),
         ({"query": "x", "previous_plan_id": 5}, "previous_plan_id"),
+        ({"query": "x", "spec": [1]}, "spec 要是一个对象"),
     ],
 )
 def test_提问_请求体写错返回400(tmp_path, payload, detail):

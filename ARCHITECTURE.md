@@ -1245,6 +1245,19 @@ sort_by、stock_mention / stock_guess、event_id / event_params、mentions、que
 转换时只留大模型填了的栏目；股票、概念板块只带原话和猜测名；默认值由 api 补上并标出，说明文字由模板生成。
 表达式、事件参数、结构不对时，把问题清单交给 `planner.repair` 重试一次，还不对返回 failed。
 
+**确认卡上用一句话改条件**（2026-09-16 加）：确认卡下面有个输入框（底纹词「修改条件」），用户写一句
+「改成前 5」「持有期改成 20 天」，前端把**现在的条件**连同这句话一起发给 `/api/plan`，大模型在这份条件上改，
+没说到的栏目照抄——不是从原话重新生成。为什么不复用追问那条路：选候选（`/api/check`）和表单修改都不新建提问记录，
+提问记录里存的还是最早那句原话，从它重新生成会把用户选过的、改过的全丢掉。2026-09-16 实测「平安」对应 3 只股票，
+选完中国平安再改一次条件，就要重新再选一次。
+
+交给大模型的那份条件先去掉三样东西：①这次没碰过的默认值（前端 `specForm.dropUntouchedDefaults`），
+去掉之后后端重新补一遍，确认卡上照样标「默认值，可修改」；②`assumptions`、`defaults_used`，它们是后端算出来的结果；
+③`target` 里的 `mention`、`guess`，只留代码——2026-09-16 实测留着 `mention` 大模型就照抄，于是又按名字重查一遍。
+已经解析好的代码由 `OUTPUT_SCHEMA` 里的 `stock_code` / `board_code` 照抄回来，照样过 `ds.resolve_*` 核对
+（抄错了就当查不到），但不当成用户原话，确认卡上写「股票：中国平安（601318.SH）」而不是「「601318.SH」理解为……」。
+用户要去掉某一栏就两个都不填。表单逐栏改那条路不变，两条路都走 `/api/check` 之后的同一套检查和说明文字。
+
 **改写建议（alternatives）**：status 不是 ok 时，LLM 额外给 2~3 条**系统能回答的问句**，用户点一下就当成新的提问重走
 `/api/plan`。它只是几句问句，不含任何数字和结论；代码会检查条数、长度、是否含禁用词或百分比数字，不通过就丢弃。
 LLM 调用本身失败时，前端展示事件库里的固定示例，完全不经过 LLM。
@@ -1361,7 +1374,8 @@ LLM 既不写也不审查。
 litmus/llm/prompts/
 ├── planner.system.md       # llm.plan() 主提示词
 ├── planner.repair.md       # 校验失败后带错误信息重试
-└── planner.followup.md     # 回答追问：原问题 + 问过的问题 + 用户的回答（第 7b 步加）
+├── planner.followup.md     # 回答追问：原问题 + 问过的问题 + 用户的回答（第 7b 步加）
+└── planner.revise.md       # 确认卡上改条件：现在的条件 + 要改的地方（2026-09-16 加，§5.2）
 ```
 
 **规则**：
@@ -1398,14 +1412,17 @@ litmus/llm/prompts/
 
 ```
 POST /api/plan
-  body: { "query": "...", "previous_plan_id": "..." }   # previous_plan_id 可选：回答追问时带上
+  body: { "query": "...", "previous_plan_id": "...", "spec": QuerySpec }
+        # previous_plan_id 可选：回答追问时带上
+        # spec 可选：确认卡上用一句话改条件时带上「现在的条件」，query 就是要改哪里（§5.2）
   resp: { "status": "ok|needs_clarification|unsupported|not_an_event|data_not_ready|failed",
           "plan_id": "...", "spec": QuerySpec, "assumptions": [{ "field", "text", "default" }],
           "questions": [{ "question", "options" }], "stock_candidates": [...], "board_candidates": [...],
           "alternatives": [...], "message": "..." }
   说明：本地数据不够不调大模型；调 llm.plan()，再做确定性兜底核对（股票、概念板块按原话查代码，
         没找到或对应多个转成澄清让用户选；再过 /api/check 同一套检查）；保存原话与 spec 得到 plan_id。
-        确认卡上检查、运行时带上 plan_id，没改过的栏目继续用原话的说法。请求体写错返回 400
+        确认卡上检查、运行时带上 plan_id，没改过的栏目继续用原话的说法。
+        带了 spec 就走 planner.revise：在这份条件上改，不从原话重新生成。请求体写错返回 400
 
 POST /api/check
   body: 同 /api/run
@@ -1678,7 +1695,7 @@ def test_mean():
 | store 契约 | 存了能原样取回；编号格式、同一秒不撞；非法编号读不到别的文件；一条记录一个文件、不留临时文件；存不进 JSON 的不留文件（`tests/contract/test_store.py`） |
 | api | TestClient + 替身：请求体写错返回 `needs_revision` 而不是 422；结构、事件有问题时不读数据；中文说明、栏目路径、可选范围；计算出错存失败记录并返回编号；同步启动、不重复开、停止、查进度（`tests/test_api.py`）。本地真实数据上跑三种结果，数据量都很小（`tests/contract/test_run_api.py`） |
 | K 线 | 本地真实数据：基准日前复权价等于真实价、涨跌幅和后复权一样、送转当天真实价断崖而前复权连续、还没上市返回空表；接口参数写错 400、没有这只股票 404（`tests/contract/test_kline.py`） |
-| 前端 | `make web`（接入 `make ready`）：类型检查 + 单元测试 + 构建。单元测试覆盖最容易出错的纯逻辑——三种单位的显示、红涨绿跌、列名、表单转查询条件（日期格式、文字转数值）、问题对到输入框、K 线配置（开收低高顺序、触发标记、高亮范围）、查询条件填回表单（来回一致）、拼追问的回答、选候选。页面本身在浏览器里验收：第 7c 步用无头 Chrome 的调试协议按真实问题点了一遍（提问 → 确认卡 → 修改成本 → 说明跟着变 → 运行；「平安」选候选；「最近哪个板块最强」回答追问；「现在能买茅台吗」看改写建议），脚本不进仓库 |
+| 前端 | `make web`（接入 `make ready`）：类型检查 + 单元测试 + 构建。单元测试覆盖最容易出错的纯逻辑——三种单位的显示、红涨绿跌、列名、表单转查询条件（日期格式、文字转数值）、改条件前去掉默认值、问题对到输入框、K 线配置（开收低高顺序、触发标记、高亮范围）、查询条件填回表单（来回一致）、拼追问的回答、选候选。页面本身在浏览器里验收：第 7c 步用无头 Chrome 的调试协议按真实问题点了一遍（提问 → 确认卡 → 修改成本 → 说明跟着变 → 运行；「平安」选候选；「最近哪个板块最强」回答追问；「现在能买茅台吗」看改写建议），脚本不进仓库 |
 | validator | 未来函数必须被拦截：`Ref($close, -1)` 应抛错；字段不在白名单、能力不可用时报错 |
 | collector | lookback 推导：并列取最大、嵌套累加、EMA 按 4n |
 | operators | 每个算子用小表格验证，特别是 `Cross` 的边界和 `Rank` 的空值处理 |
@@ -1693,10 +1710,10 @@ def test_mean():
 | screener | 股票表 / 板块表：筛选、排序、取前 N；板块字段正确路由到板块数据表 |
 | 名称解析 | 小表格逐条覆盖六条规则、同一只只出现一次、不含北交所、含退市、全角和空格、板块去后缀、查不到时名字相近的板块（`tests/test_resolve.py`）；真实数据上「平安」多个候选、茅台的名称 / 代码 / 拼音、「招行」「中石油」、曾用名「龙净环保」、板块「光模块」查不到（`tests/contract/test_resolve.py`） |
 | describe | 每个算子的中文说法、括号与运算先后、全部算子都有说法（`tests/test_expr_describe.py`） |
-| 大模型规划 | 离线用假客户端：转换、防线②重试、澄清、改写建议过滤、追问（`tests/test_planner.py`、`tests/contract/test_plan_api.py`）。真实大模型 + 本地数据按 §9 第 7 步的验收标准逐条问（`tests/test_plan_live.py`，十来次调用、约 5 分钟，平时不跑；只核对结构，不核对措辞） |
+| 大模型规划 | 离线用假客户端：转换、防线②重试、澄清、改写建议过滤、追问、确认卡上改条件（交给大模型的是现在的条件不是原问题；股票、概念板块照抄代码按代码查，不当成原话）（`tests/test_planner.py`、`tests/contract/test_plan_api.py`）。真实大模型 + 本地数据按 §9 第 7 步的验收标准逐条问（`tests/test_plan_live.py`，十来次调用、约 5 分钟，平时不跑；只核对结构，不核对措辞） |
 | prompts | 所有 prompt 能渲染；变量不缺不多；id 与文件名一致；系统提示词的变量都由代码填（`tests/test_llm_client.py`、`tests/test_planner.py`） |
 | llm.plan | 用假 LLMClient：编造字段、写错表达式、事件参数越界时带着问题重试一次，还不对返回 failed；漏填 status 按内容推断；澄清的选项最多三个；改写建议去掉买卖建议、百分比、太长的；追问把原问题和回答一起交给大模型（`tests/test_planner.py`）。客户端：认证方式按域名选、401 自动换、强制工具调用、跳过思考块、超时（`tests/test_llm_client.py`） |
-| /api/plan | 本地数据不够不调大模型；请求体写错 400（`tests/test_api.py`）。真实数据 + 假大模型：股票按原话解析、「平安」给候选、查不到让用户换说法、概念板块原话查不到用猜的名字、说明文字带原话、改过的栏目不再用原话、追问、日期不是交易日转澄清（`tests/contract/test_plan_api.py`） |
+| /api/plan | 本地数据不够不调大模型；请求体写错 400（`tests/test_api.py`）。真实数据 + 假大模型：股票按原话解析、「平安」给候选、查不到让用户换说法、概念板块原话查不到用猜的名字、说明文字带原话、改过的栏目不再用原话、追问、日期不是交易日转澄清、确认卡上改条件时选过的概念板块和股票代码不会丢（`tests/contract/test_plan_api.py`） |
 | assumptions | 改了参数说明文字跟着变；默认值栏目标出"默认值"；原话说法写成「理解为」；概念板块成分、排名范围、长窗口、实际统计起点的说明（`tests/test_assumptions.py`）；检查接口不计算、请求里带来的说明和默认值标记不作数、确认卡上的实际统计起点和结果对得上（`tests/test_api.py`、`tests/contract/test_run_api.py`） |
 
 ---

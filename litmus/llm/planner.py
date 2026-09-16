@@ -85,6 +85,14 @@ OUTPUT_SCHEMA: dict[str, Any] = {
         },
         "stock_mention": _STR,
         "stock_guess": _STR,
+        "stock_code": {
+            "type": "string",
+            "description": "只在修改现有条件、股票没换时填：照抄条件里的 target.code，如 600519.SH",
+        },
+        "board_code": {
+            "type": "string",
+            "description": "只在修改现有条件、概念板块没换时填：照抄条件里的 universe.board.code",
+        },
         "event_id": _STR,
         "event_params": {"type": "object", "additionalProperties": {"type": "number"}},
         "time_from": {"type": "string", "description": "YYYY-MM-DD"},
@@ -132,12 +140,22 @@ def plan(
     client: LLMClient,
     events: EventLibrary,
     previous: PreviousTurn | None = None,
+    revise: Mapping[str, Any] | None = None,
 ) -> PlanResult:
-    """query：用户这次说的话；有 previous 时它是对上一轮追问的回答。"""
+    """query：用户这次说的话。
+
+    - previous：上一轮追问，query 是对追问的回答
+    - revise：确认卡上现在的条件，query 是「要改哪里」。大模型在这份条件上改，没说到的栏目照抄，
+      股票和概念板块照抄代码（stock_code / board_code）——之前选过的候选、表单上改过的不会丢
+    """
     system_prompt = load_prompt("planner.system")
     system = system_prompt.render(**system_variables(context, events))
     user = query
-    if previous is not None:
+    if revise is not None:
+        user = load_prompt("planner.revise").render(
+            spec=json.dumps(revise, ensure_ascii=False, indent=1), change=query
+        )
+    elif previous is not None:
         user = load_prompt("planner.followup").render(
             query=previous.query, questions=_questions_text(previous.questions), answer=query
         )
@@ -249,10 +267,16 @@ def _read_ok(
             if mention := _text(draft.get("board_mention")):
                 # 申万行业、概念板块都按它查，由 api 按规则挑口径；概念板块不可用时照样能对上申万行业
                 board = NameMention(mention, _text(draft.get("board_guess")) or None)
+            elif code := _text(draft.get("board_code")):
+                # 改现有条件、概念板块没换：代码在 resolve_board 里完全对上，直接就是它
+                board = NameMention(code, is_code=True)
 
     elif shape == "stock_history":
         if mention := _text(draft.get("stock_mention")):
             stock = NameMention(mention, _text(draft.get("stock_guess")) or None)
+        elif code := _text(draft.get("stock_code")):
+            # 改现有条件、股票没换：照抄的代码照样过 ds.resolve_stock，抄错了就当查不到
+            stock = NameMention(code, is_code=True)
         else:
             problems.append("个股回看要填 stock_mention（用户原话里说的股票）")
         event_id, params = _text(draft.get("event_id")), draft.get("event_params") or {}

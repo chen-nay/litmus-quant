@@ -1,7 +1,8 @@
 /**
  * 查询页（ARCHITECTURE §1.4、§5）：两步出结果。
  * 1. 用一句话提问（或者直接填条件）
- * 2. 确认卡把条件翻译成明确的定义；确认后才运行，点「修改」回到表单，改完说明文字跟着变
+ * 2. 确认卡把条件翻译成明确的定义；确认后才运行。改条件有两条路：在卡上用一句话说要改哪里
+ *    （连同现在的条件一起交给大模型，见 revise），或者点「打开表单」逐栏改，改完说明文字都跟着变
  *
  * 提问之后也可能是追问、选候选、回答不了——见 PlanOutcome。
  */
@@ -18,6 +19,7 @@ import { StockListForm } from "../components/StockListForm";
 import { Suggestions, Thinking } from "../components/askParts";
 import { useCatalog, useStatus } from "../context";
 import { type Shape, exampleQuestions, shapeOf, withBoard, withStock } from "../planFlow";
+import { dropUntouchedDefaults } from "../specForm";
 import type {
   BoardListSpec,
   Candidate,
@@ -49,11 +51,12 @@ export function QueryPage() {
   const [checking, setChecking] = useState(false);
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [revisingSince, setRevisingSince] = useState<number | null>(null);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [tab, setTab] = useState<Shape>("stock_list");
   const top = useRef<HTMLDivElement>(null);
   const forms = useRef<HTMLDivElement>(null);
-  const busy = thinkingSince !== null || checking;
+  const busy = thinkingSince !== null || checking || revisingSince !== null;
 
   async function ask(query: string, previousPlanId?: string | null) {
     const text = query.trim();
@@ -78,6 +81,36 @@ export function QueryPage() {
       setPlan(failure(errorText(reason)));
     } finally {
       setThinkingSince(null);
+    }
+  }
+
+  /**
+   * 确认卡上用一句话改条件。和提问不同的是把现在的条件一起发过去，大模型在这份条件上改：
+   * 之前从候选里选的板块、表单上改过的栏目都不会丢（后端 routes/plan.py 第 7 条）。
+   * 发之前去掉这次没碰过的默认值，后端重新补一遍，确认卡上照样标「默认值，可修改」。
+   */
+  async function revise(change: string) {
+    if (!confirm) return;
+    setRevisingSince(Date.now());
+    setPlan(null);
+    try {
+      const spec = dropUntouchedDefaults(confirm.spec, confirm.spec);
+      const response = await api.revise(spec, change, confirm.planId);
+      if (response.status === "ok" && response.spec) {
+        setConfirm({
+          spec: response.spec as unknown as Confirm["spec"],
+          planId: response.plan_id,
+          assumptions: response.assumptions,
+        });
+      } else {
+        setConfirm(null);
+        setPlan(response);
+      }
+    } catch (reason) {
+      setConfirm(null);
+      setPlan(failure(errorText(reason)));
+    } finally {
+      setRevisingSince(null);
     }
   }
 
@@ -151,7 +184,7 @@ export function QueryPage() {
           <Button
             type="primary"
             loading={thinkingSince !== null}
-            disabled={!question.trim() || ready === false || checking}
+            disabled={!question.trim() || ready === false || busy}
             onClick={() => ask(question)}
           >
             提问
@@ -182,6 +215,8 @@ export function QueryPage() {
         <ConfirmCard
           key={`${confirm.planId}-${confirm.assumptions.map((item) => item.text).join("|")}`}
           confirm={confirm}
+          revisingSince={revisingSince}
+          onRevise={revise}
           onEdit={() => startEdit(confirm.spec as unknown as SpecDraft, confirm.planId)}
           onClose={() => setConfirm(null)}
         />
