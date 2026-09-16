@@ -11,11 +11,16 @@
 6. 追问：把 previous_plan_id 带回来，这次说的话当成对追问的回答
 7. 确认卡上用一句话改条件：把 spec（现在的条件）一起带回来，这次说的话当成「要改哪里」。
    大模型在这份条件上改，不从原话重新生成——之前选过的候选、表单上改过的不会丢（2026-09-16 加）
+8. 每一步都记进过程记录（store 的 traces/<plan_id>.json）：调了几次大模型、发了什么、原始返回是什么、
+   token 和耗时、防线②发现的问题、防线③怎么解析的名字、检查有没有过。**记录失败不影响回答**
+   （2026-09-16 加）。为什么要记：确认卡以下是纯代码所以可复现，确认卡以上（问题 → 查询单）
+   既不可复现也看不见——同一个问题明天再问，日期表和行业清单都变了，没有记录就还原不了当时那一次
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import date
 
@@ -43,6 +48,7 @@ from litmus.llm import (
     CLARIFY,
     FAILED,
     OK,
+    LLMCall,
     LLMConfig,
     LLMError,
     NameMention,
@@ -53,7 +59,9 @@ from litmus.llm import (
     plan,
 )
 from litmus.spec import Mention
-from litmus.store import PlanRecord
+from litmus.store import PlanRecord, TraceRecord
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -144,7 +152,8 @@ def make_plan(
     revise = _for_revise(spec) if spec is not None else None
     result = plan(query, context, services.llm, services.events, previous, revise)
     mentions = _with_names(result)
-    response = _respond(result, mentions, services)
+    steps: list[dict[str, object]] = [_call_step(call) for call in result.calls]
+    response = _respond(result, mentions, services, steps)
 
     detail = {
         # 多轮追问、多次修改时把这次说的话接在后面，下一轮追问用它
@@ -163,7 +172,38 @@ def make_plan(
     plan_id = services.store.save_plan(
         PlanRecord(query=query, status=response.status, spec=response.spec, detail=detail)
     )
+    steps.append({"step": "respond", "status": response.status, "message": response.message})
+    _save_trace(services, plan_id, query, steps)
     return response.model_copy(update={"plan_id": plan_id})
+
+
+def _call_step(call: LLMCall) -> dict[str, object]:
+    """一次大模型调用 → 过程记录里的一步。提示词只记哈希，原始返回整份记（LLMCall 的说明）。"""
+    return {
+        "step": "llm.plan",
+        "attempt": call.attempt,
+        "prompt_id": call.prompt_id,
+        "prompt_version": call.prompt_version,
+        "rendered_hash": call.rendered_hash,
+        "model": call.model,
+        "user_message": call.user_message,
+        "raw_reply": call.raw_reply,
+        "input_tokens": call.input_tokens,
+        "output_tokens": call.output_tokens,
+        "seconds": call.seconds,
+        "problems": list(call.problems),
+        "error": call.error,
+    }
+
+
+def _save_trace(
+    services: Services, plan_id: str, query: str, steps: list[dict[str, object]]
+) -> None:
+    """记录失败不能影响回答：过程记录是给开发看的，用户的答案已经算好了。"""
+    try:
+        services.store.save_trace(TraceRecord(record_id=plan_id, query=query, steps=steps))
+    except Exception:  # noqa: BLE001 —— 存不下就算了，只记一条日志
+        logger.warning("提问 %s 的过程记录没能存下来", plan_id, exc_info=True)
 
 
 #: 确认卡上的条件里，这两栏是后端算出来的结果，不给大模型看
@@ -207,7 +247,12 @@ def _with_names(result: PlanResult) -> tuple[Mention, ...]:
     return (*result.mentions, *extra)
 
 
-def _respond(result: PlanResult, mentions: tuple[Mention, ...], services: Services) -> PlanResponse:
+def _respond(
+    result: PlanResult,
+    mentions: tuple[Mention, ...],
+    services: Services,
+    steps: list[dict[str, object]] | None = None,
+) -> PlanResponse:
     if result.status == FAILED:
         return PlanResponse(
             status="failed", message=f"没能把这个问题翻译成查询条件：{result.error}"
@@ -222,10 +267,20 @@ def _respond(result: PlanResult, mentions: tuple[Mention, ...], services: Servic
             status=result.status, message=result.message, alternatives=list(result.alternatives)
         )
 
+    note = steps.append if steps is not None else (lambda _step: None)
     ds = services.ds
     spec = dict(result.spec or {})
     if result.stock is not None:
         stocks = _decisive(_lookup(ds.resolve_stock, result.stock))
+        note(
+            {
+                "step": "resolve_stock",
+                "mention": result.stock.mention,
+                "guess": result.stock.guess,
+                "by_code": result.stock.is_code,
+                "matches": [{"code": m.code, "name": m.name} for m in stocks[:MAX_CANDIDATES]],
+            }
+        )
         if len(stocks) != 1:
             return _choose_stock(spec, result.stock, stocks)
         # 照抄代码进来的（改现有条件）没有原话，和表单改过条件后一样只带代码
@@ -240,11 +295,25 @@ def _respond(result: PlanResult, mentions: tuple[Mention, ...], services: Servic
         )
     if result.board is not None:
         picked, candidates = _pick_board(ds, result.board)
+        note(
+            {
+                "step": "resolve_board",
+                "mention": result.board.mention,
+                "guess": result.board.guess,
+                "by_code": result.board.is_code,
+                "picked": None if picked is None else {"code": picked.code, "name": picked.name},
+                "candidates": [
+                    {"code": m.code, "name": m.name, "type": m.board_type}
+                    for m in candidates[:MAX_CANDIDATES]
+                ],
+            }
+        )
         if picked is None:
             return _choose_board(spec, result.board, candidates, ds)
         spec["universe"] = _with_board(spec.get("universe") or {}, picked)
 
     checked, issues = check_spec(spec, ds, services.events)
+    note({"step": "check_spec", "issues": [issue_text(issue) for issue in issues]})
     if checked is None:
         message = "；".join(issue_text(issue) for issue in issues)
         return PlanResponse(status=CLARIFY, spec=spec, message=f"条件要改一下：{message}")

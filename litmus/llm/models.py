@@ -61,6 +61,38 @@ class PreviousTurn:
 
 
 @dataclass(frozen=True)
+class LLMCall:
+    """一次大模型调用的过程：发了什么、回了什么、花了多久。由 api 存进 store 的过程记录。
+
+    **提示词不整份存**：渲染完有几千 token（字段清单、算子清单、165 个行业名、日期换算表都在里面），
+    每条提问存一份很快就几兆。存模板哈希 + 渲染后哈希足够定位是哪一版——模板在 git 里，
+    变量能从当天数据重建。`prompt_version` 只是模板的哈希，同一模板在不同日期渲染出的内容不同，
+    所以 `rendered_hash` 必须单独记。
+
+    **原始返回整份存**：它小（几百 token），而且是唯一事后重建不出来的东西。
+    """
+
+    attempt: int
+    prompt_id: str
+    #: 提示词模板正文的哈希（Prompt.version）
+    prompt_version: str
+    #: 渲染后的系统提示词哈希
+    rendered_hash: str
+    #: 这一次发给大模型的用户侧消息（重试时是 planner.repair 渲染出来的那段）
+    user_message: str
+    model: str = ""
+    #: 大模型返回的原始 JSON，原样存
+    raw_reply: dict[str, Any] | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    seconds: float | None = None
+    #: 防线②发现的问题，非空说明这次输出没通过检查，会带着问题重试
+    problems: tuple[str, ...] = ()
+    #: 调用本身失败（超时、认证、连不上），此时 raw_reply 为空
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class PlanResult:
     status: str
     #: ok：查询条件草稿，结构同 QuerySpec；股票、概念板块还没解析成代码，没说的栏目也没补默认值
@@ -76,3 +108,5 @@ class PlanResult:
     prompt_version: str = ""
     #: failed 的原因
     error: str | None = None
+    #: 每次大模型调用的过程，给 store 的过程记录用（一次重试就有两条）
+    calls: tuple[LLMCall, ...] = ()

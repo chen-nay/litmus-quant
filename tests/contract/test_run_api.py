@@ -102,6 +102,46 @@ def test_个股回看_事件按事件库重新生成(client):
     assert result["event_label"] == event["label"]
 
 
+def test_过程记录_运行链每一步的耗时和结果规模(client):
+    """2026-09-16 加：以前只有一个总耗时，看不出慢在生成说明还是算结果。"""
+    spec = {
+        "shape": "stock_list",
+        "as_of": DAY.isoformat(),
+        "filter": {"expr": "$pct_chg > 9"},
+        "sort": {"by": "$amount"},
+        "limit": 5,
+    }
+    body = run(client, spec)
+    assert body["status"] == "done", body
+
+    trace = client.get(f"/api/traces/{body['run_id']}").json()
+    assert trace["record_id"] == body["run_id"] and trace["query"] == "stock_list"
+    steps = {step["step"]: step for step in trace["steps"]}
+    assert list(steps) == ["check_spec", "explain", "research.run", "respond"]
+
+    assert steps["check_spec"]["issues"] == []
+    assert steps["explain"]["assumptions"] > 0 and steps["explain"]["ms"] >= 0
+    assert steps["research.run"]["ms"] >= 0
+    done = steps["respond"]
+    assert done["status"] == "done"
+    assert done["total"] == body["result"]["total"] and done["rows"] == len(body["result"]["rows"])
+
+
+def test_过程记录_个股回看记的是触发了几次(client):
+    spec = {
+        "shape": "stock_history",
+        "target": {"code": "600519.SH"},
+        "event": {"preset_id": "breakout_ma", "params": {"ma": 250}},
+        "time_range": {"from": "2025-01-02", "to": DAY.isoformat()},
+        "horizons": [5],
+    }
+    body = run(client, spec)
+    assert body["status"] == "done", body
+    trace = client.get(f"/api/traces/{body['run_id']}").json()
+    done = next(s for s in trace["steps"] if s["step"] == "respond")
+    assert done["triggers"] == len(body["result"]["triggers"])
+
+
 def test_查不到的东西让用户改(client):
     spec = {"shape": "stock_list", "as_of": "2026-09-06", "universe": {"industry": "银行业"}}
     issues = {issue["path"]: issue for issue in run(client, spec)["issues"]}

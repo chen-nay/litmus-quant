@@ -205,6 +205,56 @@ def test_概念板块原话和猜测名都查不到_列出名字相近的让用�
     assert "打开表单" in body["message"] and "/api/" not in body["message"]
 
 
+def test_过程记录_原始返回_token_耗时_解析步骤都记下来(client, llm):
+    """2026-09-16 加：以前「大模型到底回了什么」只能靠猜，现在按 plan_id 就能翻出来。"""
+    body = ask(client, llm, HISTORY, query="茅台放量突破年线之后怎么样")
+    assert body["status"] == "ok", body
+
+    trace = client.get(f"/api/traces/{body['plan_id']}").json()
+    assert trace["record_id"] == body["plan_id"]
+    assert trace["query"] == "茅台放量突破年线之后怎么样" and trace["created_at"]
+
+    steps = {step["step"]: step for step in trace["steps"]}
+    assert set(steps) == {"llm.plan", "resolve_stock", "check_spec", "respond"}
+
+    call = steps["llm.plan"]
+    assert call["raw_reply"] == HISTORY  # 原始返回整份留着
+    assert call["prompt_id"] == "planner.system"
+    assert len(call["prompt_version"]) == 8 and len(call["rendered_hash"]) == 8
+    assert call["problems"] == [] and call["error"] is None
+
+    assert steps["resolve_stock"]["mention"] == "茅台"
+    assert steps["resolve_stock"]["matches"][0]["code"] == "600519.SH"
+    assert steps["check_spec"]["issues"] == []
+    assert steps["respond"]["status"] == "ok"
+
+
+def test_过程记录_被拒绝的提问也记_看得出是大模型自己回的unsupported(client, llm):
+    output = {
+        "status": "unsupported",
+        "message": "单只股票当前的市盈率不在系统支持的三类查询里",
+        "alternatives": ["茅台放量突破年线之后表现怎么样"],
+    }
+    body = ask(client, llm, output, query="牧原股份现在市盈率多少？")
+    assert body["status"] == "unsupported"
+
+    trace = client.get(f"/api/traces/{body['plan_id']}").json()
+    call = next(s for s in trace["steps"] if s["step"] == "llm.plan")
+    assert call["raw_reply"] == output  # 这句「回答不了」是大模型自己写的，白纸黑字
+    # 拒绝时不走防线③，只有调用和最后的回应
+    assert [s["step"] for s in trace["steps"]] == ["llm.plan", "respond"]
+
+
+def test_过程记录存不下来_不影响回答(client, llm, monkeypatch):
+    """过程记录是给开发看的，用户的答案已经算好了，不能因为记不上就整个失败。"""
+    monkeypatch.setattr(
+        JsonStore, "save_trace", lambda *a, **k: (_ for _ in ()).throw(OSError("磁盘满了"))
+    )
+    body = ask(client, llm, HISTORY, query="茅台放量突破年线之后怎么样")
+    assert body["status"] == "ok", body
+    assert client.get(f"/api/traces/{body['plan_id']}").status_code == 404
+
+
 def test_确认卡上改条件_把现在的条件交给大模型_选过的概念板块不会丢(client, llm):
     """2026-09-16 加：改条件走追问那条路会从原话重新生成，「光模块」又变回一堆候选让人重选。"""
     if CONCEPT not in _ds.available_targets():

@@ -87,6 +87,8 @@ class StructuredReply:
     seconds: float
     input_tokens: int | None = None
     output_tokens: int | None = None
+    #: 哪个模型答的。换过模型之后翻旧的过程记录要能分辨
+    model: str = ""
 
 
 class LLMClient(ABC):
@@ -163,4 +165,5 @@ class AnthropicClient(LLMClient):
             seconds=seconds,
             input_tokens=getattr(usage, "input_tokens", None),
             output_tokens=getattr(usage, "output_tokens", None),
+            model=config.model,
         )

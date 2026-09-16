@@ -40,6 +40,20 @@ class RunRecord:
     created_at: str = ""
 
 
+@dataclass(frozen=True)
+class TraceRecord:
+    """一次提问 / 一次运行的过程：每一步调了什么、返回了什么、花了多久（ARCHITECTURE §7）。
+
+    **不另编号**：编号就是它记录的那条 plan_id / run_id，文件名即关联。
+    steps 是一串 dict，形状由写入方决定，store 不认识里面的内容。
+    """
+
+    record_id: str  # plan_id 或 run_id
+    query: str = ""
+    steps: list[dict[str, object]] = field(default_factory=list)
+    created_at: str = ""  # 保存时由 store 填
+
+
 class Store(Protocol):
     def save_plan(self, plan: PlanRecord) -> str:
         """保存一条提问记录，返回 plan_id。"""
@@ -52,3 +66,9 @@ class Store(Protocol):
 
     def get_run(self, run_id: str) -> RunRecord | None:
         """取运行记录；不存在或编号不合法返回 None。"""
+
+    def save_trace(self, trace: TraceRecord) -> str:
+        """保存一条过程记录，编号用 trace.record_id（plan_id / run_id），返回它。"""
+
+    def get_trace(self, record_id: str) -> TraceRecord | None:
+        """取过程记录；不存在或编号不合法返回 None。"""

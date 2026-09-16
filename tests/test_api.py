@@ -477,6 +477,20 @@ def test_提问_请求体写错返回400(tmp_path, payload, detail):
     assert response.status_code == 400 and detail in response.json()["detail"]
 
 
+def test_过程记录_接口能按提问编号取回_不存在返回404(tmp_path):
+    from litmus.store import PlanRecord, TraceRecord
+
+    store = JsonStore(tmp_path)
+    plan_id = store.save_plan(PlanRecord(query="x", status="ok"))
+    store.save_trace(TraceRecord(record_id=plan_id, query="x", steps=[{"step": "llm.plan"}]))
+
+    client = make_client(tmp_path, ds=NoData(), llm=NoLLM())
+    body = client.get(f"/api/traces/{plan_id}").json()
+    assert body["record_id"] == plan_id and body["steps"] == [{"step": "llm.plan"}]
+    assert client.get("/api/traces/p20260916-21-37-20aaaaaa").status_code == 404
+    assert client.get("/api/traces/..%2Fsecret").status_code == 404
+
+
 def test_提问_追问的提问记录不存在(tmp_path):
     client = make_client(tmp_path, ds=NoData(), llm=NoLLM())
     payload = {"query": "20 个交易日", "previous_plan_id": "p20260915000000abcdef"}

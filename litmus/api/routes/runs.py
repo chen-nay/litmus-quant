@@ -6,6 +6,9 @@
 - 生成说明、计算时才发现数据缺口、预热期不够（MissingDataError、ExprDataError）也是 needs_revision：换个日期或区间就能算
 - 其他错误是 failed：把记录编号返回给用户，错误栈打在服务日志里
 - 运行记录成功、失败都存，带上数据截至哪天、事件库版本和耗时；spec 里的默认值标记和说明文字是代码生成的那份
+- 每一步也记进过程记录（store 的 `traces/tr<run_id>.json`，2026-09-16 加）：检查、生成说明、计算各花了多久，
+  结果多大，出错是哪一步出的。**记录失败不影响回答**。检查没过（needs_revision）不记——那些问题本来就原样
+  显示给用户了，不是黑箱
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ from litmus.data import DataStatus, MissingDataError
 from litmus.expr import ExprDataError
 from litmus.research import run as run_research
 from litmus.spec import Assumption, StockHistorySpec
-from litmus.store import RunRecord
+from litmus.store import RunRecord, TraceRecord
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -89,9 +92,16 @@ def execute(raw_spec: object, plan_id: str | None, services: Services) -> RunRes
         return _revise(*issues)
 
     started = time.perf_counter()
+    steps: list[dict[str, object]] = [
+        {"step": "check_spec", "shape": spec.shape, "plan_id": plan_id, "issues": []}
+    ]
     try:
-        spec, _ = _explained(spec, services, plan_id)
+        mark = time.perf_counter()
+        spec, assumptions = _explained(spec, services, plan_id)
+        steps.append({"step": "explain", "assumptions": len(assumptions), "ms": _ms(mark)})
+        mark = time.perf_counter()
         result = run_research(spec, services.ds)
+        steps.append({"step": "research.run", "ms": _ms(mark)})
     except (MissingDataError, ExprDataError) as exc:
         return _revise(Issue(message=str(exc)))
     except Exception as exc:  # noqa: BLE001 —— 算不出来也要给用户一个记录编号，不能只回 500
@@ -100,6 +110,8 @@ def execute(raw_spec: object, plan_id: str | None, services: Services) -> RunRes
             _record(spec, plan_id, status.data_through, started, status="failed", error=error)
         )
         logger.exception("计算出错，运行记录 %s", run_id)
+        steps.append({"step": "respond", "status": "failed", "error": error})
+        _save_trace(services, run_id, spec, steps)
         message = f"计算时出错了，运行记录编号 {run_id}，详情见服务日志"
         return RunResponse(status="failed", run_id=run_id, message=message)
 
@@ -107,7 +119,30 @@ def execute(raw_spec: object, plan_id: str | None, services: Services) -> RunRes
     run_id = services.store.save_run(
         _record(spec, plan_id, status.data_through, started, status="done", result=payload)
     )
+    steps.append({"step": "respond", "status": "done", **_size(payload), "ms": _ms(started)})
+    _save_trace(services, run_id, spec, steps)
     return RunResponse(status="done", run_id=run_id, result=payload)
+
+
+def _ms(mark: float) -> int:
+    return round((time.perf_counter() - mark) * 1000)
+
+
+def _size(payload: dict[str, Any]) -> dict[str, object]:
+    """结果多大：股票表 / 板块表看满足条件的只数和取回几行，个股回看看触发了几次。"""
+    if "total" in payload:
+        return {"total": payload["total"], "rows": len(payload.get("rows") or ())}
+    return {"triggers": len(payload.get("triggers") or ())}
+
+
+def _save_trace(
+    services: Services, run_id: str, spec: Spec, steps: list[dict[str, object]]
+) -> None:
+    """记录失败不能影响回答：结果已经算好存好了，过程记录只是给开发看的。"""
+    try:
+        services.store.save_trace(TraceRecord(record_id=run_id, query=spec.shape, steps=steps))
+    except Exception:  # noqa: BLE001 —— 存不下就算了，只记一条日志
+        logger.warning("运行 %s 的过程记录没能存下来", run_id, exc_info=True)
 
 
 @router.get("/api/run/{run_id}")
@@ -116,6 +151,18 @@ def get_run(run_id: str, request: Request) -> dict[str, object]:
     record = services_of(request).store.get_run(run_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"没有编号为 {run_id} 的运行记录")
+    return asdict(record)
+
+
+@router.get("/api/traces/{record_id}")
+def get_trace(record_id: str, request: Request) -> dict[str, object]:
+    """过程记录：这次提问 / 运行的每一步调了什么、返回了什么、花了多久。
+
+    编号用 plan_id 或 run_id。给开发排查用——「大模型到底回了什么」以前只能靠猜。
+    """
+    record = services_of(request).store.get_trace(record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"没有编号为 {record_id} 的过程记录")
     return asdict(record)
 
 

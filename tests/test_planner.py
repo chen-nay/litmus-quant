@@ -285,6 +285,42 @@ def test_改写建议太长的丢掉():
     assert clean_alternatives(["长" * 41, "短句"]) == ("短句",)
 
 
+def test_过程记录_原始返回和_token_耗时都带出来_提示词只记哈希():
+    """「大模型到底回了什么」以前只能靠猜，现在存下来（2026-09-16 加）。"""
+    result, _ = ask(STOCK_LIST, query="昨天放量的股票")
+    assert len(result.calls) == 1
+    call = result.calls[0]
+    assert call.attempt == 1 and call.prompt_id == "planner.system"
+    assert call.raw_reply == STOCK_LIST  # 原始返回整份存
+    assert call.user_message == "昨天放量的股票"
+    assert call.problems == () and call.error is None
+    assert call.seconds == 0.1
+    # 提示词不整份存：模板哈希 + 渲染后哈希，两个都是 8 位
+    assert len(call.prompt_version) == 8 and len(call.rendered_hash) == 8
+    assert call.prompt_version != call.rendered_hash
+
+
+def test_过程记录_重试时两次都留着_第一次的问题清单能看到():
+    bad = {**STOCK_LIST, "filter_expr": "$不存在 > 1"}
+    result, _ = ask(bad, STOCK_LIST)
+    assert result.status == OK and result.attempts == 2
+    assert len(result.calls) == 2
+    first, second = result.calls
+    assert first.raw_reply == bad and first.problems  # 第一次错在哪，留着
+    assert any("不存在" in problem for problem in first.problems)
+    assert second.attempt == 2 and second.problems == ()
+    # 第二次发的是 planner.repair 渲染出来的，里面带着上一次的输出和问题
+    assert "你上一次的输出" in second.user_message
+
+
+def test_过程记录_调用本身失败时记下原因_没有原始返回():
+    result, _ = ask(LLMError("大模型 180 秒没有回应"))
+    assert result.status == FAILED
+    assert len(result.calls) == 1
+    call = result.calls[0]
+    assert call.error == "大模型 180 秒没有回应" and call.raw_reply is None
+
+
 def test_改条件_交给大模型的是现在的条件和要改的地方_不提原来的问题():
     """确认卡上用一句话改条件：不走追问那条路，那条路会让大模型从原话重新生成（2026-09-16 加）。"""
     now = {"shape": "stock_list", "as_of": "2026-09-14", "limit": 20}

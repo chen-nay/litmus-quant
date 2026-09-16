@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -30,6 +31,7 @@ from litmus.llm.models import (
     NOT_AN_EVENT,
     OK,
     UNSUPPORTED,
+    LLMCall,
     NameMention,
     PlanContext,
     PlanResult,
@@ -160,7 +162,23 @@ def plan(
             query=previous.query, questions=_questions_text(previous.questions), answer=query
         )
     version = system_prompt.version
+    rendered = hashlib.sha256(system.encode("utf-8")).hexdigest()[:8]
     message, draft, problems = user, {}, []
+    # 每次调用都记一条，重试就有两条：调了什么、回了什么、哪里没通过检查（存进 store 的过程记录）
+    calls: list[LLMCall] = []
+
+    def record(**extra: object) -> LLMCall:
+        call = LLMCall(
+            attempt=attempt,
+            prompt_id=system_prompt.id,
+            prompt_version=version,
+            rendered_hash=rendered,
+            user_message=message,
+            **extra,  # type: ignore[arg-type]
+        )
+        calls.append(call)
+        return call
+
     for attempt in (1, 2):
         if attempt == 2:
             message = load_prompt("planner.repair").render(
@@ -172,7 +190,14 @@ def plan(
             reply = client.structured(system, message, OUTPUT_SCHEMA)
         except LLMError as exc:
             logger.warning("planner.system@%s 第 %d 次调用失败：%s", version, attempt, exc)
-            return PlanResult(FAILED, attempts=attempt, prompt_version=version, error=str(exc))
+            record(error=str(exc))
+            return PlanResult(
+                FAILED,
+                attempts=attempt,
+                prompt_version=version,
+                error=str(exc),
+                calls=tuple(calls),
+            )
         logger.info(
             "planner.system@%s 第 %d 次：%.1f 秒，token %s / %s",
             version,
@@ -183,10 +208,20 @@ def plan(
         )
         draft = reply.data
         result, problems = read_output(draft, context, events)
+        record(
+            model=reply.model,
+            raw_reply=dict(draft),
+            input_tokens=reply.input_tokens,
+            output_tokens=reply.output_tokens,
+            seconds=round(reply.seconds, 3),
+            problems=tuple(problems),
+        )
         if not problems:
-            return replace(result, attempts=attempt, prompt_version=version)
+            return replace(result, attempts=attempt, prompt_version=version, calls=tuple(calls))
         logger.info("planner.system@%s 第 %d 次输出没通过检查：%s", version, attempt, problems)
-    return PlanResult(FAILED, attempts=2, prompt_version=version, error="；".join(problems))
+    return PlanResult(
+        FAILED, attempts=2, prompt_version=version, error="；".join(problems), calls=tuple(calls)
+    )
 
 
 # ── 大模型的输出 → 结果 ─────────────────────────────────────────
