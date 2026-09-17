@@ -1,0 +1,215 @@
+"""POST /api/check、POST /api/run、GET /api/run/{run_id}（ARCHITECTURE §1.4 ②、§6）。
+
+- 请求体自己解析：写错了也返回 needs_revision 和中文说明，不用 FastAPI 默认的 422
+- /api/check 只检查、不计算：确认卡上改了参数，拿它刷新说明文字（§5.4）
+- /api/run 的顺序：本地数据够不够（data_not_ready）→ 确定性检查（needs_revision）→ 生成说明 → 计算 → 存运行记录
+- 生成说明、计算时才发现数据缺口、预热期不够（MissingDataError、ExprDataError）也是 needs_revision：换个日期或区间就能算
+- 其他错误是 failed：把记录编号返回给用户，错误栈打在服务日志里
+- 运行记录成功、失败都存，带上数据截至哪天、事件库版本和耗时；spec 里的默认值标记和说明文字是代码生成的那份
+- 每一步也记进过程记录（store 的 `traces/tr<run_id>.json`，2026-09-16 加）：检查、生成说明、计算各花了多久，
+  结果多大，出错是哪一步出的。**记录失败不影响回答**。检查没过（needs_revision）不记——那些问题本来就原样
+  显示给用户了，不是黑箱
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from dataclasses import asdict
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
+
+from litmus.api.checks import Spec, check_spec
+from litmus.api.explain import explain, plan_mentions
+from litmus.api.models import AssumptionItem, CheckResponse, Issue, RunResponse
+from litmus.api.serialize import result_to_dict, to_jsonable
+from litmus.api.services import Services, services_of
+from litmus.data import DataStatus, MissingDataError
+from litmus.expr import ExprDataError
+from litmus.research import run as run_research
+from litmus.spec import Assumption, StockHistorySpec
+from litmus.store import RunRecord, TraceRecord
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+_BODY_KEYS = ("spec", "plan_id")
+
+
+@router.post("/api/check")
+async def post_check(request: Request) -> CheckResponse:
+    """body 同 /api/run。通过返回 status=ok、整理好的 spec（事件按事件库生成、默认值标出）和说明文字，不计算。"""
+    body, issues = await _read_body(request)
+    if body is None:
+        return CheckResponse(status="needs_revision", issues=issues)
+    return await run_in_threadpool(check, body["spec"], body.get("plan_id"), services_of(request))
+
+
+@router.post("/api/run")
+async def post_run(request: Request) -> RunResponse:
+    """body：{"spec": QuerySpec, "plan_id": "..."}，plan_id 可选。"""
+    body, issues = await _read_body(request)
+    if body is None:
+        return _revise(*issues)
+    # 计算要几秒，放到线程池里，别卡住同时进来的其他请求（比如查同步进度）
+    return await run_in_threadpool(execute, body["spec"], body.get("plan_id"), services_of(request))
+
+
+def check(raw_spec: object, plan_id: str | None, services: Services) -> CheckResponse:
+    status = services.data_status()
+    if not status.ready:
+        return CheckResponse(
+            status="data_not_ready", message=status.reason, data=_progress(status, services)
+        )
+    spec, issues = check_spec(raw_spec, services.ds, services.events)
+    if spec is None:
+        return CheckResponse(status="needs_revision", issues=issues)
+    try:
+        spec, assumptions = _explained(spec, services, plan_id)
+    except (MissingDataError, ExprDataError) as exc:
+        return CheckResponse(status="needs_revision", issues=[Issue(message=str(exc))])
+    return CheckResponse(
+        status="ok",
+        spec=spec.model_dump(mode="json", by_alias=True),
+        assumptions=[
+            AssumptionItem(field=item.field, text=item.text, default=item.default)
+            for item in assumptions
+        ],
+    )
+
+
+def execute(raw_spec: object, plan_id: str | None, services: Services) -> RunResponse:
+    status = services.data_status()
+    if not status.ready:
+        return RunResponse(
+            status="data_not_ready", message=status.reason, data=_progress(status, services)
+        )
+    spec, issues = check_spec(raw_spec, services.ds, services.events)
+    if spec is None:
+        return _revise(*issues)
+
+    started = time.perf_counter()
+    steps: list[dict[str, object]] = [
+        {"step": "check_spec", "shape": spec.shape, "plan_id": plan_id, "issues": []}
+    ]
+    try:
+        mark = time.perf_counter()
+        spec, assumptions = _explained(spec, services, plan_id)
+        steps.append({"step": "explain", "assumptions": len(assumptions), "ms": _ms(mark)})
+        mark = time.perf_counter()
+        result = run_research(spec, services.ds)
+        steps.append({"step": "research.run", "ms": _ms(mark)})
+    except (MissingDataError, ExprDataError) as exc:
+        return _revise(Issue(message=str(exc)))
+    except Exception as exc:  # noqa: BLE001 —— 算不出来也要给用户一个记录编号，不能只回 500
+        error = f"{type(exc).__name__}: {exc}"
+        run_id = services.store.save_run(
+            _record(spec, plan_id, status.data_through, started, status="failed", error=error)
+        )
+        logger.exception("计算出错，运行记录 %s", run_id)
+        steps.append({"step": "respond", "status": "failed", "error": error})
+        _save_trace(services, run_id, spec, steps)
+        message = f"计算时出错了，运行记录编号 {run_id}，详情见服务日志"
+        return RunResponse(status="failed", run_id=run_id, message=message)
+
+    payload = result_to_dict(result)
+    run_id = services.store.save_run(
+        _record(spec, plan_id, status.data_through, started, status="done", result=payload)
+    )
+    steps.append({"step": "respond", "status": "done", **_size(payload), "ms": _ms(started)})
+    _save_trace(services, run_id, spec, steps)
+    return RunResponse(status="done", run_id=run_id, result=payload)
+
+
+def _ms(mark: float) -> int:
+    return round((time.perf_counter() - mark) * 1000)
+
+
+def _size(payload: dict[str, Any]) -> dict[str, object]:
+    """结果多大：股票表 / 板块表看满足条件的只数和取回几行，个股回看看触发了几次。"""
+    if "total" in payload:
+        return {"total": payload["total"], "rows": len(payload.get("rows") or ())}
+    return {"triggers": len(payload.get("triggers") or ())}
+
+
+def _save_trace(
+    services: Services, run_id: str, spec: Spec, steps: list[dict[str, object]]
+) -> None:
+    """记录失败不能影响回答：结果已经算好存好了，过程记录只是给开发看的。"""
+    try:
+        services.store.save_trace(TraceRecord(record_id=run_id, query=spec.shape, steps=steps))
+    except Exception:  # noqa: BLE001 —— 存不下就算了，只记一条日志
+        logger.warning("运行 %s 的过程记录没能存下来", run_id, exc_info=True)
+
+
+@router.get("/api/run/{run_id}")
+def get_run(run_id: str, request: Request) -> dict[str, object]:
+    """运行记录：spec、结果或错误、数据截至哪天、事件库版本、耗时。"""
+    record = services_of(request).store.get_run(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"没有编号为 {run_id} 的运行记录")
+    return asdict(record)
+
+
+@router.get("/api/traces/{record_id}")
+def get_trace(record_id: str, request: Request) -> dict[str, object]:
+    """过程记录：这次提问 / 运行的每一步调了什么、返回了什么、花了多久。
+
+    编号用 plan_id 或 run_id。给开发排查用——「大模型到底回了什么」以前只能靠猜。
+    """
+    record = services_of(request).store.get_trace(record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"没有编号为 {record_id} 的过程记录")
+    return asdict(record)
+
+
+async def _read_body(request: Request) -> tuple[dict[str, Any] | None, list[Issue]]:
+    try:
+        body = json.loads(await request.body())
+    except ValueError:
+        return None, [Issue(message='请求体要是 JSON，如 {"spec": {...}}')]
+    if not isinstance(body, dict):
+        return None, [Issue(message='请求体要是一个对象，如 {"spec": {...}}')]
+    issues = [Issue(path=str(key), message="不认识这一项") for key in body if key not in _BODY_KEYS]
+    if "spec" not in body:
+        issues.append(Issue(path="spec", message="缺少这一项"))
+    plan_id = body.get("plan_id")
+    if plan_id is not None and not isinstance(plan_id, str):
+        issues.append(Issue(path="plan_id", message="要是文字"))
+    return (None, issues) if issues else (body, [])
+
+
+def _explained(
+    spec: Spec, services: Services, plan_id: str | None
+) -> tuple[Spec, list[Assumption]]:
+    """说明文字写进 spec.assumptions，运行记录里存的就是确认卡上那份。
+    带 plan_id 时，没改过的栏目继续用提问原话的说法。"""
+    record = services.store.get_plan(plan_id) if plan_id else None
+    mentions = plan_mentions(spec.model_dump(mode="json", by_alias=True), record)
+    assumptions = explain(spec, services.ds, mentions)
+    texts = tuple(item.text for item in assumptions)
+    return spec.model_copy(update={"assumptions": texts}), assumptions
+
+
+def _progress(status: DataStatus, services: Services) -> dict[str, object]:
+    return {"status": to_jsonable(status), "sync": services.sync_job.snapshot()}
+
+
+def _record(
+    spec: Spec, plan_id: str | None, data_through: str | None, started: float, **outcome: object
+) -> RunRecord:
+    return RunRecord(
+        spec=spec.model_dump(mode="json", by_alias=True),
+        plan_id=plan_id,
+        data_through=data_through,
+        library_version=spec.event.library_version if isinstance(spec, StockHistorySpec) else None,
+        duration_ms=round((time.perf_counter() - started) * 1000),
+        **outcome,  # type: ignore[arg-type]
+    )
+
+
+def _revise(*issues: Issue) -> RunResponse:
+    return RunResponse(status="needs_revision", issues=list(issues))

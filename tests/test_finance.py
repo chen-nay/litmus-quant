@@ -26,6 +26,7 @@ def fina_row(**overrides) -> dict:
         "roe_yearly": 50.0,
         "or_yoy": 18.3,
         "netprofit_yoy": 22.1,
+        "update_flag": "1",
     }
     return {**row, **overrides}
 
@@ -104,6 +105,19 @@ def test_更正公告必须保留而不是去重():
 def test_整行重复才去掉():
     table = normalize_fina_indicator([fina_row(), fina_row(), fina_row()])
     assert table.height == 1
+
+
+def test_同一公告日的几个版本都保留并带上更新标志():
+    """实测同一 (股票, 报告期, 公告日) 有几千组数值不同的行，只有 update_flag 能区分。
+    归一层原样保留，哪条有效由读取时决定。"""
+    table = normalize_fina_indicator(
+        [
+            fina_row(roe_yearly=6.4353, update_flag="0"),
+            fina_row(roe_yearly=6.4077, update_flag="1"),
+        ]
+    )
+    assert table.height == 2
+    assert sorted(table.get_column("update_flag").to_list()) == ["0", "1"]
 
 
 def test_缺公告日不丢数据只记一笔(caplog):

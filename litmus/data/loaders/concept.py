@@ -26,6 +26,9 @@ import polars as pl
 
 from litmus.data.loaders.normalize import NormalizeError, frame_from_rows
 
+#: 三个接口都要的积分。没权限时能力探测把概念板块关掉，原因里带上这个数
+CONCEPT_POINTS = 6000
+
 #: 板块类型。接口一次返回概念 / 行业 / 风格 / 地区四类（实测共 613 个），P0 只要概念板块
 CONCEPT_TYPE = "概念板块"
 
@@ -132,6 +135,7 @@ def normalize_tdx_daily(rows: Sequence[Mapping]) -> pl.DataFrame:
 
 
 __all__ = [
+    "CONCEPT_POINTS",
     "CONCEPT_TYPE",
     "DAILY_FIELDS",
     "INDEX_FIELDS",

@@ -18,7 +18,11 @@ from datetime import datetime
 
 import polars as pl
 
+from litmus.data.fields import SW_INDUSTRY_L2_CAPABILITY
 from litmus.data.storage import MarketStore, MissingDataError, StorageError, read_json, write_json
+
+#: 没记过的能力为什么不可用：概念板块是还没探测权限；申万二级行业不用探测，是还没同步过
+_NOT_RECORDED = {SW_INDUSTRY_L2_CAPABILITY: "还没同步过，同步一次后可用"}
 
 #: 结构变了就加一，老数据目录直接要求重新同步
 MANIFEST_VERSION = 1
@@ -61,7 +65,6 @@ class Capability:
 @dataclass
 class Manifest:
     source: str = "tushare"
-    first_sync_done: bool = False
     updated_at: str = ""
     version: int = MANIFEST_VERSION
     months: dict[str, dict[str, MonthRecord]] = field(default_factory=dict)
@@ -84,9 +87,10 @@ class Manifest:
                 f"{store.manifest_path} 是第 {version} 版，当前程序用第 {MANIFEST_VERSION} 版；"
                 f"删掉 {store.market} 重新同步"
             )
+        # 老账本里的 first_sync_done 不再读：历史补没补完从日频月份推导（DataSync.status），
+        # 另存一个标记只会和文件对不上。只是少读一个字段，不用升版本，也不用重新同步
         return cls(
             source=raw["source"],
-            first_sync_done=raw["first_sync_done"],
             updated_at=raw["updated_at"],
             months={
                 dataset: {m: MonthRecord(**rec) for m, rec in recs.items()}
@@ -162,5 +166,5 @@ class Manifest:
     def unavailable_reason(self, name: str) -> str:
         capability = self.capabilities.get(name)
         if capability is None:
-            return "还没探测过这项数据"
+            return _NOT_RECORDED.get(name, "还没探测过这项数据")
         return capability.reason
