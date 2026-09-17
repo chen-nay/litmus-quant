@@ -1164,27 +1164,45 @@ class LLMClient:
         失败时把校验错误喂回去重试一次。"""
 ```
 
+**环境变量分两类**（`llm/providers.py`）：厂商特有的（调谁、在哪、怎么认证）和通用的（怎么调）。
+厂商按 `PROVIDERS` 的顺序找，第一家填了 API key 的生效；选中之后这一组连同通用的要填齐，
+缺了启动时说清缺哪个。**代码里不藏默认值**，只有 `LLM_TIMEOUT` 不填时按 180 秒。认证头随厂商定死。
+
 ```
 # .env
-LLM_BASE_URL=https://<火山引擎端点>
-LLM_API_KEY=xxx
-LLM_MODEL=<模型名>
-LLM_TEMPERATURE=0
+ARK_API_KEY=xxx                               # 火山引擎方舟
+ARK_MODEL=glm-5.3-flash
+ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/coding
+
+# ANTHROPIC_API_KEY=xxx                       # Anthropic 官方，地址不填，SDK 自带
+# ANTHROPIC_MODEL=claude-opus-5
+
+LLM_TEMPERATURE=0                             # 通用，换哪家都一样
+# LLM_TIMEOUT=180                             # 可选
 ```
+
+| 厂商 | 前缀 | 必填 | 认证头 |
+|---|---|---|---|
+| 火山引擎方舟 | `ARK` | `API_KEY`、`MODEL`、`BASE_URL` | `Authorization: Bearer` |
+| Anthropic | `ANTHROPIC` | `API_KEY`、`MODEL`（地址用 SDK 自带） | `x-api-key` |
+| 通用 | — | `LLM_TEMPERATURE`；`LLM_TIMEOUT` 可选 | — |
 
 `LLMClient` 是抽象基类，P1 可加 `OpenAICompatClient` 支持 DeepSeek / 通义 / Ollama。
 
 **强制 tool_use 已实测可用**（火山引擎 `ark.cn-beijing.volces.com/api/coding` + `glm-5.3-flash`，2026-09-12）：
 
-- **认证头按端点不同，必须可配**：火山引擎用 `Authorization: Bearer`（SDK 里是 `Anthropic(auth_token=...)`），
+- **认证头按厂商不同**：火山引擎用 `Authorization: Bearer`（SDK 里是 `Anthropic(auth_token=...)`），
   Anthropic 官方用 `x-api-key`（`Anthropic(api_key=...)`）。写死任何一种，另一边都会 401。
-  由 `LLM_AUTH_STYLE` 控制：默认 `auto`（`api.anthropic.com` 用 x-api-key，其余用 bearer），
-  可显式设为 `bearer` / `x-api-key`；收到 401 时自动换另一种重试一次，并在日志里记下哪种可用
+  由 `providers.py` 里每家自己声明，401 时直接报错并说清检查哪个环境变量
 - `tool_choice={"type":"tool","name":"output"}` 能强制调用，返回 `stop_reason=tool_use`
 - **响应的 `content` 里可能含 `thinking` 块**（实测是 `["thinking", "tool_use"]`）。
   解析时必须遍历 content 找 `type == "tool_use"` 的块，**不能取 `content[0]`**
 - 实测还确认了一件事：不给字段和算子清单时，模型会自己发明表达式语法（它写出了 `amount[-1] > 2 * mean(amount[-21:-2])`）。
   这正是 §5.2 防线② 存在的理由——表达式必须过 `expr.validate()`
+
+**火山引擎只走 Anthropic 协议**（2026-09-17 实测）：原生 SDK `arkruntime` 在 `/api/coding` 下
+`responses.create`、`chat.completions` 都返回 404；换 `/api/v3` 两个都返回
+`InvalidEndpointOrModel.NotFound`（coding plan 的 key 绑在 `/api/coding` 上）。所以用 `anthropic` SDK。
 
 **分工**：api 决定"什么时候调"，llm 决定"怎么调"（提示词、模型、重试、结果检查）。api 不接触任何提示词。
 
@@ -1192,7 +1210,7 @@ LLM_TEMPERATURE=0
 
 - anthropic SDK 1.5 的 `messages.create` 没有 `temperature` 参数，放进请求体（`extra_body`）
 - 这个模型**不能关闭思考**（`thinking.type=disabled` 返回 400），一次提问 12~49 秒：页面上要显示在想，
-  超时 `LLM_TIMEOUT` 默认 180 秒（第 7d 步实测回答追问用了 106 秒，原来的 120 秒太紧）；
+  超时 `<前缀>_TIMEOUT` 默认 180 秒（第 7d 步实测回答追问用了 106 秒，原来的 120 秒太紧）；
   SDK 自带的重试关掉（`max_retries=0`），否则超时后再试两次，用户要干等三倍时间才看到失败
 - 格式里的必填项接口不强制：模型偶尔漏填 `status`。代码按内容推断——有追问就是澄清，填了形状就是 ok
 - 不写明「没说的栏目不填」，模型会自己编持有天数（问「之后表现怎么样」给出 1/5/10/20 天）；写明之后不再出现
@@ -1601,7 +1619,7 @@ class Store(Protocol):
     每条提问存一份很快几兆。存 `prompt_version`（模板哈希）+ `rendered_hash`（渲染后哈希）足够定位是哪一版——
     模板在 git 里，变量能从当天数据重建。只记 `prompt_version` 不够：同一模板在不同日期渲染出的内容不同
   - **原始返回整份存**：它小（几百 token），而且是唯一事后重建不出来的东西。还记 model、token 数、耗时
-  - **不记任何密钥**：`.env` 里的 `LLM_API_KEY` 一个字符都不进记录
+  - **不记任何密钥**：`.env` 里的 API key 一个字符都不进记录
   - **存不下来不影响回答**：过程记录是给开发看的，用户的答案已经算好了，写失败只记一条日志
   - **页面上看**：结果页有个折叠的「技术细节」，同时显示这次运行和它对应的那次提问。
     由 `.env` 的 `LITMUS_SHOW_TRACE` 控制（默认开）。**开关只管显不显示，不管记不记**——

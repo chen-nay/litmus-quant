@@ -10,14 +10,24 @@ import pytest
 
 from litmus.llm.client import AnthropicClient, LLMConfig, LLMError
 from litmus.llm.prompts import PromptError, load_prompt
+from litmus.llm.providers import PROVIDERS, detect, missing_message
 
 SCHEMA = {"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}
+ARK, ANTHROPIC = PROVIDERS
 VOLCES = "https://ark.cn-beijing.volces.com/api/coding"
+#: 一组填齐的火山引擎配置（厂商特有 + 通用）
+ARK_ENV = {
+    "ARK_API_KEY": "k",
+    "ARK_MODEL": "m",
+    "ARK_BASE_URL": VOLCES,
+    "LLM_TEMPERATURE": "0",
+}
 
 
-def config(**changes) -> LLMConfig:
-    values = {"base_url": VOLCES, "api_key": "k", "model": "m", **changes}
-    return LLMConfig(**values)
+def config(provider=ARK, **changes) -> LLMConfig:
+    base = VOLCES if provider is ARK else ""
+    values = {"api_key": "k", "model": "m", "base_url": base, **changes}
+    return LLMConfig(provider=provider, **values)
 
 
 def reply(data=None, blocks=("thinking", "tool_use")):
@@ -64,33 +74,62 @@ class FakeSDK:
 # ── 配置 ────────────────────────────────────────────────────────
 
 
-def test_配置缺项时说清缺什么():
-    with pytest.raises(LLMError, match="LLM_API_KEY、LLM_MODEL"):
-        LLMConfig.from_env({"LLM_BASE_URL": VOLCES})
+def test_一家都没配时说清该填什么():
+    assert detect({}) is None
+    assert detect({"ARK_API_KEY": "   "}) is None  # 空白不算配了
+    with pytest.raises(LLMError, match="ARK_API_KEY"):
+        LLMConfig.from_env({})
+    assert "ANTHROPIC_API_KEY" in missing_message()
 
 
-def test_配置从环境变量读():
-    loaded = LLMConfig.from_env(
-        {"LLM_BASE_URL": VOLCES, "LLM_API_KEY": "k", "LLM_MODEL": "m", "LLM_TIMEOUT": "90"}
+def test_按顺序找_第一家配了API_KEY的就是它():
+    assert detect({"ARK_API_KEY": "k"}) is ARK
+    assert detect({"ANTHROPIC_API_KEY": "k"}) is ANTHROPIC
+    # 两家都配了，按 PROVIDERS 的顺序取前面那家
+    assert detect({"ANTHROPIC_API_KEY": "k", "ARK_API_KEY": "k"}) is ARK
+
+
+def test_选中一家之后这组字段要填齐_缺了说清缺哪个():
+    # 厂商特有的和通用的一起报
+    with pytest.raises(LLMError, match="ARK_MODEL、ARK_BASE_URL、LLM_TEMPERATURE"):
+        LLMConfig.from_env({"ARK_API_KEY": "k"})
+    with pytest.raises(LLMError, match="LLM_TEMPERATURE"):
+        LLMConfig.from_env({**ARK_ENV, "LLM_TEMPERATURE": "  "})
+    # Anthropic 官方不填地址，所以它不在必填里
+    with pytest.raises(LLMError, match="ANTHROPIC_MODEL、LLM_TEMPERATURE"):
+        LLMConfig.from_env({"ANTHROPIC_API_KEY": "k"})
+    assert "BASE_URL" not in ANTHROPIC.required
+
+
+def test_温度和超时是通用的_换哪家都一样():
+    for env in (
+        ARK_ENV,
+        {"ANTHROPIC_API_KEY": "k", "ANTHROPIC_MODEL": "m", "LLM_TEMPERATURE": "0.7"},
+    ):
+        assert LLMConfig.from_env({**env, "LLM_TEMPERATURE": "0.7"}).temperature == 0.7
+        assert LLMConfig.from_env({**env, "LLM_TIMEOUT": "90"}).timeout == 90.0
+    # 只有超时不填时有默认
+    assert LLMConfig.from_env(ARK_ENV).timeout == 180.0
+
+
+def test_配置全部从环境变量读_代码里不藏默认值():
+    loaded = LLMConfig.from_env({**ARK_ENV, "ARK_MODEL": "别的模型"})
+    assert (loaded.provider, loaded.api_key) == (ARK, "k")
+    assert (loaded.model, loaded.base_url) == ("别的模型", VOLCES)
+
+    official = LLMConfig.from_env(
+        {"ANTHROPIC_API_KEY": "k", "ANTHROPIC_MODEL": "claude-opus-5", "LLM_TEMPERATURE": "0"}
     )
-    assert (loaded.temperature, loaded.auth_style, loaded.timeout) == (0.0, "auto", 90.0)
-    unset = LLMConfig.from_env({"LLM_BASE_URL": VOLCES, "LLM_API_KEY": "k", "LLM_MODEL": "m"})
-    assert unset.timeout == 180.0
-    with pytest.raises(LLMError, match="LLM_AUTH_STYLE"):
-        LLMConfig.from_env(
-            {
-                "LLM_BASE_URL": VOLCES,
-                "LLM_API_KEY": "k",
-                "LLM_MODEL": "m",
-                "LLM_AUTH_STYLE": "basic",
-            }
-        )
+    assert official.provider is ANTHROPIC and official.base_url == ""  # 用 SDK 自带的地址
 
 
-def test_认证方式默认按域名选():
-    assert config().first_auth() == "bearer"
-    assert config(base_url="https://api.anthropic.com").first_auth() == "x-api-key"
-    assert config(auth_style="x-api-key").first_auth() == "x-api-key"
+def test_温度和超时写成非数字时报错():
+    with pytest.raises(LLMError, match="LLM_TEMPERATURE"):
+        LLMConfig.from_env({**ARK_ENV, "LLM_TEMPERATURE": "很高"})
+
+
+def test_认证头随厂商定死():
+    assert (ARK.auth, ANTHROPIC.auth) == ("bearer", "x-api-key")
 
 
 # ── 调用 ────────────────────────────────────────────────────────
@@ -106,6 +145,7 @@ def test_强制调用工具_跳过思考块取结构化结果_温度放进请求
     assert call["tools"][0]["input_schema"] == SCHEMA
     assert call["extra_body"] == {"temperature": 0.0}
     assert sdk.clients[0]["auth_token"] == "k" and "api_key" not in sdk.clients[0]
+    assert sdk.clients[0]["base_url"] == VOLCES
     assert sdk.clients[0]["max_retries"] == 0  # SDK 自己不重试，超时了马上告诉用户
 
 
@@ -115,18 +155,21 @@ def test_没有返回工具调用就报错():
         AnthropicClient(config(), factory=sdk).structured("s", "u", SCHEMA)
 
 
-def test_401时自动换另一种认证_换成功就记住():
-    sdk = FakeSDK(auth_error(), reply(), reply())
-    client = AnthropicClient(config(), factory=sdk)
-    client.structured("s", "u", SCHEMA)
-    client.structured("s", "u", SCHEMA)
-    assert ["auth_token" in c for c in sdk.clients] == [True, False, False]
+def test_Anthropic官方不传base_url_用SDK自带的地址():
+    sdk = FakeSDK(reply())
+    AnthropicClient(config(ANTHROPIC), factory=sdk).structured("s", "u", SCHEMA)
+    assert "base_url" not in sdk.clients[0]
+    assert sdk.clients[0]["api_key"] == "k" and "auth_token" not in sdk.clients[0]
 
 
-def test_明确指定认证方式时401直接报错():
+def test_认证失败时说清检查哪个环境变量():
     sdk = FakeSDK(auth_error())
-    with pytest.raises(LLMError, match="认证失败"):
-        AnthropicClient(config(auth_style="bearer"), factory=sdk).structured("s", "u", SCHEMA)
+    with pytest.raises(LLMError, match="火山引擎方舟认证失败.*ARK_API_KEY"):
+        AnthropicClient(config(), factory=sdk).structured("s", "u", SCHEMA)
+    with pytest.raises(LLMError, match="ANTHROPIC_API_KEY"):
+        AnthropicClient(config(ANTHROPIC), factory=FakeSDK(auth_error())).structured(
+            "s", "u", SCHEMA
+        )
 
 
 def test_超时说清等了多久():

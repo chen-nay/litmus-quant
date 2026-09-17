@@ -19,6 +19,8 @@ from litmus.llm.models import (
     Question,
 )
 from litmus.llm.planner import plan
+from litmus.llm.providers import PROVIDERS, Provider
+from litmus.llm.providers import detect as detect_provider
 
 __all__ = [
     "CLARIFY",
@@ -33,9 +35,12 @@ __all__ = [
     "LLMError",
     "NameMention",
     "PlanContext",
+    "PROVIDERS",
     "PlanResult",
     "PreviousTurn",
+    "Provider",
     "Question",
     "StructuredReply",
+    "detect_provider",
     "plan",
 ]

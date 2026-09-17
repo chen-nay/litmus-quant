@@ -1,15 +1,16 @@
 """LLMClient：整个项目只通过它调用大模型（ARCHITECTURE §5.1）。业务代码不感知底层是哪家。
 
-P0 只有 Anthropic Messages 协议（anthropic SDK，覆盖 base_url 对接火山引擎）。结构化输出用强制 tool_use：
-定义一个叫 output 的工具，input_schema 就是目标格式，tool_choice 强制调用，取 tool_use 块的 input。
+Anthropic Messages 协议（anthropic SDK）。哪家、用什么认证头，由 `providers.py` 按环境变量定；
+Anthropic 官方不填 base_url，用 SDK 自带的地址。结构化输出用强制 tool_use：定义一个叫 output 的工具，
+input_schema 就是目标格式，tool_choice 强制调用，取 tool_use 块的 input。
 
 实测（火山引擎 ark.cn-beijing.volces.com/api/coding + glm-5.3-flash）：
-- 认证头要可配：火山引擎用 Authorization: Bearer（SDK 的 auth_token），Anthropic 官方用 x-api-key（api_key）。
-  默认按域名选，收到 401 自动换另一种再试一次，并在日志里提示写进 .env
+- 认证头：火山引擎用 Authorization: Bearer（SDK 的 auth_token），Anthropic 官方用 x-api-key（api_key）
 - 返回的 content 是 [thinking, tool_use]：要找 type == "tool_use" 的块，不能取第一个
 - anthropic SDK 1.5 的 messages.create 没有 temperature 参数（2026-09-15），放进请求体
-- 扁平的输出格式（没有 $defs、oneOf）能被接受
+- 嵌套的输出格式（对象、对象数组）能被接受，2026-09-17 实测
 - glm-5.3-flash 不能关闭思考（thinking.type=disabled 返回 400），一次 12~49 秒：页面上要显示在想，超时要给够
+- 同一段系统提示词连着问，后面几次的 input token 掉到几十：提示词被缓存了
 """
 
 from __future__ import annotations
@@ -21,13 +22,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
 
 import anthropic
 
-logger = logging.getLogger(__name__)
+from litmus.llm.providers import BEARER, TIMEOUT_VAR, Provider, detect, missing_message
 
-AUTO, BEARER, X_API_KEY = "auto", "bearer", "x-api-key"
+logger = logging.getLogger(__name__)
 
 #: 强制调用的工具名
 TOOL_NAME = "output"
@@ -42,43 +42,42 @@ class LLMError(RuntimeError):
 
 @dataclass(frozen=True)
 class LLMConfig:
-    base_url: str
+    provider: Provider
     api_key: str
     model: str
+    #: 空表示用 SDK 自带的地址（Anthropic 官方就是这种）
+    base_url: str = ""
     temperature: float = 0.0
-    auth_style: str = AUTO
     #: 带思考一次十几到一百多秒（第 7d 步实测回答追问 106 秒）
     timeout: float = 180.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> LLMConfig:
         env = os.environ if env is None else env
-        missing = [
-            name for name in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL") if not env.get(name)
-        ]
+        provider = detect(env)
+        if provider is None:
+            raise LLMError(missing_message())
+
+        missing = provider.missing(env)
         if missing:
-            raise LLMError(f"缺少 {'、'.join(missing)}，请在 .env 中配置")
-        style = env.get("LLM_AUTH_STYLE") or AUTO
-        if style not in (AUTO, BEARER, X_API_KEY):
-            raise LLMError(f"LLM_AUTH_STYLE 只能是 auto、bearer、x-api-key，收到 {style!r}")
+            raise LLMError(f"用{provider.label}还缺这几项，在 .env 里填：{'、'.join(missing)}")
+
+        def read(name: str, fallback: str = "") -> str:
+            return env.get(name, "").strip() or fallback
+
         try:
-            temperature = float(env.get("LLM_TEMPERATURE") or 0)
-            timeout = float(env.get("LLM_TIMEOUT") or cls.timeout)
+            temperature = float(read("LLM_TEMPERATURE"))
+            timeout = float(read(TIMEOUT_VAR, str(cls.timeout)))
         except ValueError as exc:
-            raise LLMError(f"LLM_TEMPERATURE、LLM_TIMEOUT 要是数字：{exc}") from exc
+            raise LLMError(f"LLM_TEMPERATURE、{TIMEOUT_VAR} 要是数字：{exc}") from exc
         return cls(
-            base_url=env["LLM_BASE_URL"],
-            api_key=env["LLM_API_KEY"],
-            model=env["LLM_MODEL"],
+            provider=provider,
+            api_key=read(provider.var("API_KEY")),
+            model=read(provider.var("MODEL")),
+            base_url=read(provider.var("BASE_URL")),
             temperature=temperature,
-            auth_style=style,
             timeout=timeout,
         )
-
-    def first_auth(self) -> str:
-        if self.auth_style != AUTO:
-            return self.auth_style
-        return X_API_KEY if urlparse(self.base_url).hostname == "api.anthropic.com" else BEARER
 
 
 @dataclass(frozen=True)
@@ -103,37 +102,29 @@ class AnthropicClient(LLMClient):
     def __init__(self, config: LLMConfig, factory: Callable[..., Any] = anthropic.Anthropic):
         self._config = config
         self._factory = factory
-        self._auth = config.first_auth()
 
     def structured(self, system: str, user: str, schema: Mapping[str, Any]) -> StructuredReply:
+        config = self._config
         try:
-            return self._call(self._auth, system, user, schema)
-        except anthropic.AuthenticationError as exc:
-            if self._config.auth_style != AUTO:
-                raise LLMError(f"大模型接口认证失败（{self._auth}），检查 LLM_API_KEY") from exc
-        other = X_API_KEY if self._auth == BEARER else BEARER
-        try:
-            reply = self._call(other, system, user, schema)
+            return self._call(system, user, schema)
         except anthropic.AuthenticationError as exc:
             raise LLMError(
-                "大模型接口认证失败（bearer、x-api-key 都试过），检查 LLM_API_KEY"
+                f"{config.provider.label}认证失败，检查 .env 里的 {config.provider.var('API_KEY')}"
             ) from exc
-        logger.warning("认证方式换成 %s 才调通，建议在 .env 里写 LLM_AUTH_STYLE=%s", other, other)
-        self._auth = other
-        return reply
 
-    def _call(
-        self, auth: str, system: str, user: str, schema: Mapping[str, Any]
-    ) -> StructuredReply:
+    def _call(self, system: str, user: str, schema: Mapping[str, Any]) -> StructuredReply:
         config = self._config
-        credential = (
-            {"auth_token": config.api_key} if auth == BEARER else {"api_key": config.api_key}
+        credential: dict[str, Any] = (
+            {"auth_token": config.api_key}
+            if config.provider.auth == BEARER
+            else {"api_key": config.api_key}
         )
         # SDK 默认超时、连不上时自己再试 2 次：慢的时候用户要干等三倍超时才看到失败。不让它重试，
         # 输出不对的重试由 planner 负责
-        client = self._factory(
-            base_url=config.base_url, timeout=config.timeout, max_retries=0, **credential
-        )
+        # Anthropic 官方不填 base_url，用 SDK 自带的地址
+        if config.base_url:
+            credential["base_url"] = config.base_url
+        client = self._factory(timeout=config.timeout, max_retries=0, **credential)
         started = time.perf_counter()
         try:
             response = client.messages.create(
