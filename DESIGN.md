@@ -1,7 +1,7 @@
 # 查询结构（v2）
 
 > 状态：**设计定稿中，代码在 `feature/filter-p2` 上开发**。开发完成后并入 ARCHITECTURE.md，本文件删除。
-> 依据是 [QUESTIONS.md](QUESTIONS.md) 的 79 条真实提问；改结构就要拿那份清单重新验一遍。
+> 依据是 [QUESTIONS.md](QUESTIONS.md) 的 96 条真实提问；改结构就要拿那份清单重新验一遍。
 
 ## 1. 五个维度
 
@@ -19,7 +19,10 @@
 }
 ```
 
-形态分布（79 条提问）：表 42、卡 17、统计 14、拒 6。
+一次提问的去向有五个：**改写建议**（答不了）、**澄清卡**（信息不够，给选项）、
+**确认卡 → 表**、**确认卡 → 统计**、**卡**（直接出，不走确认卡）。
+
+形态分布（96 条提问）：表 56、卡 20、统计 14、拒 6。
 
 ### 1.1 scope —— 在谁身上算
 
@@ -58,49 +61,116 @@ subject 是牧原 1 只——最后只显示它。
 ### 1.3 when —— 哪天 / 哪段
 
 ```json
-{ "as_of": "2026-09-14" }                                  // 时点：table、card
-{ "range": { "from": "2016-01-04", "to": "2026-09-14" } }  // 区间：event_study
+{ "as_of": "2026-09-16" }                                  // 时点：table、card
+{ "range": { "from": "2016-01-04", "to": "2026-09-16" } }  // 区间：event_study
 ```
 
-二选一。没填时由代码补，**按这个查询实际用到哪类数据定**：用概念板块就取概念板块的最新一天
-（本地到 2026-09-11），用股票行情就取股票的最新一天（2026-09-14）。区间没填取本地全部数据范围。
+二选一。没填时由代码补，**取这个查询实际用到的各类数据里最新日最早的那个**——
+概念板块常落后于股票行情，一刀切取股票的最新日，问概念板块就会报错（QUESTIONS.md B107 实测到）。
 
-### 1.4 metrics —— 算什么
+**这带来一处顺序要求**：要知道用到哪些数据，得先看表达式里有哪些字段
+（`explain.py:_used_data` 已经在干这事：用了 `$roe` 就要财务，用了 `$market_cap` 就要日频）。
+所以检查的顺序必须是**先解析结构和表达式 → 算出用到哪些数据 → 再回填日期**，
+不能像 v1 那样在 `parse_spec` 之前就按形状把日期填掉。
 
-结果表和卡上要显示的指标，一组表达式。
+### 1.4 metrics —— 算哪些数
+
+一项 = **一个名字 + 一个公式**。含义只有一个：把这个数算出来，算出来的那一列就叫这个名字。
 
 ```json
-[ { "expr": "$pe_ttm",                    "label": "市盈率TTM" },
-  { "expr": "TsRank($pe_ttm, 500)",       "label": "两年分位" },
-  { "expr": "PctSince($close, 20251231)", "label": "今年以来涨幅" } ]
+[ { "name": "今年涨幅", "expr": "PctSince($close, 20251231)" },
+  { "name": "市盈率",   "expr": "$pe_ttm" },
+  { "name": "两年分位", "expr": "TsRank($pe_ttm, 500)" } ]
 ```
 
-每一项过 `expr.parse` + `expr.validate`，和 filter、sort 走同一套校验，未来函数在语法层杜绝。
-`label` 是确认卡和结果表上的列名。
+算出来是什么：池子里每只标的跑一遍这个公式，得到一列数。三个 metric 就是三列。
+
+```
+       code       今年涨幅    市盈率   两年分位
+  000019.SZ       -0.0109     43.4      0.31
+  000048.SZ       +0.1267      空       空
+  …（池子有多少只就多少行）
+```
+
+**`name` 是列名，也是别处引用它的钥匙**——`output.sort.by` 填的就是这里的 `name`。
+每一项的 `expr` 过 `expr.parse` + `expr.validate`，和 filter 走同一套校验，未来函数在语法层杜绝。
+
+**算出来之后拿它干什么，由 `output` 决定，和算本身分开。** 这是 v1 的根本问题所在：
+v1 里一个公式写在哪儿就决定了它干什么——写进 `filter` 是筛选条件，写进 `sort` 是排序依据，
+没有第三个地方，所以「只想看这个数」说不出来。实测后果：想在表里多看一列市盈率，
+只能把 `$pe_ttm > 0` 塞进筛选条件，池子从 100 只变成 55 只——为了多看一列丢掉 45 只股票。
+结果列是 `collect_fields(排序公式)` 扒出来的副产品（`screener.py:86-90`），
+公式里写 `$close` 就出现 close 列，改写成 `$vwap` 就变成 vwap 列，
+和「用户想看什么」没有关系。
 
 ### 1.5 output —— 怎么出
 
 ```json
-{ "kind": "table",  "filter": {...}, "sort": {...}, "limit": 50 }
+{ "kind": "table", "filter": { "expr": "$pe_ttm < 20" },
+  "sort": { "by": "今年涨幅", "order": "desc" }, "limit": 50 }
 { "kind": "card" }
 { "kind": "event_study", "event": {...}, "horizons": [5,20,60],
   "benchmark": "universe_equal_weight", "cost_bps": 30 }
 ```
 
-- **table**：筛选 → 排序 → 取前 N
-- **card**：把 metrics 原样列出来。没有 filter / sort / limit
-- **event_study**：按事件触发点分组统计。`universe_equal_weight` 指 scope 的等权
+- **table**：筛 → 排 → 取前 N，metrics 全部显示。
+  **`sort.by` 填的是某个 metric 的 `name`**，不是公式——公式只在 `metrics` 里定义一次。
+  `filter` 仍然写表达式：它是个条件（真假），不是一个要显示的数
+- **card**：不筛不排，metrics 直接显示。没有 filter / sort / limit 这几个字段
+- **event_study**：按事件触发点分组统计。`universe_equal_weight` 指 scope 的等权。
+  **不填 metrics**——统计的内容是触发点和之后的涨跌，跟展示指标无关
 
-### 1.6 narrate —— 要不要再写一段话
+三种共用同一张算好的 metrics 表，区别只在拿它干什么：
 
-算完之后多一步：把算好的数字交给大模型，让它写一段总结。
+| 形态 | 算 | 用 |
+|---|---|---|
+| 表 | 一组 metrics | 筛、排、取前 N，全部显示 |
+| 卡 | 一组 metrics | 什么都不干，直接显示 |
+| 统计 | 不算 metrics | 按事件触发点算之后的涨跌 |
 
-- 数字全部由代码算，大模型只挑哪几个讲、怎么串
-- 那段话旁边永远并排显示它引用的卡，用户能逐个核
-- 代码把话里出现的每个数字跟算出来的值比一遍，对不上就重试（同防线②）
-- **只在 `output=card` 时可用**
-- **只有数字保证跑一万次相同，那段话不保证逐字相同**，所以话是数字的附属品，不能单独存在
-  （这是对 ARCHITECTURE §0「确定性优先」的一处明确限定）
+卡是「只算不用」的退化情况，不需要单独一套机制。
+
+### 卡长什么样
+
+一个指标一行，**每行下面跟一句代码生成的解释**，不是一张一行的表格：
+
+```
+牧原股份  002714.SZ                     农林牧渔 / 养殖业
+───────────────────────────────────────────────────────
+市盈率TTM            无
+  └ 2026 上半年亏损（净利同比 −157.7%），亏损股没有市盈率
+市净率               3.11
+  └ 两年分位 45%，处在中间；两年区间 2.17 ~ 4.15
+今年以来涨幅         −8.2%
+  └ 同期农林牧渔行业 +3.1%
+───────────────────────────────────────────────────────
+数据截至 2026-09-16
+```
+
+解释行由代码按指标类型生成（分位 → 说高低和区间；空值 → 说为什么空；涨跌 → 给个对照），
+和确认卡的说明文字同一套模板机制。**空值必须说清为什么**，不能只显示一个「—」。
+
+### metrics 谁来填
+
+用户点名了就用用户的（「市盈率多少」→ 一个）。用户问的是开放问题（「最近走势如何」）时，
+**代码里备一套默认指标组**（估值、涨跌、量能、财务各挑两个）一起塞进提示词，
+大模型可以直接用、可以改、可以加。这样卡的质量有下限，也能测。
+
+### 1.6 narrate —— 卡下面再写一段话
+
+卡算完之后多一步：把卡上的数字交给大模型，让它串一段话。**只在 `output=card` 时可用。**
+
+**话里不写数字。** 数字都在卡上了，话只负责把它们连起来：「市盈率没有了，因为上半年亏损；
+估值只能看市净率，处在两年中间；股价今年在跌，成交也在缩」。这样：
+
+- 大模型抄错数字这个风险直接消失（§5.6：「LLM 有概率把 +3.1% 写成 +3.7%」）——不写数字就抄不错
+- 校验简单：话里出现阿拉伯数字或 `%` 就重试
+- 逼它说人话，而不是复读卡上的数
+
+提示词三条：简短；只连接卡上已有的内容，不写数字本身；没什么可说就不说，返回空。
+
+**只有数字保证跑一万次相同，那段话不保证逐字相同**，所以话是卡的附属品，不能单独存在
+（这是对 ARCHITECTURE §0「确定性优先」的一处明确限定）。
 
 ## 2. 几条代表性提问的 spec
 
@@ -110,10 +180,10 @@ subject 是牧原 1 只——最后只显示它。
 { "scope":   { "target": "stock", "base": "all_a" },
   "subject": { "kind": "codes", "codes": ["002714.SZ"] },
   "when":    { "as_of": "2026-09-14" },
-  "metrics": [ { "expr": "$pe_ttm", "label": "市盈率TTM" },
-               { "expr": "TsRank($pe_ttm, 500)", "label": "两年分位" },
-               { "expr": "$pb", "label": "市净率" },
-               { "expr": "TsRank($pb, 500)", "label": "市净率两年分位" } ],
+  "metrics": [ { "name": "市盈率TTM",     "expr": "$pe_ttm" },
+               { "name": "两年分位",       "expr": "TsRank($pe_ttm, 500)" },
+               { "name": "市净率",         "expr": "$pb" },
+               { "name": "市净率两年分位", "expr": "TsRank($pb, 500)" } ],
   "output":  { "kind": "card" },
   "narrate": true }
 ```
@@ -124,7 +194,7 @@ subject 是牧原 1 只——最后只显示它。
 { "scope":   { "target": "stock", "industry": "农林牧渔" },
   "subject": { "kind": "codes", "codes": ["002714.SZ"] },
   "when":    { "as_of": "2026-09-14" },
-  "metrics": [ { "expr": "Rank(PctSince($close, 20251231))", "label": "今年以来涨幅排名" } ],
+  "metrics": [ { "name": "今年以来涨幅排名", "expr": "Rank(PctSince($close, 20251231))" } ],
   "output":  { "kind": "card" } }
 ```
 
@@ -134,8 +204,9 @@ subject 是牧原 1 只——最后只显示它。
 { "scope":   { "target": "stock", "industry": "农林牧渔" },
   "subject": { "kind": "pool" },
   "when":    { "as_of": "2026-09-14" },
+  "metrics": [ { "name": "今年以来涨幅", "expr": "PctSince($close, 20251231)" } ],
   "output":  { "kind": "table",
-               "sort": { "by": "PctSince($close, 20251231)", "order": "desc" },
+               "sort": { "by": "今年以来涨幅", "order": "desc" },
                "limit": 10 } }
 ```
 
@@ -169,18 +240,30 @@ subject 是牧原 1 只——最后只显示它。
 
 `spec` 层逐条校验，一条规则一个测试。
 
+**只看结构的，写在 `spec` 层**：
+
 | # | 组合 | 报什么 |
 |---|---|---|
 | 1 | `output=card` + `subject=pool` | 卡要点名看谁，或者改成表 |
-| 2 | `output=card` 带了 `filter` / `sort` / `limit` | 卡不筛不排，这几项只有表能用 |
-| 3 | `metrics` 里有 `Rank`，但 scope 只有 subject 点名的那几只 | 要排名就得给一个更大的范围 |
+| 2 | `output=card` + `metrics` 为空 | 卡上要有指标 |
+| 3 | `output=event_study` + 填了 `metrics` | 统计不看展示指标 |
 | 4 | `output=event_study` + `when.as_of` | 事件统计要一段区间 |
 | 5 | `output=table` / `card` + `when.range` | 表和卡是某一天的截面 |
-| 6 | `subject=aggregate` + `output=table` / `event_study` | 聚合只有一个数，没有行也没有触发点 |
-| 7 | `output=card` + `metrics` 为空 | 卡上要有指标 |
-| 8 | `subject.codes` 不在 scope 里 | 说明它不在这个范围内。只在 scope 有 industry / board 限定时查 |
-| 9 | `output=event_study` 里用 `Rank` | 回看只有触发点，没有截面（沿用 v1 的报错） |
-| 10 | `narrate=true` + `output` 不是 card | 总结只跟着卡走 |
+| 6 | `subject=aggregate` + `output` 不是 card | 聚合只有一个数，没有行也没有触发点 |
+| 7 | `subject=codes` 但没给 codes | 点名看谁要给出是谁 |
+| 8 | `narrate=true` + `output` 不是 card | 总结只跟着卡走 |
+| 9 | `sort.by` 不是任何一个 metric 的 name | 排序要指一个算出来的指标，可选的是这几个 |
+| 10 | 两个 metric 重名 | 名字要能唯一指到一列 |
+
+`output=card` 带 `filter` / `sort` / `limit` 不用单独写规则：`CardOutput` 上根本没有这几个字段，
+多填的字段由 pydantic 的 `extra_forbidden` 直接拦掉。
+
+**要查数据的，写在 `api/checks.py`**（和 v1 一样的位置）：
+
+| # | 检查 | 报什么 |
+|---|---|---|
+| 11 | `subject.codes` 不在 scope 里 | 说明它不在这个范围内。只在 scope 有 industry / board 限定时查（池子小） |
+| 12 | `output=event_study` 的事件表达式里用 `Rank` | 回看只有触发点，没有截面（沿用 v1 的报错） |
 
 ## 4. 大模型输出格式
 
@@ -205,23 +288,24 @@ subject 是牧原 1 只——最后只显示它。
 `/api/coding` 下 `responses.create`、`chat.completions` 都是 404；换 `/api/v3` 两个都返回
 `InvalidEndpointOrModel.NotFound`。所以用 `anthropic` SDK 打 `/api/coding`。
 
-**每家大模型有自己的一组环境变量**，`litmus/llm/providers.py` 按固定顺序找，
-第一家必填字段配齐的就是要用的那家：
+环境变量分厂商特有和通用两类，已实现（`litmus/llm/providers.py`），细节见 ARCHITECTURE §5.1。
 
-```
-# 火山引擎方舟
-ARK_API_KEY=            # 必填
-ARK_MODEL=              # 必填
-# ARK_BASE_URL=         # 默认 https://ark.cn-beijing.volces.com/api/coding
+**一次提问只调一次大模型，不单开「意图识别」那一次。** 「是哪种形态」就是 spec 的 `output.kind`，
+大模型填 spec 的时候必然要填它，分类在那一刻就完成了。一次调用已经能分出全部五个去向：
 
-# Anthropic
-# ANTHROPIC_API_KEY=    # 必填
-# ANTHROPIC_MODEL=      # 必填
-# ANTHROPIC_BASE_URL=   # 默认 https://api.anthropic.com
-```
+| 大模型返回 | 去向 |
+|---|---|
+| `status=unsupported` | 改写建议 |
+| `status=needs_clarification` | 澄清卡 |
+| `status=ok` + `output.kind=table` | 确认卡 → 表 |
+| `status=ok` + `output.kind=event_study` | 确认卡 → 统计 |
+| `status=ok` + `output.kind=card` | 直接出卡 |
 
-认证头随厂商定死（火山引擎 `Authorization: Bearer`，Anthropic 官方 `x-api-key`），不再按域名猜、
-也不再 401 之后换一种重试。
+一次带思考 20 秒，拆成两次就是 40 秒。**要拆开的条件**：某条路的机制变得根本不同
+（比如 tool-use 循环——v2 刻意避开了，「话」是先算卡再写话两步），或者系统提示词涨到影响准确率
+（那时按 `output.kind` 拆成几份小提示词，前面加一次便宜的分类）。
+
+`narrate=true` 时多一次调用，那次只做一件事：拿卡上的内容串一段不含数字的话。
 
 ## 6. 范围
 
@@ -240,16 +324,22 @@ v1 的代码路径、旧 spec 的兼容层都不留。`store/runs/` 里已有的
 |---|---|---|
 | 0 | ~~实测嵌套 schema~~ | ✅ 2026-09-17 通过，见 §4 |
 | 1 | `llm/providers.py`：每家自己的环境变量 + 按顺序探测；认证头随厂商定死 | 两家各自配齐时选对；都没配时报错说清缺什么 |
-| 2 | `spec` v2：五个维度 + 10 条非法组合 | 手写代表性 spec 过校验；非法组合一条一个测试。`defaults_used` 的路径做成常量，和 `DEFAULTS` 的 key 有一条比对测试 |
-| 3 | 确认卡文案：先手写 5 份样子确认，再写代码 | 五个维度拼出来的说明，信息不比 v1 少 |
+| 2 | `spec` v2：五个维度 + 11 条非法组合 | 手写代表性 spec 过校验；非法组合一条一个测试。`defaults_used` 的路径做成常量，和 `DEFAULTS` 的 key 有一条比对测试 |
+| 3 | 确认卡文案（只服务表和统计，卡不走）：先手写 5 份样子确认，再写代码 | 五个维度拼出来的说明，信息不比 v1 少 |
 | 4 | `research` v2：取 scope → 算 metrics → 按 output 整形 | 表和统计在真实数据上出正确结果 |
 | 5 | `card` 这条路 | A101、A201 在真实数据上正确 |
-| 6 | `llm` v2：新 schema + 提示词（带上日期换算表、行业清单、事件库） | 79 条跑真实大模型，记录每条落到哪个形态、对不对 |
-| 7 | `narrate` + 数字核对 | 故意让大模型写错数，核对要拦住 |
+| 6 | `llm` v2：新 schema + 提示词（带上日期换算表、行业清单、事件库、默认指标组） | 96 条跑真实大模型，记录每条落到哪个形态、对不对 |
+| 7 | `narrate`：写话 + 「不许出现数字」的校验 | 故意让它写数字，校验要拦住 |
 | 8 | 前端：卡的结果页、表单按维度重组 | 浏览器里把 A、B、C 三组各点几条 |
 
 ## 8. 还没定的
 
-1. `output.sort.by` 要不要也必须出现在 `metrics` 里
-2. `subject=aggregate` 要不要 P0 做（只有 E104 一条，且要新加横截面聚合算子）
-3. 确认卡的排版——五个维度拼出来读着顺不顺，得做出来看
+1. `subject=aggregate` 要不要 P0 做（只有 E104 一条，且要新加横截面聚合算子）
+2. 确认卡的排版——五个维度拼出来读着顺不顺，得做出来看
+3. 默认指标组具体放哪几个指标
+
+## 9. 推迟到 P3
+
+- **多轮**：追问之后回答、选完候选再改条件。方案未定
+- **资金面数据**：DDE 大单净量、龙虎榜机构买入占比（QUESTIONS.md C407~C409），要接新接口
+- **形态识别**：W 底、仙人指路、均线粘合（C208~C210）
