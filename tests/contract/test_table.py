@@ -1,4 +1,7 @@
-"""股票表、板块表在本地真实数据上的契约测试。没有本地数据就整个跳过。"""
+"""表在本地真实数据上的契约测试。没有本地数据就整个跳过。
+
+metrics 算出来的每一列都按 name 取，`sort.by` 填的是其中一个 name。
+"""
 
 from __future__ import annotations
 
@@ -7,10 +10,12 @@ from datetime import date
 import polars as pl
 import pytest
 
+from litmus.api.checks import check_spec, issue_text
 from litmus.data import CONCEPT, DataService, MissingDataError
 from litmus.expr import ExprDataError, evaluate
-from litmus.research.screener import SORT_VALUE, run_board_list, run_stock_list
-from litmus.spec import parse_spec
+from litmus.research import run
+from litmus.research.table import DEFAULT_SORT_NAME
+from litmus.signals import load_events
 
 AS_OF = date(2026, 9, 11)
 
@@ -25,13 +30,40 @@ if _last < AS_OF:
 BREAKOUT = "Cross($close, Mean($close, 250)) & ($amount > Mean(Ref($amount, 1), 20) * 2)"
 
 
-def stock_list(**fields) -> object:
-    spec = parse_spec({"shape": "stock_list", "as_of": AS_OF.isoformat(), **fields})
-    return run_stock_list(spec, _ds)
+#: 排序用的那一列叫什么，各个用例自己指定
+SORT = "排序值"
 
 
-def sort_values(result) -> list[float]:
-    return [row[SORT_VALUE] for row in result.rows]
+_EVENTS = load_events()
+
+
+def table(*, metrics=None, scope=None, as_of="", **output) -> object:
+    """一张表。走 check_spec 而不是 parse_spec：日期回填、补默认排序都在那里。"""
+    spec, issues = check_spec(
+        {
+            "scope": scope or {},
+            "subject": {"kind": "pool"},
+            "when": {"as_of": as_of or AS_OF.isoformat()},
+            "metrics": metrics if metrics is not None else [],
+            "output": {"kind": "table", **output},
+        },
+        _ds,
+        _EVENTS,
+    )
+    assert spec is not None, [issue_text(i) for i in issues]
+    return run(spec, _ds)
+
+
+def by(expr: str, name: str = SORT) -> dict:
+    return {"name": name, "expr": expr}
+
+
+def sort_values(result, name: str = SORT) -> list[float]:
+    return [row[name] for row in result.rows]
+
+
+def column_names(result) -> tuple[str, ...]:
+    return (*result.head, *(c.name for c in result.columns))
 
 
 def test_从某天起的涨幅按日期取值_停过牌的股票不再算偏():
@@ -63,37 +95,51 @@ def test_概念板块限定股票池_查询日早于快照日时提示按哪天�
     board = {"type": "concept", "code": "880728.TDX"}  # 航运概念
     count = len(_ds.board_members("880728.TDX"))
 
-    early = stock_list(as_of="2025-06-03", universe={"board": board}, limit=3)
+    early = table(
+        as_of="2025-06-03",
+        scope={"board": board},
+        metrics=[by("$amount")],
+        sort={"by": SORT},
+        limit=3,
+    )
     assert early.notes[0] == (
         f"「航运概念」按 {snapshot} 的成分（{count} 只）筛选，不是 2025-06-03 当时的成分："
         "之后才调入的股票也算在内，当时在、后来调出的不会出现"
     )
-    same_day = stock_list(as_of=snapshot.isoformat(), universe={"board": board}, limit=3)
+    same_day = table(
+        as_of=snapshot.isoformat(),
+        scope={"board": board},
+        metrics=[by("$amount")],
+        sort={"by": SORT},
+        limit=3,
+    )
     assert not any("成分" in note for note in same_day.notes)
 
 
 def test_放量突破年线_按放量倍数排():
     """和上一步演示的结果一致：满足 13 只，第一名是鼎信通讯（放量 12 倍）。"""
-    result = stock_list(
+    result = table(
+        metrics=[by("$amount / Mean(Ref($amount, 1), 20)", "放量倍数"), by("$close", "收盘价")],
         filter={"expr": BREAKOUT},
-        sort={"by": "$amount / Mean(Ref($amount, 1), 20)"},
+        sort={"by": "放量倍数"},
         limit=5,
     )
     assert result.total == 13
     assert len(result.rows) == 5
     first = result.rows[0]
     assert (first["code"], first["name"]) == ("603421.SH", "鼎信通讯")
-    assert first[SORT_VALUE] == pytest.approx(12.21, abs=0.01)
-    assert sort_values(result) == sorted(sort_values(result), reverse=True)
-    assert result.columns[:4] == ("code", "name", "industry", SORT_VALUE)
-    assert {"close_raw", "pct_chg", "amount", "market_cap", "close"} <= set(result.columns)
+    assert first["放量倍数"] == pytest.approx(12.21, abs=0.01)
+    assert sort_values(result, "放量倍数") == sorted(sort_values(result, "放量倍数"), reverse=True)
+    # 列 = 代码名称行业 + metrics，metrics 里写什么就有什么，不多也不少
+    assert column_names(result) == ("code", "name", "industry", "放量倍数", "收盘价")
 
 
 def test_行业股票池_低市盈率高股息():
-    result = stock_list(
+    result = table(
+        metrics=[by("$dv_ttm")],
+        scope={"industry": "银行", "exclude": ["ST", "suspended"]},
         filter={"expr": "($pe_ttm < 6) & ($dv_ttm > 5)"},
-        universe={"industry": "银行", "exclude": ["ST", "suspended"]},
-        sort={"by": "$dv_ttm"},
+        sort={"by": SORT},
     )
     assert result.total == 8
     assert result.rows[0]["code"] == "600015.SH"
@@ -101,71 +147,75 @@ def test_行业股票池_低市盈率高股息():
 
 
 def test_只排序不筛选_整个股票池参与():
-    result = stock_list(sort={"by": "$pct_chg"}, limit=5)
+    result = table(metrics=[by("$pct_chg")], sort={"by": SORT}, limit=5)
     pool = _ds.get_universe_mask(AS_OF, AS_OF, exclude=["ST", "suspended", "new_listing_60d"])
     assert result.total == pool.height
     assert len(result.rows) == 5
     assert sort_values(result) == sorted(sort_values(result), reverse=True)
 
 
-def test_只筛选不排序_按成交额从高到低():
-    result = stock_list(filter={"expr": "$is_limit_up"}, limit=3)
-    assert "按成交额从高到低" in result.notes[0]
-    amounts = [row["amount"] for row in result.rows]
+def test_只筛选不排序_代码补一个成交额指标并按它排():
+    result = table(filter={"expr": "$is_limit_up"}, limit=3)
+    # 补出来的指标会显示在结果里，确认卡上也标成默认值
+    assert DEFAULT_SORT_NAME in column_names(result)
+    amounts = sort_values(result, DEFAULT_SORT_NAME)
     assert amounts == sorted(amounts, reverse=True)
 
 
 def test_排名在整个股票池上算_不是只在筛选结果里排():
-    result = stock_list(filter={"expr": "$pct_chg > 9"}, sort={"by": "Rank($amount)"}, limit=500)
+    result = table(
+        metrics=[by("Rank($amount)")],
+        filter={"expr": "$pct_chg > 9"},
+        sort={"by": SORT},
+        limit=500,
+    )
     pool = _ds.get_universe_mask(AS_OF, AS_OF, exclude=["ST", "suspended", "new_listing_60d"])
     ranks = evaluate("Rank($amount)", "sort", pool, AS_OF, AS_OF, _ds).values
     expected = dict(ranks.select("code", "value").iter_rows())
     assert result.rows and all(
-        row[SORT_VALUE] == pytest.approx(expected[row["code"]]) for row in result.rows
+        row[SORT] == pytest.approx(expected[row["code"]]) for row in result.rows
     )
     assert min(sort_values(result)) < 0.9  # 只在涨停股里排的话，最低的名次也会被抬得很高
 
 
 def test_排序值为空的不进结果():
-    result = stock_list(sort={"by": "$pe_ttm", "order": "asc"}, limit=500)
-    assert all(row[SORT_VALUE] is not None for row in result.rows)
+    result = table(metrics=[by("$pe_ttm")], sort={"by": SORT, "order": "asc"}, limit=500)
+    assert all(row[SORT] is not None for row in result.rows)
     assert any("排序值为空" in note for note in result.notes)
     assert sort_values(result) == sorted(sort_values(result))
 
 
-def test_不是交易日直接报错():
-    with pytest.raises(ValueError, match="不是交易日"):
-        run_stock_list(parse_spec({"shape": "stock_list", "as_of": "2026-09-06"}), _ds)
+def test_不是交易日在检查这一步就拦下():
+    spec, issues = check_spec(
+        {"subject": {"kind": "pool"}, "when": {"as_of": "2026-09-06"}, "output": {"kind": "table"}},
+        _ds,
+        _EVENTS,
+    )
+    assert spec is None
+    assert any("不是交易日" in issue_text(i) for i in issues)
 
 
 @pytest.mark.skipif(CONCEPT not in _ds.available_targets(), reason="本地概念板块不可用")
 def test_概念板块表_最近一周成交额前十():
-    spec = parse_spec(
-        {
-            "shape": "board_list",
-            "board_type": "concept",
-            "as_of": AS_OF.isoformat(),
-            "sort": {"by": "Sum($amount, 5)"},
-            "limit": 10,
-        }
+    result = table(
+        scope={"target": "concept"},
+        metrics=[by("Sum($amount, 5)", "5日成交额")],
+        sort={"by": "5日成交额"},
+        limit=10,
     )
-    result = run_board_list(spec, _ds)
     assert len(result.rows) == 10
     assert all(row["name"] for row in result.rows)
-    assert result.columns == ("code", "name", SORT_VALUE, "close", "pct_chg", "amount")
+    assert column_names(result) == ("code", "name", "5日成交额")  # 板块没有行业列
 
 
 def test_申万行业表_今天上涨的行业():
-    spec = parse_spec(
-        {
-            "shape": "board_list",
-            "board_type": "sw_industry",
-            "as_of": AS_OF.isoformat(),
-            "filter": {"expr": "$pct_chg > 0"},
-            "sort": {"by": "$pct_chg"},
-        }
+    result = table(
+        scope={"target": "sw_industry"},
+        metrics=[by("$pct_chg", "涨跌幅")],
+        filter={"expr": "$pct_chg > 0"},
+        sort={"by": "涨跌幅"},
     )
-    result = run_board_list(spec, _ds)
     changes = _ds.get_fields(None, AS_OF, AS_OF, ["pct_chg"], target="sw_industry")
     assert result.total == changes.filter(pl.col("pct_chg") > 0).height
-    assert all(row["pct_chg"] > 0 for row in result.rows)
+    assert all(row["涨跌幅"] > 0 for row in result.rows)
+    assert result.pool_size == changes.height

@@ -1,32 +1,39 @@
-"""三种回答的计算：股票表、板块表、个股回看。一个入口 run(spec, ds)，按 spec.shape 分派（ARCHITECTURE §4）。
+"""三种形态的计算：表、卡、统计。一个入口 run(spec, ds)，按 output.kind 分派（DESIGN.md §1.5）。
 
-其他模块只从这里 import（§1.2 第 3 条）。
+其他模块只从这里 import（ARCHITECTURE §1.2 第 3 条）。
 """
 
 from litmus.data import DataService
-from litmus.research.history import run_stock_history, statistics_range
-from litmus.research.results import HistoryResult, HorizonSummary, ListResult, TriggerRecord
+from litmus.research.compute import Computed, compute, pool_of
+from litmus.research.history import run_event_study, statistics_range
+from litmus.research.results import (
+    Column,
+    HistoryResult,
+    HorizonSummary,
+    ListResult,
+    TriggerRecord,
+)
 from litmus.research.returns import Delay
-from litmus.research.screener import run_board_list, run_stock_list
-from litmus.spec import BoardListSpec, StockHistorySpec, StockListSpec
+from litmus.research.table import run_table
+from litmus.spec.query import QuerySpec
 
 
-def run(
-    spec: StockListSpec | BoardListSpec | StockHistorySpec, ds: DataService
-) -> ListResult | HistoryResult:
-    if isinstance(spec, StockListSpec):
-        return run_stock_list(spec, ds)
-    if isinstance(spec, BoardListSpec):
-        return run_board_list(spec, ds)
-    return run_stock_history(spec, ds)
+def run(spec: QuerySpec, ds: DataService) -> ListResult | HistoryResult:
+    if spec.output.kind == "event_study":
+        return run_event_study(spec, ds)
+    return run_table(spec, ds)
 
 
 __all__ = [
+    "Column",
+    "Computed",
     "Delay",
     "HistoryResult",
     "HorizonSummary",
     "ListResult",
     "TriggerRecord",
+    "compute",
+    "pool_of",
     "run",
     "statistics_range",
 ]

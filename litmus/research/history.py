@@ -19,7 +19,8 @@ from litmus.data import STOCK, DataService, MissingDataError
 from litmus.expr import Evaluation, evaluate, onset, parse
 from litmus.research.results import HistoryResult, HorizonSummary, TriggerRecord
 from litmus.research.returns import COUNTED, PENDING, UNFILLED, Tape, Trade, pool_average
-from litmus.spec import DEFAULTS, StockHistorySpec
+from litmus.spec import DEFAULTS
+from litmus.spec.query import EventStudyOutput, QuerySpec
 
 #: 触发次数少于这个数，提示样本偏少
 FEW_TRIGGERS = 20
@@ -30,63 +31,78 @@ BENCHMARK_EXCLUDE: tuple[str, ...] = DEFAULTS["exclude"]  # type: ignore[assignm
 _TAPE_FIELDS = ["open", "close", "open_limit_up", "is_limit_down"]
 
 
-def run_stock_history(spec: StockHistorySpec, ds: DataService) -> HistoryResult:
+def run_event_study(spec: QuerySpec, ds: DataService) -> HistoryResult:
+    output = _output(spec)
     coverage_start, latest, start, end, rows, evaluation = _scan(spec, ds, _TAPE_FIELDS)
-    code = spec.target.code or ""
+    code = _code(spec)
     calendar = ds.get_trading_calendar(coverage_start, latest)
     info = ds.stock_info([code], end).row(0, named=True)
     tape = Tape(calendar, rows, info["delist_date"])
     first = evaluation.first_date or start
     trigger_days = evaluation.values.filter(pl.col("value")).get_column("date").to_list()
 
-    trades = {day: {h: tape.trade(day, h) for h in spec.horizons} for day in trigger_days}
-    market = _market_returns(spec.benchmark, trades, coverage_start, latest, ds)
+    trades = {day: {h: tape.trade(day, h) for h in output.horizons} for day in trigger_days}
+    market = _market_returns(output.benchmark, trades, coverage_start, latest, ds)
     records = tuple(_record(day, trades[day], market) for day in trigger_days)
 
     samples = [day for day in tape.trade_days() if first <= day <= end]
     summary = {
-        h: _summarize(h, records, [tape.trade(day, h) for day in samples], spec.cost_bps)
-        for h in spec.horizons
+        h: _summarize(h, records, [tape.trade(day, h) for day in samples], output.cost_bps)
+        for h in output.horizons
     }
     return HistoryResult(
         code=code,
         name=info["name"],
-        event_label=spec.event.label,
+        event_label=output.event.label,
         range=(first, end),
-        benchmark=spec.benchmark,
-        cost_bps=spec.cost_bps,
+        benchmark=output.benchmark,
+        cost_bps=output.cost_bps,
         triggers=records,
         summary=summary,
         notes=_notes(len(records), summary, start, end, latest),
     )
 
 
-def statistics_range(spec: StockHistorySpec, ds: DataService) -> tuple[date, date]:
+def statistics_range(spec: QuerySpec, ds: DataService) -> tuple[date, date]:
     """实际统计的区间：回看区间裁到本地数据里，再扣掉事件的预热期。和结果里的 range 是同一段代码算的，
     确认卡上显示（§3.5）。"""
     _, _, start, end, _, evaluation = _scan(spec, ds, ["close"])
     return evaluation.first_date or start, end
 
 
+def _output(spec: QuerySpec) -> EventStudyOutput:
+    if not isinstance(spec.output, EventStudyOutput):
+        raise ValueError(f"事件统计要 output.kind=event_study，收到 {spec.output.kind}")
+    return spec.output
+
+
+def _code(spec: QuerySpec) -> str:
+    codes = spec.subject.codes
+    if len(codes) != 1:
+        raise ValueError("事件统计现在只支持点名一只股票（subject.kind=codes，一个代码）")
+    return codes[0]
+
+
 def _scan(
-    spec: StockHistorySpec, ds: DataService, fields: list[str]
+    spec: QuerySpec, ds: DataService, fields: list[str]
 ) -> tuple[date, date, date, date, pl.DataFrame, Evaluation]:
     """裁区间、取这只股票的行情、求事件表达式。返回 (本地数据起点, 最新一天, 起点, 终点, 行情, 求值结果)。"""
-    code = spec.target.code
-    if not code:
-        raise ValueError("target.code 为空：要先把股票解析成代码（ds.resolve_stock）")
+    code = _code(spec)
+    span = spec.when.range
+    if span is None:
+        raise ValueError("事件统计要一段区间（when.range）")
     coverage_start, latest = ds.data_range(STOCK)
-    start = max(spec.time_range.start, coverage_start)
-    end = min(spec.time_range.end, latest)
+    start = max(span.start, coverage_start)
+    end = min(span.end, latest)
     if start > end:
         raise MissingDataError(
-            f"回看区间 {spec.time_range.start} ~ {spec.time_range.end} 不在本地数据（{coverage_start} ~ {latest}）里"
+            f"回看区间 {span.start} ~ {span.end} 不在本地数据（{coverage_start} ~ {latest}）里"
         )
     rows = ds.get_fields([code], coverage_start, latest, fields)
     universe = rows.filter(pl.col("date").is_between(start, end)).select("date", "code")
     if universe.is_empty():
         raise MissingDataError(f"本地没有 {code} 在 {start} ~ {end} 的行情")
-    evaluation = evaluate(onset(parse(spec.event.expr)), "event", universe, start, end, ds)
+    evaluation = evaluate(onset(parse(_output(spec).event.expr)), "event", universe, start, end, ds)
     return coverage_start, latest, start, end, rows, evaluation
 
 

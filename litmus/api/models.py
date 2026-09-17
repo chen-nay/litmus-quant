@@ -22,7 +22,9 @@ class Issue(BaseModel):
 class AssumptionItem(BaseModel):
     """确认卡上的一条说明。"""
 
-    #: 对应的栏目，如 "as_of"、"universe.exclude"；整体说明为空
+    #: 左边的小标题：看谁 / 看哪天 / 看哪些数 / 怎么出 / 什么事件 / 怎么算；空串是不分组的整体说明
+    group: str = ""
+    #: 对应的栏目，如 "when.as_of"、"scope.exclude"；整体说明为空
     field: str | None = None
     text: str
     #: 用的是默认值，确认卡标「默认值，可修改」
@@ -34,6 +36,8 @@ class CheckResponse(BaseModel):
     issues: list[Issue] = Field(default_factory=list)
     #: ok：整理好的查询条件（事件按事件库生成、默认值已标出），原样交给 /api/run
     spec: dict[str, Any] | None = None
+    #: ok：确认卡最上面那句「我把你的问题理解成：……」
+    summary: str = ""
     #: ok：说明文字，由查询条件按模板生成
     assumptions: list[AssumptionItem] = Field(default_factory=list)
     message: str | None = None
@@ -65,6 +69,8 @@ class PlanResponse(BaseModel):
     #: ok：整理好的查询条件，确认后原样交给 /api/run。
     #: 要选股票、板块或者条件要改时（needs_clarification）是草稿，改好后调 /api/check
     spec: dict[str, Any] | None = None
+    #: ok：确认卡最上面那句「我把你的问题理解成：……」
+    summary: str = ""
     assumptions: list[AssumptionItem] = Field(default_factory=list)
     questions: list[PlanQuestion] = Field(default_factory=list)
     stock_candidates: list[Candidate] = Field(default_factory=list)

@@ -319,7 +319,8 @@ class _Notes:
 
 
 def _is_default(defaults: tuple[str, ...], field: str) -> bool:
-    return any(_under(path, field) for path in defaults)
+    """两个方向都算：默认值记的是「when」，说明挂在「when.as_of」上，反过来也一样。"""
+    return any(_under(path, field) or _under(field, path) for path in defaults)
 
 
 def _under(path: str, field: str) -> bool:

@@ -50,30 +50,35 @@ def run(client: TestClient, spec: dict) -> dict:
 
 def test_股票表(client):
     spec = {
-        "shape": "stock_list",
-        "as_of": DAY.isoformat(),
-        "filter": {"expr": "$pct_chg > 9"},
-        "sort": {"by": "$amount"},
-        "limit": 5,
+        "subject": {"kind": "pool"},
+        "when": {"as_of": DAY.isoformat()},
+        "metrics": [{"name": "成交额", "expr": "$amount"}],
+        "output": {
+            "kind": "table",
+            "filter": {"expr": "$pct_chg > 9"},
+            "sort": {"by": "成交额"},
+            "limit": 5,
+        },
     }
     body = run(client, spec)
     assert body["status"] == "done", body
     result = body["result"]
-    assert (result["shape"], result["as_of"]) == ("stock_list", "2026-09-11")
+    assert (result["kind"], result["as_of"]) == ("table", "2026-09-11")
     assert 0 < len(result["rows"]) == min(5, result["total"])
-    assert all(row["pct_chg"] > 9 and row["name"] for row in result["rows"])
-    amounts = [row["sort_value"] for row in result["rows"]]
+    assert all(row["name"] for row in result["rows"])
+    amounts = [row["成交额"] for row in result["rows"]]
     assert amounts == sorted(amounts, reverse=True)
+    assert [c["name"] for c in result["columns"]] == ["成交额"]
     assert client.get(f"/api/run/{body['run_id']}").json()["result"] == result
 
 
 def test_板块表(client):
     spec = {
-        "shape": "board_list",
-        "board_type": "sw_industry",
-        "as_of": DAY.isoformat(),
-        "sort": {"by": "$pct_chg"},
-        "limit": 3,
+        "scope": {"target": "sw_industry"},
+        "subject": {"kind": "pool"},
+        "when": {"as_of": DAY.isoformat()},
+        "metrics": [{"name": "涨跌幅", "expr": "$pct_chg"}],
+        "output": {"kind": "table", "sort": {"by": "涨跌幅"}, "limit": 3},
     }
     body = run(client, spec)
     assert body["status"] == "done", body
@@ -83,20 +88,22 @@ def test_板块表(client):
 
 def test_个股回看_事件按事件库重新生成(client):
     spec = {
-        "shape": "stock_history",
-        "target": {"code": "000001.SZ"},
-        "event": {"preset_id": "breakout_ma", "params": {"ma": 250}, "expr": "$close > 0"},
-        "time_range": {"from": "2025-01-01", "to": "2025-12-31"},
-        "horizons": [5],
+        "subject": {"kind": "codes", "codes": ["000001.SZ"]},
+        "when": {"range": {"from": "2025-01-01", "to": "2025-12-31"}},
+        "output": {
+            "kind": "event_study",
+            "event": {"preset_id": "breakout_ma", "params": {"ma": 250}, "expr": "$close > 0"},
+            "horizons": [5],
+        },
     }
     body = run(client, spec)
     assert body["status"] == "done", body
     result = body["result"]
-    assert (result["shape"], result["code"]) == ("stock_history", "000001.SZ")
+    assert (result["kind"], result["code"]) == ("event_study", "000001.SZ")
     assert list(result["summary"]) == ["5"]  # 持有天数做 key，JSON 里是字符串
 
     record = client.get(f"/api/run/{body['run_id']}").json()
-    event = record["spec"]["event"]
+    event = record["spec"]["output"]["event"]
     assert "250" in event["expr"] and event["expr"] != "$close > 0"  # 请求里带来的表达式不作数
     assert record["library_version"] == event["library_version"] == load_events().version
     assert result["event_label"] == event["label"]
@@ -105,21 +112,25 @@ def test_个股回看_事件按事件库重新生成(client):
 def test_过程记录_运行链每一步的耗时和结果规模(client):
     """2026-09-16 加：以前只有一个总耗时，看不出慢在生成说明还是算结果。"""
     spec = {
-        "shape": "stock_list",
-        "as_of": DAY.isoformat(),
-        "filter": {"expr": "$pct_chg > 9"},
-        "sort": {"by": "$amount"},
-        "limit": 5,
+        "subject": {"kind": "pool"},
+        "when": {"as_of": DAY.isoformat()},
+        "metrics": [{"name": "成交额", "expr": "$amount"}],
+        "output": {
+            "kind": "table",
+            "filter": {"expr": "$pct_chg > 9"},
+            "sort": {"by": "成交额"},
+            "limit": 5,
+        },
     }
     body = run(client, spec)
     assert body["status"] == "done", body
 
     trace = client.get(f"/api/traces/{body['run_id']}").json()
-    assert trace["record_id"] == body["run_id"] and trace["query"] == "stock_list"
+    assert trace["record_id"] == body["run_id"] and trace["query"] == "table"
     steps = {step["step"]: step for step in trace["steps"]}
     assert list(steps) == ["check_spec", "explain", "research.run", "respond"]
 
-    assert steps["check_spec"]["issues"] == []
+    assert steps["check_spec"]["issues"] == [] and steps["check_spec"]["kind"] == "table"
     assert steps["explain"]["assumptions"] > 0 and steps["explain"]["ms"] >= 0
     assert steps["research.run"]["ms"] >= 0
     done = steps["respond"]
@@ -129,11 +140,13 @@ def test_过程记录_运行链每一步的耗时和结果规模(client):
 
 def test_过程记录_个股回看记的是触发了几次(client):
     spec = {
-        "shape": "stock_history",
-        "target": {"code": "600519.SH"},
-        "event": {"preset_id": "breakout_ma", "params": {"ma": 250}},
-        "time_range": {"from": "2025-01-02", "to": DAY.isoformat()},
-        "horizons": [5],
+        "subject": {"kind": "codes", "codes": ["600519.SH"]},
+        "when": {"range": {"from": "2025-01-02", "to": DAY.isoformat()}},
+        "output": {
+            "kind": "event_study",
+            "event": {"preset_id": "breakout_ma", "params": {"ma": 250}},
+            "horizons": [5],
+        },
     }
     body = run(client, spec)
     assert body["status"] == "done", body
@@ -143,20 +156,23 @@ def test_过程记录_个股回看记的是触发了几次(client):
 
 
 def test_查不到的东西让用户改(client):
-    spec = {"shape": "stock_list", "as_of": "2026-09-06", "universe": {"industry": "银行业"}}
+    spec = {
+        "scope": {"industry": "银行业"},
+        "when": {"as_of": "2026-09-06"},
+        "output": {"kind": "table"},
+    }
     issues = {issue["path"]: issue for issue in run(client, spec)["issues"]}
-    assert issues["as_of"]["message"] == "2026-09-06 不是交易日"
-    assert "银行" in issues["universe.industry"]["allowed"].split("、")
+    assert issues["when.as_of"]["message"] == "2026-09-06 不是交易日"
+    assert "银行" in issues["scope.industry"]["allowed"].split("、")
 
     spec = {
-        "shape": "stock_history",
-        "target": {"code": "600519.XX"},
-        "event": {"preset_id": "limit_up"},
-        "time_range": {"from": "2025-01-01", "to": "2025-03-31"},
+        "subject": {"kind": "codes", "codes": ["600519.XX"]},
+        "when": {"range": {"from": "2025-01-01", "to": "2025-03-31"}},
+        "output": {"kind": "event_study", "event": {"preset_id": "limit_up"}},
     }
     body = run(client, spec)
     assert body["status"] == "needs_revision"
-    assert [issue["path"] for issue in body["issues"]] == ["target.code"]
+    assert [issue["path"] for issue in body["issues"]] == ["subject.codes"]
 
 
 def test_数据状态与板块清单(client):
@@ -170,36 +186,41 @@ def test_数据状态与板块清单(client):
 def test_检查接口_个股回看的实际统计起点和结果对得上(client):
     """年线要往前读 250 多条行情，本地数据从 2016-01-04 起，回看实际从 2017 年初才算得出来。"""
     spec = {
-        "shape": "stock_history",
-        "target": {"code": "000001.SZ"},
-        "event": {"preset_id": "breakout_ma"},
-        "time_range": {"from": "2016-01-01", "to": "2017-06-30"},
-        "horizons": [5],
+        "subject": {"kind": "codes", "codes": ["000001.SZ"]},
+        "when": {"range": {"from": "2016-01-01", "to": "2017-06-30"}},
+        "output": {
+            "kind": "event_study",
+            "event": {"preset_id": "breakout_ma"},
+            "horizons": [5],
+        },
     }
     body = client.post("/api/check", json={"spec": spec}).json()
     assert body["status"] == "ok", body
     items = {item["field"]: item for item in body["assumptions"]}
-    assert items["target"]["text"] == "股票：平安银行（000001.SZ）"
-    assert items["event"]["default"] is True  # 均线天数没给，用了默认值
-    assert items["benchmark"]["default"] is True
+    assert items["subject"]["text"] == "股票：平安银行（000001.SZ）"
+    assert items["output.event"]["default"] is True  # 均线天数没给，用了默认值
+    assert items["output.benchmark"]["default"] is True
 
     run = client.post("/api/run", json={"spec": spec}).json()
     assert run["status"] == "done", run
     first = run["result"]["range"][0]
     assert first.startswith("2017-")
-    assert f"实际从 {first} 算起" in items["time_range"]["text"]
+    assert f"实际从 {first} 算起" in items["when.range"]["text"]
 
 
 def test_检查接口_表达式翻成中文(client):
     spec = {
-        "shape": "stock_list",
-        "as_of": DAY.isoformat(),
-        "filter": {"expr": "$amount > Mean(Ref($amount, 1), 20) * 2"},
-        "limit": 5,
+        "subject": {"kind": "pool"},
+        "when": {"as_of": DAY.isoformat()},
+        "output": {
+            "kind": "table",
+            "filter": {"expr": "$amount > Mean(Ref($amount, 1), 20) * 2"},
+            "limit": 5,
+        },
     }
     body = client.post("/api/check", json={"spec": spec}).json()
     items = {item["field"]: item["text"] for item in body["assumptions"]}
-    assert items["filter"] == "筛选条件：成交额 > 前 20 日成交额均值（不含当天） × 2"
+    assert items["output.filter"] == "先筛：成交额 > 前 20 日成交额均值（不含当天） × 2"
 
 
 def test_找股票(client):

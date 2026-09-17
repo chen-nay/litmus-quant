@@ -133,20 +133,29 @@ def test_概念板块不可用时_提示词里说清楚():
 def test_股票表_转成查询条件_没说的栏目不填_不认识的栏目丢掉():
     output = {
         **STOCK_LIST,
-        "mentions": [{"phrase": "昨天", "field": "as_of"}, {"phrase": "茅台", "field": "stock"}],
+        "mentions": [
+            {"phrase": "昨天", "field": "when.as_of"},
+            {"phrase": "茅台", "field": "股票"},
+        ],
         "message": "ok 时不该有",
         "alternatives": ["ok 时不该有"],
     }
     result, client = ask(output)
     assert result.status == OK and result.attempts == 1 and len(client.calls) == 1
+    # 扁平格式里没有 metrics：排序依据顺手做成一个叫「放大倍数」的指标
     assert result.spec == {
-        "shape": "stock_list",
-        "as_of": "2026-09-14",
-        "filter": {"expr": STOCK_LIST["filter_expr"], "label": "放量"},
-        "sort": {"by": STOCK_LIST["sort_by"], "order": "desc", "label": "放大倍数"},
-        "limit": 20,
+        "scope": {"target": "stock"},
+        "subject": {"kind": "pool"},
+        "when": {"as_of": "2026-09-14"},
+        "metrics": [{"name": "放大倍数", "expr": STOCK_LIST["sort_by"]}],
+        "output": {
+            "kind": "table",
+            "filter": {"expr": STOCK_LIST["filter_expr"], "label": "放量"},
+            "sort": {"by": "放大倍数", "order": "desc"},
+            "limit": 20,
+        },
     }
-    assert result.mentions == (Mention("昨天", "as_of"),)
+    assert result.mentions == (Mention("昨天", "when.as_of"),)
     assert (result.message, result.alternatives) == ("", ())
     assert len(result.prompt_version) == 8
 
@@ -169,8 +178,12 @@ def test_个股回看_股票只给原话和猜测_只留用户说到的参数():
     )
     assert result.status == OK
     assert result.spec == {
-        "shape": "stock_history",
-        "event": {"preset_id": "breakout_ma_volume", "params": {"ma": 250}},
+        "scope": {"target": "stock"},
+        "subject": {"kind": "codes"},
+        "output": {
+            "kind": "event_study",
+            "event": {"preset_id": "breakout_ma_volume", "params": {"ma": 250}},
+        },
     }
     assert result.stock == NameMention("茅台", "贵州茅台")
 

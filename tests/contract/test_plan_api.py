@@ -80,8 +80,8 @@ STOCK_LIST = {
     "sort_label": "放大倍数",
     "limit": 20,
     "mentions": [
-        {"phrase": "昨天", "field": "as_of"},
-        {"phrase": "成交量明显放大", "field": "filter"},
+        {"phrase": "昨天", "field": "when.as_of"},
+        {"phrase": "成交量明显放大", "field": "output.filter"},
     ],
 }
 
@@ -93,8 +93,8 @@ HISTORY = {
     "event_id": "breakout_ma_volume",
     "event_params": {"ma": 250},
     "mentions": [
-        {"phrase": "茅台", "field": "target"},
-        {"phrase": "放量突破年线", "field": "event"},
+        {"phrase": "茅台", "field": "subject"},
+        {"phrase": "放量突破年线", "field": "output.event"},
     ],
 }
 
@@ -107,41 +107,41 @@ def test_股票表_说明文字带上原话的说法(client, llm):
     body = ask(client, llm, STOCK_LIST, query="昨天哪个股票成交量明显放大")
     assert body["status"] == "ok", body
     assert body["plan_id"].startswith("p")
-    assert texts(body)["as_of"] == "「昨天」理解为：2026-09-11"
-    assert texts(body)["filter"] == (
+    assert texts(body)["when.as_of"] == "「昨天」理解为：2026-09-11"
+    assert texts(body)["output.filter"] == (
         "「成交量明显放大」理解为：成交额 > 前 5 日成交额均值（不含当天） × 1.4"
     )
 
 
 def test_确认卡上改了参数_改过的栏目不再用原话的说法(client, llm):
     body = ask(client, llm, STOCK_LIST)
-    spec = {**body["spec"], "as_of": "2026-09-10"}
+    spec = {**body["spec"], "when": {"as_of": "2026-09-10"}}
     checked = client.post("/api/check", json={"spec": spec, "plan_id": body["plan_id"]}).json()
     assert checked["status"] == "ok", checked
-    assert texts(checked)["as_of"] == "日期：2026-09-10"
-    assert texts(checked)["filter"].startswith("「成交量明显放大」理解为")
+    assert texts(checked)["when.as_of"] == "日期：2026-09-10"
+    assert texts(checked)["output.filter"].startswith("「成交量明显放大」理解为")
 
 
 def test_个股回看_股票按原话解析成代码_没说的区间用本地全部数据(client, llm):
     body = ask(client, llm, HISTORY)
     assert body["status"] == "ok", body
-    assert body["spec"]["target"]["code"] == "600519.SH"
+    assert body["spec"]["subject"]["codes"][0] == "600519.SH"
     items = {item["field"]: item for item in body["assumptions"]}
-    assert items["target"]["text"] == "「茅台」理解为：贵州茅台（600519.SH）"
-    assert items["time_range"]["default"] is True
+    assert items["subject"]["text"] == "「茅台」理解为：贵州茅台（600519.SH）"
+    assert items["when.range"]["default"] is True
 
 
 def test_大模型没记原话的说法_股票和概念板块的原话照样用上(client, llm):
     without = {key: value for key, value in HISTORY.items() if key != "mentions"}
     body = ask(client, llm, without)
     assert body["status"] == "ok", body
-    assert texts(body)["target"] == "「茅台」理解为：贵州茅台（600519.SH）"
+    assert texts(body)["subject"] == "「茅台」理解为：贵州茅台（600519.SH）"
 
     if CONCEPT not in _ds.available_targets():
         return
     body = ask(client, llm, {**STOCK_LIST, "board_mention": "光模块", "board_guess": "光通信"})
     assert body["status"] == "ok", body
-    assert texts(body)["universe.board"] == "「光模块」理解为：光通信"
+    assert texts(body)["scope.board"].startswith("「光模块」理解为：光通信")
 
 
 def test_个股回看_平安对应多只股票_让用户选(client, llm):
@@ -163,7 +163,7 @@ def test_选股限定概念板块_原话查不到用猜的名字(client, llm):
     body = ask(client, llm, {**STOCK_LIST, "board_mention": "光模块", "board_guess": "光通信"})
     assert body["status"] == "ok", body
     board = next(b for b in _ds.list_boards(CONCEPT) if b.name == "光通信")
-    assert body["spec"]["universe"]["board"]["code"] == board.code
+    assert body["spec"]["scope"]["board"]["code"] == board.code
 
 
 def test_半导体板块_能对上申万二级就用_只包含对上第三代半导体时让用户选(client, llm):
@@ -171,8 +171,8 @@ def test_半导体板块_能对上申万二级就用_只包含对上第三代半
     body = ask(client, llm, {**STOCK_LIST, "board_mention": "半导体板块", "board_guess": "芯片"})
     if SW_INDUSTRY_L2 in _ds.available_targets():
         assert body["status"] == "ok", body
-        assert body["spec"]["universe"]["industry"] == "半导体"
-        assert texts(body)["universe.industry"].startswith(
+        assert body["spec"]["scope"]["industry"] == "半导体"
+        assert texts(body)["scope.industry"].startswith(
             "「半导体板块」理解为：半导体（申万二级行业"
         )
     else:  # 本地还没同步二级
@@ -278,8 +278,8 @@ def test_确认卡上改条件_把现在的条件交给大模型_选过的概念
         spec=first["spec"],
     )
     assert second["status"] == "ok", second
-    assert second["spec"]["universe"]["board"]["code"] == board.code
-    assert second["spec"]["limit"] == 5
+    assert second["spec"]["scope"]["board"]["code"] == board.code
+    assert second["spec"]["output"]["limit"] == 5
     # 照抄的代码不是用户原话，确认卡上不写「「884xxx.TI」理解为：光通信」
     assert board.code not in "".join(item["text"] for item in second["assumptions"])
 
@@ -292,9 +292,9 @@ def test_确认卡上改条件_把现在的条件交给大模型_选过的概念
 def test_确认卡上改条件_股票照抄代码_确认卡上不写成原话(client, llm):
     first = ask(client, llm, HISTORY, query="茅台放量突破年线之后怎样")
     assert first["status"] == "ok", first
-    assert texts(first)["target"].startswith("「茅台」理解为")
+    assert texts(first)["subject"].startswith("「茅台」理解为")
 
-    code = first["spec"]["target"]["code"]
+    code = first["spec"]["subject"]["codes"][0]
     output = {key: value for key, value in HISTORY.items() if not key.startswith("stock_")}
     second = ask(
         client,
@@ -305,10 +305,10 @@ def test_确认卡上改条件_股票照抄代码_确认卡上不写成原话(cl
         spec=first["spec"],
     )
     assert second["status"] == "ok", second
-    assert second["spec"]["target"]["code"] == code
-    assert second["spec"]["horizons"] == [5, 10]
+    assert second["spec"]["subject"]["codes"][0] == code
+    assert second["spec"]["output"]["horizons"] == [5, 10]
     # 照抄的代码不是用户原话：确认卡上写「股票：贵州茅台（600519.SH）」，不写「「600519.SH」理解为……」
-    assert "理解为" not in texts(second)["target"]
+    assert "理解为" not in texts(second)["subject"]
     # 交给大模型的条件里股票只留代码：2026-09-16 实测留着 mention 它就照抄，于是又按名字重查一遍
     assert code in llm.calls[-1] and "茅台" not in llm.calls[-1]
 
@@ -333,7 +333,7 @@ def test_澄清之后追问_把原问题和回答一起交给大模型(client, l
     second = ask(client, llm, output, query="20 个交易日", previous_plan_id=first["plan_id"])
     assert second["status"] == "ok", second
     assert "最近哪个板块最强" in llm.calls[-1] and "「最近」指多久？" in llm.calls[-1]
-    assert second["spec"]["defaults_used"][:2] == ["as_of", "limit"]
+    assert second["spec"]["defaults_used"][:2] == ["when", "scope.base"]
 
 
 def test_大模型给的日期不是交易日_转成澄清(client, llm):

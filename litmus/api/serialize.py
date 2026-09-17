@@ -28,8 +28,7 @@ def to_jsonable(value: object) -> object:
 
 
 def result_to_dict(result: ListResult | HistoryResult) -> dict[str, object]:
-    """股票表、板块表自带 shape；个股回看补上 shape，前端靠它决定怎么展示。"""
+    """补上 kind，前端靠它决定怎么展示。"""
     data: dict[str, object] = to_jsonable(result)  # type: ignore[assignment]
-    if isinstance(result, HistoryResult):
-        return {"shape": "stock_history", **data}
-    return data
+    kind = "event_study" if isinstance(result, HistoryResult) else "table"
+    return {"kind": kind, **data}

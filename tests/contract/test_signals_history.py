@@ -32,19 +32,25 @@ def test_每个事件用默认参数都能跑出个股回看(preset_id):
     rendered = render_event(preset_id)
     spec = parse_spec(
         {
-            "shape": "stock_history",
-            "target": {"mention": "鼎信通讯", "code": "603421.SH"},
-            "event": {
-                "preset_id": rendered.preset_id,
-                "params": rendered.params,
-                "expr": rendered.expr,
-                "label": rendered.label,
-                "library_version": rendered.library_version,
+            "subject": {
+                "kind": "codes",
+                "codes": ["603421.SH"],
+                "mentions": [{"mention": "鼎信通讯"}],
             },
-            "time_range": {"from": START.isoformat(), "to": END.isoformat()},
-            "horizons": [5, 20],
-            "benchmark": "index:000300.SH",
-            "defaults_used": [f"event.params.{name}" for name in rendered.defaults_used],
+            "when": {"range": {"from": START.isoformat(), "to": END.isoformat()}},
+            "output": {
+                "kind": "event_study",
+                "event": {
+                    "preset_id": rendered.preset_id,
+                    "params": rendered.params,
+                    "expr": rendered.expr,
+                    "label": rendered.label,
+                    "library_version": rendered.library_version,
+                },
+                "horizons": [5, 20],
+                "benchmark": "index:000300.SH",
+            },
+            "defaults_used": [f"output.event.params.{name}" for name in rendered.defaults_used],
         }
     )
     result = run(spec, _ds)

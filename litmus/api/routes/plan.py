@@ -29,7 +29,8 @@ from fastapi.concurrency import run_in_threadpool
 
 from litmus.api.checks import check_spec, issue_text
 from litmus.api.explain import explain
-from litmus.api.models import AssumptionItem, Candidate, PlanQuestion, PlanResponse
+from litmus.api.models import Candidate, PlanQuestion, PlanResponse
+from litmus.api.routes.runs import assumption_items
 from litmus.api.serialize import to_jsonable
 from litmus.api.services import Services, services_of
 from litmus.data import (
@@ -220,9 +221,9 @@ def _for_revise(spec: dict[str, object]) -> dict[str, object]:
     于是又按名字重查一遍——换成「平安」这种对应多只的，改一次条件就要重选一次股票。
     """
     trimmed = {key: value for key, value in spec.items() if key not in _SPEC_META}
-    target = trimmed.get("target")
-    if isinstance(target, dict) and target.get("code"):
-        trimmed["target"] = {"code": target["code"]}
+    subject = trimmed.get("subject")
+    if isinstance(subject, dict) and subject.get("codes"):
+        trimmed["subject"] = {"kind": "codes", "codes": subject["codes"]}
     return trimmed
 
 
@@ -240,10 +241,10 @@ def _with_names(result: PlanResult) -> tuple[Mention, ...]:
     """
     fields = {mention.field for mention in result.mentions}
     extra = []
-    if result.stock is not None and not result.stock.is_code and "target" not in fields:
-        extra.append(Mention(result.stock.mention, "target"))
-    if result.board is not None and not result.board.is_code and "universe.board" not in fields:
-        extra.append(Mention(result.board.mention, "universe.board"))
+    if result.stock is not None and not result.stock.is_code and "subject" not in fields:
+        extra.append(Mention(result.stock.mention, "subject"))
+    if result.board is not None and not result.board.is_code and "scope.board" not in fields:
+        extra.append(Mention(result.board.mention, "scope.board"))
     return (*result.mentions, *extra)
 
 
@@ -284,15 +285,16 @@ def _respond(
         if len(stocks) != 1:
             return _choose_stock(spec, result.stock, stocks)
         # 照抄代码进来的（改现有条件）没有原话，和表单改过条件后一样只带代码
-        spec["target"] = (
-            {"code": stocks[0].code}
+        mentions_field = (
+            []
             if result.stock.is_code
-            else {
-                "mention": result.stock.mention,
-                "guess": result.stock.guess,
-                "code": stocks[0].code,
-            }
+            else [{"mention": result.stock.mention, "guess": result.stock.guess}]
         )
+        spec["subject"] = {
+            "kind": "codes",
+            "codes": [stocks[0].code],
+            "mentions": mentions_field,
+        }
     if result.board is not None:
         picked, candidates = _pick_board(ds, result.board)
         note(
@@ -310,7 +312,7 @@ def _respond(
         )
         if picked is None:
             return _choose_board(spec, result.board, candidates, ds)
-        spec["universe"] = _with_board(spec.get("universe") or {}, picked)
+        spec["scope"] = _with_board(spec.get("scope") or {}, picked)
 
     checked, issues = check_spec(spec, ds, services.events)
     note({"step": "check_spec", "issues": [issue_text(issue) for issue in issues]})
@@ -318,17 +320,15 @@ def _respond(
         message = "；".join(issue_text(issue) for issue in issues)
         return PlanResponse(status=CLARIFY, spec=spec, message=f"条件要改一下：{message}")
     try:
-        assumptions = explain(checked, ds, mentions)
+        confirm = explain(checked, ds, mentions)
     except (MissingDataError, ExprDataError) as exc:
         return PlanResponse(status=CLARIFY, spec=spec, message=f"条件要改一下：{exc}")
-    checked = checked.model_copy(update={"assumptions": tuple(item.text for item in assumptions)})
+    checked = checked.model_copy(update={"assumptions": tuple(i.text for i in confirm.items)})
     return PlanResponse(
         status=OK,
         spec=checked.model_dump(mode="json", by_alias=True),
-        assumptions=[
-            AssumptionItem(field=item.field, text=item.text, default=item.default)
-            for item in assumptions
-        ],
+        summary=confirm.summary,
+        assumptions=assumption_items(confirm),
     )
 
 
@@ -375,11 +375,11 @@ def _pick_board(ds: DataService, name: NameMention) -> tuple[BoardMatch | None, 
     return None, _unique(said + guessed)
 
 
-def _with_board(universe: dict, board: BoardMatch) -> dict:
-    """选中申万行业填股票池的行业，概念板块填板块。"""
+def _with_board(scope: dict, board: BoardMatch) -> dict:
+    """选中申万行业填算的范围里的行业，概念板块填板块。"""
     if board.board_type == CONCEPT:
-        return {**universe, "board": {"type": "concept", "code": board.code}}
-    return {**universe, "industry": board.name}
+        return {**scope, "board": {"type": "concept", "code": board.code}}
+    return {**scope, "industry": board.name}
 
 
 def _decisive(matches: list) -> list:

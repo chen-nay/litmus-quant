@@ -46,21 +46,22 @@ logger = logging.getLogger(__name__)
 
 #: 原话里的说法能对应的栏目（spec.render_assumptions 按这些栏目写「理解为」）
 MENTION_FIELDS = (
-    "as_of",
-    "filter",
-    "sort",
-    "limit",
-    "universe.base",
-    "universe.industry",
-    "universe.board",
-    "universe.exclude",
-    "board_type",
-    "target",
-    "event",
-    "time_range",
-    "horizons",
-    "benchmark",
-    "cost_bps",
+    "when.as_of",
+    "when.range",
+    "scope.target",
+    "scope.base",
+    "scope.industry",
+    "scope.board",
+    "scope.exclude",
+    "subject",
+    "metrics",
+    "output.filter",
+    "output.sort",
+    "output.limit",
+    "output.event",
+    "output.horizons",
+    "output.benchmark",
+    "output.cost_bps",
 )
 
 _STR: dict[str, Any] = {"type": "string"}
@@ -263,10 +264,18 @@ def _read_ok(
     events: EventLibrary,
     mentions: tuple[Mention, ...],
 ) -> tuple[PlanResult, list[str]]:
+    """扁平格式 → QuerySpec v2 的草稿。
+
+    扁平格式里没有 metrics：排序依据顺手做成一个指标，名字用 sort_label 或表达式本身。
+    """
     shape = _text(draft.get("shape"))
-    spec: dict[str, Any] = {"shape": shape}
     problems: list[str] = []
     stock = board = None
+    scope: dict[str, Any] = {}
+    subject: dict[str, Any] = {}
+    metrics: list[dict[str, str]] = []
+    output: dict[str, Any] = {}
+    when: dict[str, Any] = {}
 
     if shape in ("stock_list", "board_list"):
         target = "stock"
@@ -277,36 +286,39 @@ def _read_ok(
             elif target not in context.targets:
                 usable = "、".join(kind for kind in _BOARD_LABELS if kind in context.targets)
                 problems.append(f"{_BOARD_LABELS[target]}当前不可用，board_type 只能是 {usable}")
-            spec["board_type"] = target
-        _copy(draft, spec, "as_of")
+        scope["target"] = target
+        output["kind"] = "table"
+        subject["kind"] = "pool"
+        if as_of := _text(draft.get("as_of")):
+            when["as_of"] = as_of
         if expr := _text(draft.get("filter_expr")):
-            spec["filter"] = {"expr": expr, "label": _text(draft.get("filter_label"))}
+            output["filter"] = {"expr": expr, "label": _text(draft.get("filter_label"))}
             problems += _expression_problems("filter_expr", expr, target, "filter")
         if by := _text(draft.get("sort_by")):
-            order = _text(draft.get("sort_order")) or "desc"
-            spec["sort"] = {"by": by, "order": order, "label": _text(draft.get("sort_label"))}
+            name = _text(draft.get("sort_label")) or by
+            metrics.append({"name": name, "expr": by})
+            output["sort"] = {"by": name, "order": _text(draft.get("sort_order")) or "desc"}
             problems += _expression_problems("sort_by", by, target, "sort")
-        _copy(draft, spec, "limit")
+        _copy(draft, output, "limit")
         if shape == "stock_list":
-            universe: dict[str, Any] = {}
             if base := _text(draft.get("universe_base")):
-                universe["base"] = base
+                scope["base"] = base
             if industry := _text(draft.get("industry")):
                 if industry not in _industry_names(context):
                     problems.append(
                         f"industry 要从申万行业清单（一级或二级）里选，收到「{industry}」"
                     )
-                universe["industry"] = industry
-            if universe:
-                spec["universe"] = universe
+                scope["industry"] = industry
             if mention := _text(draft.get("board_mention")):
-                # 申万行业、概念板块都按它查，由 api 按规则挑口径；概念板块不可用时照样能对上申万行业
+                # 申万行业、概念板块都按它查，由 api 按规则挑口径
                 board = NameMention(mention, _text(draft.get("board_guess")) or None)
             elif code := _text(draft.get("board_code")):
-                # 改现有条件、概念板块没换：代码在 resolve_board 里完全对上，直接就是它
                 board = NameMention(code, is_code=True)
 
     elif shape == "stock_history":
+        scope["target"] = "stock"
+        subject["kind"] = "codes"
+        output["kind"] = "event_study"
         if mention := _text(draft.get("stock_mention")):
             stock = NameMention(mention, _text(draft.get("stock_guess")) or None)
         elif code := _text(draft.get("stock_code")):
@@ -326,20 +338,25 @@ def _read_ok(
                 render_event(event_id, params, events)
             except EventParamError as exc:
                 problems.append(str(exc))
-            spec["event"] = {"preset_id": event_id, "params": dict(params)}
-        start, end = _text(draft.get("time_from")), _text(draft.get("time_to"))
-        if start or end:
-            spec["time_range"] = {
-                "from": start or context.history_from.isoformat(),
-                "to": end or context.latest_trading_day.isoformat(),
+            output["event"] = {"preset_id": event_id, "params": dict(params)}
+        first, last = _text(draft.get("time_from")), _text(draft.get("time_to"))
+        if first or last:
+            when["range"] = {
+                "from": first or context.history_from.isoformat(),
+                "to": last or context.latest_trading_day.isoformat(),
             }
         for key in ("horizons", "benchmark", "cost_bps"):
-            _copy(draft, spec, key)
+            _copy(draft, output, key)
     else:
         return PlanResult(FAILED), [
             "status=ok 时 shape 要填 stock_list、board_list 或 stock_history"
         ]
 
+    spec: dict[str, Any] = {"scope": scope, "subject": subject, "output": output}
+    if metrics:
+        spec["metrics"] = metrics
+    if when:
+        spec["when"] = when
     if not problems:
         problems = _structure_problems(spec, context, events)
     return PlanResult(OK, spec=spec, stock=stock, board=board, mentions=mentions), problems
@@ -348,30 +365,39 @@ def _read_ok(
 def _structure_problems(
     spec: dict[str, Any], context: PlanContext, events: EventLibrary
 ) -> list[str]:
-    """用 spec.parse_spec 查结构。股票代码、日期这些由 api 补的栏目先填个占位，只查大模型填的部分。"""
-    trial = dict(spec)
-    if spec["shape"] == "stock_history":
-        trial["target"] = {"code": "000001.SZ"}
+    """用 spec.parse_spec 查结构。代码、日期这些由 api 补的栏目先填个占位，只查大模型填的部分。"""
+    trial = {key: dict(value) if isinstance(value, dict) else value for key, value in spec.items()}
+    output = dict(trial["output"])
+    if output["kind"] == "event_study":
+        trial["subject"] = {"kind": "codes", "codes": ["000001.SZ"]}
         trial.setdefault(
-            "time_range",
+            "when",
             {
-                "from": context.history_from.isoformat(),
-                "to": context.latest_trading_day.isoformat(),
+                "range": {
+                    "from": context.history_from.isoformat(),
+                    "to": context.latest_trading_day.isoformat(),
+                }
             },
         )
-        event = spec["event"]
+        event = output["event"]
         rendered = render_event(event["preset_id"], event["params"], events)
-        trial["event"] = {**event, "expr": rendered.expr}
+        output["event"] = {**event, "expr": rendered.expr}
     else:
-        trial.setdefault("as_of", context.latest_trading_day.isoformat())
+        trial.setdefault("when", {"as_of": context.latest_trading_day.isoformat()})
+    trial["output"] = output
     try:
         parse_spec(trial)
     except ValidationError as exc:
         return [
-            f"{'.'.join(str(part) for part in error['loc'][1:]) or 'shape'}：{error['msg']}"
+            f"{'.'.join(str(part) for part in error['loc'] if str(part) not in _KINDS) or 'output'}"
+            f"：{error['msg']}"
             for error in exc.errors()
         ]
     return []
+
+
+#: pydantic 按 kind 分派 output 时会把形态名插进路径里
+_KINDS = ("table", "card", "event_study")
 
 
 def _expression_problems(name: str, text: str, target: str, purpose: str) -> list[str]:

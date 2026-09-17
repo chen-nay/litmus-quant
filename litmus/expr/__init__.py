@@ -3,7 +3,7 @@
 其他模块只从这里 import（§1.2 第 3 条）。
 """
 
-from litmus.expr.catalog import field_catalog, operator_catalog
+from litmus.expr.catalog import RATIO, field_catalog, operator_catalog, result_unit
 from litmus.expr.collector import collect_fields, collect_lookback, compares_below
 from litmus.expr.describer import describe
 from litmus.expr.evaluator import Evaluation, ExprDataError, evaluate
@@ -13,6 +13,7 @@ from litmus.expr.validator import ExprValidationError, Issue, ValidationResult, 
 
 __all__ = [
     "MAX_LOOKBACK",
+    "RATIO",
     "MAX_WINDOW",
     "Evaluation",
     "ExprDataError",
@@ -30,5 +31,6 @@ __all__ = [
     "onset",
     "operator_catalog",
     "parse",
+    "result_unit",
     "validate",
 ]

@@ -16,6 +16,7 @@ from litmus.expr.operators import (
     OPERATORS,
     TIMESERIES,
 )
+from litmus.expr.parser import Call, Field, parse
 
 _KIND_LABELS = {TIMESERIES: "时序", CROSS_SECTION: "横截面", ELEMENTWISE: "逐行"}
 
@@ -60,3 +61,26 @@ def operator_catalog() -> list[dict[str, str]]:
     ]
     rules = [{"signature": text, "label": label, "kind": "规则"} for text, label in _RULES]
     return operators + rules
+
+
+#: 算出来是分位或涨跌幅的算子，结果是 0 附近的小数，页面按百分比显示
+_RATIO_CALLS = frozenset({"Rank", "TsRank", "Pct", "PctSince"})
+
+#: 分位、涨跌幅这类小数的单位标记，和 FIELDS 里的「%」区分开——那个已经是百分数了
+RATIO = "小数百分比"
+
+
+def result_unit(text: str) -> str:
+    """一个表达式算出来的数该怎么显示。
+
+    - 就是一个字段：用那个字段的单位（`$market_cap` → 元，`$pct_chg` → %）
+    - 顶上是 Rank / TsRank / Pct / PctSince：算出来是小数，按百分比显示
+    - 其余：没有单位，按普通数字显示
+    """
+    node = parse(text)
+    if isinstance(node, Field):
+        definition = FIELDS.get(node.name)
+        return definition.unit if definition else ""
+    if isinstance(node, Call) and node.name in _RATIO_CALLS:
+        return RATIO
+    return ""

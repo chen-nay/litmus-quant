@@ -37,14 +37,17 @@ BREAKOUT = "Cross($close, Mean($close, 250)) & ($amount > Mean(Ref($amount, 1), 
 def history(
     code: str, expr: str, start: date, end: date, horizons=(5, 20, 60), **extra
 ) -> HistoryResult:
+    output = {
+        "kind": "event_study",
+        "event": {"expr": expr, "label": "测试事件"},
+        "horizons": list(horizons),
+        **extra,
+    }
     spec = parse_spec(
         {
-            "shape": "stock_history",
-            "target": {"code": code},
-            "event": {"expr": expr, "label": "测试事件"},
-            "time_range": {"from": start.isoformat(), "to": end.isoformat()},
-            "horizons": list(horizons),
-            **extra,
+            "subject": {"kind": "codes", "codes": [code]},
+            "when": {"range": {"from": start.isoformat(), "to": end.isoformat()}},
+            "output": output,
         }
     )
     return run(spec, _ds)
@@ -161,16 +164,26 @@ def test_卖出日在数据末日之后是观察中():
     assert any("还没走完" in note for note in result.notes)
 
 
-def test_入口按形状分派_缺代码直接报错():
-    listing = run(parse_spec({"shape": "stock_list", "as_of": END.isoformat(), "limit": 3}), _ds)
+def test_入口按形态分派_没解析成代码时直接报错():
+    listing = run(
+        parse_spec(
+            {
+                "subject": {"kind": "pool"},
+                "when": {"as_of": END.isoformat()},
+                "metrics": [{"name": "成交额", "expr": "$amount"}],
+                "output": {"kind": "table", "sort": {"by": "成交额"}, "limit": 3},
+            }
+        ),
+        _ds,
+    )
     assert isinstance(listing, ListResult) and len(listing.rows) == 3
+
     spec = parse_spec(
         {
-            "shape": "stock_history",
-            "target": {"mention": "茅台"},
-            "event": {"expr": "$is_limit_up"},
-            "time_range": {"from": "2026-01-01", "to": END.isoformat()},
+            "subject": {"kind": "codes", "mentions": [{"mention": "茅台"}]},
+            "when": {"range": {"from": "2026-01-01", "to": END.isoformat()}},
+            "output": {"kind": "event_study", "event": {"expr": "$is_limit_up"}},
         }
     )
-    with pytest.raises(ValueError, match="target.code"):
+    with pytest.raises(ValueError, match="只支持点名一只股票"):
         run(spec, _ds)

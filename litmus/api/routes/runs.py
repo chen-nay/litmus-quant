@@ -30,7 +30,7 @@ from litmus.api.services import Services, services_of
 from litmus.data import DataStatus, MissingDataError
 from litmus.expr import ExprDataError
 from litmus.research import run as run_research
-from litmus.spec import Assumption, StockHistorySpec
+from litmus.spec import Confirm, EventStudyOutput
 from litmus.store import RunRecord, TraceRecord
 
 logger = logging.getLogger(__name__)
@@ -68,16 +68,14 @@ def check(raw_spec: object, plan_id: str | None, services: Services) -> CheckRes
     if spec is None:
         return CheckResponse(status="needs_revision", issues=issues)
     try:
-        spec, assumptions = _explained(spec, services, plan_id)
+        spec, confirm = _explained(spec, services, plan_id)
     except (MissingDataError, ExprDataError) as exc:
         return CheckResponse(status="needs_revision", issues=[Issue(message=str(exc))])
     return CheckResponse(
         status="ok",
         spec=spec.model_dump(mode="json", by_alias=True),
-        assumptions=[
-            AssumptionItem(field=item.field, text=item.text, default=item.default)
-            for item in assumptions
-        ],
+        summary=confirm.summary,
+        assumptions=assumption_items(confirm),
     )
 
 
@@ -93,12 +91,12 @@ def execute(raw_spec: object, plan_id: str | None, services: Services) -> RunRes
 
     started = time.perf_counter()
     steps: list[dict[str, object]] = [
-        {"step": "check_spec", "shape": spec.shape, "plan_id": plan_id, "issues": []}
+        {"step": "check_spec", "kind": spec.output.kind, "plan_id": plan_id, "issues": []}
     ]
     try:
         mark = time.perf_counter()
-        spec, assumptions = _explained(spec, services, plan_id)
-        steps.append({"step": "explain", "assumptions": len(assumptions), "ms": _ms(mark)})
+        spec, confirm = _explained(spec, services, plan_id)
+        steps.append({"step": "explain", "assumptions": len(confirm.items), "ms": _ms(mark)})
         mark = time.perf_counter()
         result = run_research(spec, services.ds)
         steps.append({"step": "research.run", "ms": _ms(mark)})
@@ -140,7 +138,9 @@ def _save_trace(
 ) -> None:
     """记录失败不能影响回答：结果已经算好存好了，过程记录只是给开发看的。"""
     try:
-        services.store.save_trace(TraceRecord(record_id=run_id, query=spec.shape, steps=steps))
+        services.store.save_trace(
+            TraceRecord(record_id=run_id, query=spec.output.kind, steps=steps)
+        )
     except Exception:  # noqa: BLE001 —— 存不下就算了，只记一条日志
         logger.warning("运行 %s 的过程记录没能存下来", run_id, exc_info=True)
 
@@ -182,16 +182,21 @@ async def _read_body(request: Request) -> tuple[dict[str, Any] | None, list[Issu
     return (None, issues) if issues else (body, [])
 
 
-def _explained(
-    spec: Spec, services: Services, plan_id: str | None
-) -> tuple[Spec, list[Assumption]]:
+def assumption_items(confirm: Confirm) -> list[AssumptionItem]:
+    return [
+        AssumptionItem(group=item.group, field=item.field, text=item.text, default=item.default)
+        for item in confirm.items
+    ]
+
+
+def _explained(spec: Spec, services: Services, plan_id: str | None) -> tuple[Spec, Confirm]:
     """说明文字写进 spec.assumptions，运行记录里存的就是确认卡上那份。
     带 plan_id 时，没改过的栏目继续用提问原话的说法。"""
     record = services.store.get_plan(plan_id) if plan_id else None
     mentions = plan_mentions(spec.model_dump(mode="json", by_alias=True), record)
-    assumptions = explain(spec, services.ds, mentions)
-    texts = tuple(item.text for item in assumptions)
-    return spec.model_copy(update={"assumptions": texts}), assumptions
+    confirm = explain(spec, services.ds, mentions)
+    texts = tuple(item.text for item in confirm.items)
+    return spec.model_copy(update={"assumptions": texts}), confirm
 
 
 def _progress(status: DataStatus, services: Services) -> dict[str, object]:
@@ -205,7 +210,9 @@ def _record(
         spec=spec.model_dump(mode="json", by_alias=True),
         plan_id=plan_id,
         data_through=data_through,
-        library_version=spec.event.library_version if isinstance(spec, StockHistorySpec) else None,
+        library_version=(
+            spec.output.event.library_version if isinstance(spec.output, EventStudyOutput) else None
+        ),
         duration_ms=round((time.perf_counter() - started) * 1000),
         **outcome,  # type: ignore[arg-type]
     )

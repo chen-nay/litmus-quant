@@ -9,13 +9,22 @@ from litmus.research.returns import Delay
 
 
 @dataclass(frozen=True)
-class ListResult:
-    """股票表 / 板块表。"""
+class Column:
+    """结果表的一列。unit 决定页面怎么显示，空串按普通数字。"""
 
-    shape: str  # stock_list / board_list
+    name: str
+    unit: str = ""
+
+
+@dataclass(frozen=True)
+class ListResult:
+    """表：每行一个标的。"""
+
     as_of: date
-    total: int  # 满足筛选条件的只数（取前 N 之前）
-    columns: tuple[str, ...]  # rows 里每一行的列，按展示顺序
+    total: int  # 满足筛选条件的个数（取前 N 之前）
+    pool_size: int  # 算的范围有多少个标的
+    head: tuple[str, ...]  # 前几列：代码、名称、（股票还有行业）
+    columns: tuple[Column, ...]  # 每个 metric 一列，带单位
     rows: tuple[dict[str, object], ...]
     notes: tuple[str, ...] = ()
 

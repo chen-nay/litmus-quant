@@ -12,6 +12,7 @@ from dataclasses import replace
 from datetime import date
 from types import SimpleNamespace
 
+import polars as pl
 import pytest
 from fastapi.testclient import TestClient
 
@@ -26,7 +27,7 @@ from litmus.data import (
     MonthResult,
 )
 from litmus.llm import LLMClient
-from litmus.research import ListResult
+from litmus.research import Column, ListResult
 from litmus.signals import load_events
 from litmus.store import JsonStore
 
@@ -68,6 +69,21 @@ class FakeData:
             BoardInfo("801780.SI", "银行", SW_INDUSTRY),
         ]
 
+    def get_universe_mask(self, start, end, **_):
+        return pl.DataFrame({"date": [DAY] * 2, "code": ["600519.SH", "000001.SZ"]})
+
+    def stock_info(self, codes, day):
+        names = {"600519.SH": "贵州茅台", "000001.SZ": "平安银行"}
+        return pl.DataFrame(
+            {
+                "code": list(codes),
+                "name": [names.get(c, "") for c in codes],
+                "industry": ["食品饮料"] * len(codes),
+                "list_date": [date(2001, 8, 27) if c in names else None for c in codes],
+                "delist_date": [None] * len(codes),
+            }
+        )
+
 
 class NoData:
     """结构、事件检查就该拦下的请求用它：一碰数据就说明检查顺序错了。"""
@@ -92,16 +108,24 @@ def make_client(tmp_path, ds=None, status=READY, job=None, llm=None) -> TestClie
     return TestClient(create_app(services))
 
 
-def stock_list(**extra) -> dict:
-    return {"shape": "stock_list", "as_of": DAY.isoformat(), **extra}
+def stock_list(*, scope=None, metrics=None, as_of=None, top=None, **output) -> dict:
+    """一张股票表。top 之外的关键字都进 output（filter / sort / limit）。"""
+    spec: dict = {
+        "scope": scope or {},
+        "subject": {"kind": "pool"},
+        "when": {"as_of": as_of or DAY.isoformat()},
+        "output": {"kind": "table", **output},
+    }
+    if metrics is not None:
+        spec["metrics"] = metrics
+    return spec | (top or {})
 
 
-def stock_history(event: dict) -> dict:
+def stock_history(event: dict, **output) -> dict:
     return {
-        "shape": "stock_history",
-        "target": {"code": "600519.SH"},
-        "event": event,
-        "time_range": {"from": "2025-01-01", "to": "2025-12-31"},
+        "subject": {"kind": "codes", "codes": ["600519.SH"]},
+        "when": {"range": {"from": "2025-01-01", "to": "2025-12-31"}},
+        "output": {"kind": "event_study", "event": event, **output},
     }
 
 
@@ -141,100 +165,115 @@ def test_请求体写错_返回中文说明而不是422(tmp_path, content, path)
 
 def test_结构问题逐条列出_说明是中文(tmp_path):
     spec = stock_list(
-        as_of="2026-13-01", limit=0, colour="red", sort={"by": "$amount", "order": "up"}
+        as_of="2026-13-01",
+        limit=0,
+        metrics=[{"name": "成交额", "expr": "$amount"}],
+        sort={"by": "成交额", "order": "up"},
+        top={"colour": "red"},
     )
     issues = issues_of(post(make_client(tmp_path, ds=NoData()), spec))
-    assert issues["as_of"]["message"] == "日期要写成 YYYY-MM-DD"
-    assert issues["limit"]["message"] == "不能小于 1"
+    assert issues["when.as_of"]["message"] == "日期要写成 YYYY-MM-DD"
+    assert issues["output.limit"]["message"] == "不能小于 1"
     assert issues["colour"]["message"] == "不认识这一项"
-    assert issues["sort.order"]["message"] == "只能是 'asc'、'desc'"
+    assert issues["output.sort.order"]["message"] == "只能是 'asc'、'desc'"
 
 
-def test_不认识的形状(tmp_path):
-    issues = issues_of(post(make_client(tmp_path, ds=NoData()), {"shape": "chart"}))
-    assert "stock_history" in issues[None]["message"]
+def test_不认识的形态(tmp_path):
+    issues = issues_of(post(make_client(tmp_path, ds=NoData()), {"output": {"kind": "chart"}}))
+    assert "event_study" in issues["output"]["message"]
 
 
 def test_自己写的校验原样给出(tmp_path):
     spec = stock_history({"preset_id": "limit_up"}) | {
-        "time_range": {"from": "2025-12-31", "to": "2025-01-01"}
+        "when": {"range": {"from": "2025-12-31", "to": "2025-01-01"}}
     }
     issues = issues_of(post(make_client(tmp_path, ds=NoData()), spec))
-    assert issues["time_range"]["message"] == "回看区间的起点 2025-12-31 晚于终点 2025-01-01"
+    assert issues["when.range"]["message"] == "区间的起点 2025-12-31 晚于终点 2025-01-01"
 
 
 def test_个股回看要用事件库里的事件(tmp_path):
     spec = stock_history({"expr": "$is_limit_up"})
-    assert list(issues_of(post(make_client(tmp_path, ds=NoData()), spec))) == ["event.preset_id"]
+    assert list(issues_of(post(make_client(tmp_path, ds=NoData()), spec))) == [
+        "output.event.preset_id"
+    ]
 
 
 def test_事件参数越界_说明可选范围_不连带报表达式缺失(tmp_path):
     spec = stock_history({"preset_id": "breakout_ma", "params": {"ma": 7}})
     issues = issues_of(post(make_client(tmp_path, ds=NoData()), spec))
-    assert list(issues) == ["event.params.ma"]
-    assert issues["event.params.ma"]["allowed"]
+    assert list(issues) == ["output.event.params.ma"]
+    assert issues["output.event.params.ma"]["allowed"]
 
 
 def test_不认识的事件编号_列出可选(tmp_path):
     spec = stock_history({"preset_id": "no_such_event"})
     issues = issues_of(post(make_client(tmp_path, ds=NoData()), spec))
-    assert "limit_up" in issues["event.preset_id"]["message"]
+    assert "limit_up" in issues["output.event.preset_id"]["message"]
 
 
 def test_表达式写错_指出栏目和位置(tmp_path):
-    spec = stock_list(filter={"expr": "$close >"}, sort={"by": "$no_such_field"})
+    spec = stock_list(
+        metrics=[{"name": "怪指标", "expr": "$no_such_field"}],
+        filter={"expr": "$close >"},
+        sort={"by": "怪指标"},
+    )
     issues = issues_of(post(make_client(tmp_path), spec))
-    assert issues["filter.expr"]["position"] is not None
-    assert "sort.by" in issues
+    assert issues["output.filter.expr"]["position"] is not None
+    assert issues["metrics.怪指标"]["message"] == "没有字段 $no_such_field"
 
 
 def test_概念板块不可用时_板块表要换口径(tmp_path):
-    spec = {"shape": "board_list", "board_type": "concept", "as_of": DAY.isoformat()}
-    assert "board_type" in issues_of(post(make_client(tmp_path), spec))
+    spec = stock_list(scope={"target": "concept"})
+    assert "scope.target" in issues_of(post(make_client(tmp_path), spec))
 
 
 def test_日期不是交易日_或者超出本地数据(tmp_path):
     client = make_client(tmp_path)
     weekend = issues_of(post(client, stock_list(as_of="2026-09-06")))
-    assert weekend["as_of"]["message"] == "2026-09-06 不是交易日"
+    assert weekend["when.as_of"]["message"] == "2026-09-06 不是交易日"
     later = issues_of(post(client, stock_list(as_of="2026-09-14")))
-    assert later["as_of"]["message"] == "本地股票数据只覆盖 2016-01-04 ~ 2026-09-11"
+    assert later["when.as_of"]["message"] == "本地股票数据只覆盖 2016-01-04 ~ 2026-09-11"
 
 
 def test_行业名不存在_列出可选的行业(tmp_path):
-    issues = issues_of(post(make_client(tmp_path), stock_list(universe={"industry": "银行业"})))
-    assert issues["universe.industry"]["allowed"] == "农林牧渔、银行"
+    issues = issues_of(post(make_client(tmp_path), stock_list(scope={"industry": "银行业"})))
+    assert issues["scope.industry"]["allowed"] == "农林牧渔、银行"
 
 
 def test_可选值用顿号隔开_成本不收NaN(tmp_path):
     client = make_client(tmp_path, ds=NoData())
-    spec = stock_history({"preset_id": "limit_up"}) | {"benchmark": "hs300"}
+    spec = stock_history({"preset_id": "limit_up"}, benchmark="hs300")
     issues = issues_of(post(client, spec))
     expected = "只能是 'universe_equal_weight'、'index:000300.SH'、'index:000905.SH'"
-    assert issues["benchmark"]["message"] == expected
+    assert issues["output.benchmark"]["message"] == expected
 
-    body = json.dumps(
-        {"spec": stock_history({"preset_id": "limit_up"}) | {"cost_bps": float("nan")}}
-    )
+    body = json.dumps({"spec": stock_history({"preset_id": "limit_up"}, cost_bps=float("nan"))})
     response = client.post("/api/run", content=body, headers={"content-type": "application/json"})
-    assert issues_of(response)["cost_bps"]["message"] == "要是有限的数字"
+    assert issues_of(response)["output.cost_bps"]["message"] == "要是有限的数字"
 
 
 # ── /api/run：计算与运行记录 ────────────────────────────────────
 
 
 def test_算完存运行记录_按编号取回(tmp_path, monkeypatch):
-    row = {"code": "600519.SH", "sort_value": float("nan")}
-    result = ListResult("stock_list", DAY, 1, ("code", "sort_value"), (row,), ("按成交额排",))
+    row = {"code": "600519.SH", "成交额": float("nan")}
+    result = ListResult(
+        as_of=DAY,
+        total=1,
+        pool_size=2,
+        head=("code",),
+        columns=(Column("成交额", "元"),),
+        rows=(row,),
+        notes=("按成交额排",),
+    )
     monkeypatch.setattr("litmus.api.routes.runs.run_research", lambda spec, ds: result)
     client = make_client(tmp_path)
 
     body = client.post("/api/run", json={"spec": stock_list(), "plan_id": "p1"}).json()
     assert body["status"] == "done"
     assert body["result"]["as_of"] == "2026-09-11"
-    assert body["result"]["rows"] == [
-        {"code": "600519.SH", "sort_value": None}
-    ]  # NaN 不是合法 JSON
+    assert body["result"]["rows"] == [{"code": "600519.SH", "成交额": None}]  # NaN 不是合法 JSON
+    assert body["result"]["kind"] == "table"
 
     record = client.get(f"/api/run/{body['run_id']}").json()
     assert record["result"] == body["result"]
@@ -243,7 +282,7 @@ def test_算完存运行记录_按编号取回(tmp_path, monkeypatch):
         "p1",
         "2026-09-11",
     )
-    assert record["spec"]["shape"] == "stock_list" and record["duration_ms"] >= 0
+    assert record["spec"]["output"]["kind"] == "table" and record["duration_ms"] >= 0
 
 
 def test_计算出错_存下失败记录_返回编号(tmp_path, monkeypatch):
@@ -387,47 +426,61 @@ def test_检查接口_不计算_给出说明文字_没给的栏目标成默认�
     monkeypatch.setattr("litmus.api.routes.runs.run_research", no_run)
     body = make_client(tmp_path).post("/api/check", json={"spec": stock_list()}).json()
     assert body["status"] == "ok", body
-    assert body["spec"]["defaults_used"] == ["sort", "limit", "universe.base", "universe.exclude"]
+    # 日期是请求里给的，不在默认值里
+    assert body["spec"]["defaults_used"] == [
+        "scope.base",
+        "scope.exclude",
+        "output.limit",
+        "output.sort",
+    ]
     items = {item["field"]: item for item in body["assumptions"]}
-    assert items["sort"] == {
-        "field": "sort",
-        "text": "排序：成交额从高到低（没有指定排序）",
+    assert items["output.sort"] == {
+        "group": "怎么出",
+        "field": "output.sort",
+        "text": "排序：按「成交额」从高到低",
         "default": True,
     }
-    assert (items["as_of"]["text"], items["as_of"]["default"]) == ("日期：2026-09-11", False)
+    # 日期这次是请求里给的，不标默认值
+    assert (items["when.as_of"]["text"], items["when.as_of"]["default"]) == (
+        "日期：2026-09-11",
+        False,
+    )
+    assert body["summary"].startswith("沪深A股（不含北交所）里")
     assert body["spec"]["assumptions"] == [item["text"] for item in body["assumptions"]]
 
 
 def test_检查接口_没给日期用最近交易日_标成默认值(tmp_path):
-    body = make_client(tmp_path).post("/api/check", json={"spec": {"shape": "stock_list"}}).json()
+    spec = {"output": {"kind": "table"}}
+    body = make_client(tmp_path).post("/api/check", json={"spec": spec}).json()
     assert body["status"] == "ok", body
-    assert body["spec"]["as_of"] == "2026-09-11"
-    assert body["spec"]["defaults_used"][0] == "as_of"
-    first = body["assumptions"][0]
-    assert (first["field"], first["text"], first["default"]) == ("as_of", "日期：2026-09-11", True)
+    assert body["spec"]["when"]["as_of"] == "2026-09-11"
+    assert body["spec"]["defaults_used"][0] == "when"
+    items = {item["field"]: item for item in body["assumptions"]}
+    day = items["when.as_of"]
+    assert (day["group"], day["text"], day["default"]) == ("看哪天", "日期：2026-09-11", True)
 
 
 def test_检查接口_请求里带来的说明文字和默认值标记不作数(tmp_path):
-    spec = stock_list(limit=10, assumptions=["乱写的说明"], defaults_used=["as_of"])
+    spec = stock_list(limit=10, top={"assumptions": ["乱写的说明"], "defaults_used": ["when"]})
     body = make_client(tmp_path).post("/api/check", json={"spec": spec}).json()
     assert "乱写的说明" not in body["spec"]["assumptions"]
-    assert {"as_of", "limit"}.isdisjoint(body["spec"]["defaults_used"])
+    assert {"when", "output.limit"}.isdisjoint(body["spec"]["defaults_used"])
 
 
 def test_检查接口_要改的照样返回问题_不读数据(tmp_path):
     spec = stock_history({"preset_id": "breakout_ma", "params": {"ma": 7}})
     body = make_client(tmp_path, ds=NoData()).post("/api/check", json={"spec": spec}).json()
     assert body["status"] == "needs_revision"
-    assert body["issues"][0]["path"] == "event.params.ma"
+    assert body["issues"][0]["path"] == "output.event.params.ma"
 
 
 def test_运行记录里存的是代码生成的说明文字(tmp_path, monkeypatch):
-    result = ListResult("stock_list", DAY, 0, ("code",), (), ())
+    result = ListResult(as_of=DAY, total=0, pool_size=0, head=("code",), columns=(), rows=())
     monkeypatch.setattr("litmus.api.routes.runs.run_research", lambda spec, ds: result)
     client = make_client(tmp_path)
-    body = post(client, stock_list(assumptions=["乱写的说明"])).json()
+    body = post(client, stock_list(top={"assumptions": ["乱写的说明"]})).json()
     record = client.get(f"/api/run/{body['run_id']}").json()
-    assert record["spec"]["assumptions"][0] == "日期：2026-09-11"
+    assert "日期：2026-09-11" in record["spec"]["assumptions"]
     assert "乱写的说明" not in record["spec"]["assumptions"]
 
 
@@ -535,16 +588,20 @@ def test_原话的说法_改过的栏目不再用_股票只比代码():
     from litmus.store import PlanRecord
 
     mentions = [
-        {"phrase": "昨天", "field": "as_of"},
-        {"phrase": "茅台", "field": "target"},
-        {"phrase": "前 20", "field": "limit"},
+        {"phrase": "昨天", "field": "when.as_of"},
+        {"phrase": "茅台", "field": "subject"},
+        {"phrase": "前 20", "field": "output.limit"},
     ]
     saved = {
-        "as_of": "2026-09-11",
-        "target": {"mention": "茅台", "guess": "贵州茅台", "code": "600519.SH"},
+        "when": {"as_of": "2026-09-11"},
+        "subject": {"kind": "codes", "codes": ["600519.SH"]},
     }
     record = PlanRecord(query="问题", status="ok", spec=saved, detail={"mentions": mentions})
-    edited = {"as_of": "2026-09-10", "target": {"code": "600519.SH"}, "limit": 20}
+    edited = {
+        "when": {"as_of": "2026-09-10"},
+        "subject": {"kind": "codes", "codes": ["600519.SH"]},
+        "output": {"limit": 20},
+    }
     # 日期改过了不再用「昨天」；股票代码没变照样用「茅台」；提问时没定下来的「前 20」照样用
     assert [m.phrase for m in plan_mentions(edited, record)] == ["茅台", "前 20"]
     assert plan_mentions(edited, None) == []
@@ -555,9 +612,9 @@ def test_确认卡只列这个问题用到的数据():
     from litmus.spec import parse_spec
 
     assert _used_data(parse_spec(stock_list()), ["$pct_chg > 9"]) == {"stock"}
-    hs300 = parse_spec(stock_list(universe={"base": "hs300"}))
+    hs300 = parse_spec(stock_list(scope={"base": "hs300"}))
     assert _used_data(hs300, ["$roe > 10"]) == {"stock", "finance", "index_weight"}
-    board = parse_spec({"shape": "board_list", "board_type": "sw_industry", "as_of": "2026-09-11"})
+    board = parse_spec(stock_list(scope={"target": "sw_industry"}))
     assert _used_data(board, []) == {"sw_industry"}
 
 
@@ -565,16 +622,21 @@ def test_条件用了默认门槛_原话没给数字才标默认值():
     from litmus.api.explain import _defaulted
     from litmus.spec import Mention
 
-    texts = {"filter.expr": "$market_cap < 30亿 & $is_limit_up"}
-    assert _defaulted(texts, (Mention("小市值", "filter"),)) == {"filter"}
+    expr = "$market_cap < 30亿 & $is_limit_up"
+    small = (Mention("小市值", "output.filter"),)
+    assert _defaulted({}, expr, small) == {"output.filter"}
     # 同一栏里别的说法带数字（说的是市盈率），小市值照样是默认门槛
-    both = (Mention("小市值", "filter"), Mention("市盈率低于 20", "filter"))
-    assert _defaulted(texts, both) == {"filter"}
-    assert _defaulted(texts, (Mention("市值低于 30 亿", "filter"),)) == frozenset()
-    assert _defaulted(texts, (Mention("30亿以下", "filter"),)) == frozenset()
-    assert _defaulted(texts, ()) == frozenset()  # 手填的、确认卡上改过的
-    changed = {"filter.expr": "$market_cap < 50亿"}
-    assert _defaulted(changed, (Mention("小市值", "filter"),)) == frozenset()
+    both = (*small, Mention("市盈率低于 20", "output.filter"))
+    assert _defaulted({}, expr, both) == {"output.filter"}
+    assert _defaulted({}, expr, (Mention("市值低于 30 亿", "output.filter"),)) == frozenset()
+    assert _defaulted({}, expr, (Mention("30亿以下", "output.filter"),)) == frozenset()
+    assert _defaulted({}, expr, ()) == frozenset()  # 手填的、确认卡上改过的
+    assert _defaulted({}, "$market_cap < 50亿", small) == frozenset()
+    # 指标上的默认门槛同样标出来
+    metric = {"小市值股票": expr}
+    assert _defaulted(metric, "", (Mention("小市值", "metrics.小市值股票"),)) == {
+        "metrics.小市值股票"
+    }
 
 
 def test_候选里只有一个代码或名称完全一致的_直接用():
