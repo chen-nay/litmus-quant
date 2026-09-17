@@ -477,6 +477,38 @@ def test_提问_请求体写错返回400(tmp_path, payload, detail):
     assert response.status_code == 400 and detail in response.json()["detail"]
 
 
+def test_页面开关_默认开_关掉只是不显示(tmp_path):
+    assert make_client(tmp_path).get("/api/settings").json() == {"show_trace": True}
+
+    services = Services(
+        ds=FakeData(),
+        store=JsonStore(tmp_path),
+        events=EVENTS,
+        sync_job=SyncJob(no_sync),
+        data_status=lambda: READY,
+        show_trace=False,
+    )
+    off = TestClient(create_app(services))
+    assert off.get("/api/settings").json() == {"show_trace": False}
+    # 关掉只是页面不显示，接口照样取得到
+    assert off.get("/api/traces/p20260916-21-37-20aaaaaa").status_code == 404
+
+
+def test_页面开关_环境变量怎么解读(monkeypatch):
+    from litmus.api.services import _flag
+
+    for value in ("1", "true", "TRUE", "yes", "on", " On "):
+        monkeypatch.setenv("LITMUS_SHOW_TRACE", value)
+        assert _flag("LITMUS_SHOW_TRACE", default=False) is True, value
+    for value in ("0", "false", "no", "off", "随便写"):
+        monkeypatch.setenv("LITMUS_SHOW_TRACE", value)
+        assert _flag("LITMUS_SHOW_TRACE", default=True) is False, value
+    monkeypatch.setenv("LITMUS_SHOW_TRACE", "   ")  # 没填就用默认
+    assert _flag("LITMUS_SHOW_TRACE", default=True) is True
+    monkeypatch.delenv("LITMUS_SHOW_TRACE")
+    assert _flag("LITMUS_SHOW_TRACE", default=True) is True
+
+
 def test_过程记录_接口能按提问编号取回_不存在返回404(tmp_path):
     from litmus.store import PlanRecord, TraceRecord
 

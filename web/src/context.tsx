@@ -7,7 +7,13 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 
 import { api, errorText } from "./api";
-import type { BoardsResponse, EventsResponse, FieldsResponse, StatusResponse } from "./types";
+import type {
+  BoardsResponse,
+  EventsResponse,
+  FieldsResponse,
+  SettingsResponse,
+  StatusResponse,
+} from "./types";
 
 interface StatusState {
   data: StatusResponse | null;
@@ -59,6 +65,8 @@ export interface Catalog {
   concept: BoardsResponse | null;
   /** 概念板块不可用的原因（没权限、还没同步） */
   conceptError: string | null;
+  /** 页面开关（.env 决定）。读不到时按全关处理，不因为它挂掉整页 */
+  settings: SettingsResponse | null;
   error: string | null;
 }
 
@@ -69,6 +77,7 @@ const EMPTY_CATALOG: Catalog = {
   sw2: null,
   concept: null,
   conceptError: null,
+  settings: null,
   error: null,
 };
 
@@ -93,7 +102,8 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
       api.boards("sw_industry"),
       api.boards("sw_industry_l2"),
       api.boards("concept"),
-    ]).then(([events, fields, sw, sw2, concept]) => {
+      api.settings(),
+    ]).then(([events, fields, sw, sw2, concept, settings]) => {
       if (!alive) return;
       const failed = [events, fields, sw].find((item) => item.status === "rejected");
       setCatalog({
@@ -103,6 +113,7 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
         sw2: settled(sw2),
         concept: settled(concept),
         conceptError: concept.status === "rejected" ? errorText(concept.reason) : null,
+        settings: settled(settings),
         error: failed?.status === "rejected" ? errorText(failed.reason) : null,
       });
     });

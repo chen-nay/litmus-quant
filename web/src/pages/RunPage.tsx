@@ -7,6 +7,7 @@ import { Link, useParams } from "react-router-dom";
 import { api, errorText } from "../api";
 import { HistoryResultView } from "../components/HistoryResultView";
 import { ListResultView } from "../components/ListResultView";
+import { TraceView } from "../components/TraceView";
 import { useCatalog } from "../context";
 import { formatTime } from "../format";
 import { runTitle, summarize } from "../specSummary";
@@ -82,6 +83,9 @@ export function RunPage() {
             </ul>
           </details>
         ) : null}
+        {catalog.settings?.show_trace && (
+          <TraceView runId={record.run_id} planId={record.plan_id} />
+        )}
       </Card>
       {record.status === "failed" && (
         <Alert

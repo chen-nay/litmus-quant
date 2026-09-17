@@ -279,6 +279,19 @@ export interface KlineResponse {
 
 // ── 提问、确认卡 ────────────────────────────────────────────────
 
+/** 页面开关，由后端 .env 决定 */
+export interface SettingsResponse {
+  show_trace: boolean;
+}
+
+/** 过程记录：这次提问 / 运行的每一步。steps 里每一项的字段随步骤而异，所以是宽松类型 */
+export interface TraceResponse {
+  record_id: string;
+  query: string;
+  steps: Array<Record<string, unknown>>;
+  created_at: string;
+}
+
 /** 还没检查过的查询条件草稿（大模型给的，可能缺栏目） */
 export type SpecDraft = Record<string, unknown>;
 

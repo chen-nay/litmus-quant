@@ -10,10 +10,12 @@ import type {
   PlanResponse,
   RunRecord,
   RunResponse,
+  SettingsResponse,
   Spec,
   SpecDraft,
   StatusResponse,
   SyncProgress,
+  TraceResponse,
 } from "./types";
 
 const OFFLINE = "连不上后端：先在仓库目录运行 uv run python -m litmus serve";
@@ -57,6 +59,7 @@ export const api = {
   status: () => request<StatusResponse>("/api/data/status"),
   startSync: () => post<{ started: boolean; sync: SyncProgress }>("/api/data/sync"),
   stopSync: () => post<{ stopped: boolean; sync: SyncProgress }>("/api/data/sync/stop"),
+  settings: () => request<SettingsResponse>("/api/settings"),
   events: () => request<EventsResponse>("/api/events"),
   boards: (type: BoardType) => request<BoardsResponse>(`/api/boards?type=${type}`),
   fields: () => request<FieldsResponse>("/api/fields"),
@@ -79,6 +82,8 @@ export const api = {
   run: (spec: Spec, planId?: string | null) =>
     post<RunResponse>("/api/run", planId ? { spec, plan_id: planId } : { spec }),
   record: (runId: string) => request<RunRecord>(`/api/run/${encodeURIComponent(runId)}`),
+  /** 过程记录：编号用 plan_id 或 run_id。没记到返回 404 */
+  trace: (recordId: string) => request<TraceResponse>(`/api/traces/${encodeURIComponent(recordId)}`),
   kline: (code: string, from: string, to: string) =>
     request<KlineResponse>(
       `/api/stocks/${encodeURIComponent(code)}/kline?from=${from}&to=${to}`,

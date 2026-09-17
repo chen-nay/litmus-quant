@@ -1,4 +1,8 @@
-"""GET /api/events、GET /api/boards、GET /api/fields（ARCHITECTURE §6）：表单、结果表要用的清单。"""
+"""页面打开时读的几样东西（ARCHITECTURE §6）。
+
+GET /api/events、/api/boards、/api/fields：表单和结果表要用的清单。
+GET /api/settings：页面开关，现在只有一个「结果页要不要显示技术细节」。
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,15 @@ from litmus.expr import field_catalog
 from litmus.signals import event_catalog
 
 router = APIRouter()
+
+
+@router.get("/api/settings")
+def get_settings(request: Request) -> dict[str, object]:
+    """页面开关。show_trace：结果页显示「技术细节」（过程记录），由 .env 的 LITMUS_SHOW_TRACE 定，默认开。
+
+    关掉只是页面不显示；过程记录照记，`GET /api/traces/<编号>` 照样取得到。
+    """
+    return {"show_trace": services_of(request).show_trace}
 
 
 @router.get("/api/events")
