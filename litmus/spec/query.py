@@ -179,7 +179,7 @@ class Metric(_Strict):
 
 
 class Condition(_Strict):
-    """筛选条件。写表达式而不是引用 metric：它是个真假，不是要显示的数。"""
+    """筛选条件。写表达式：它是个真假，不是要显示的数。"""
 
     expr: str = Field(min_length=1)
     label: str = ""

@@ -183,7 +183,7 @@ def test_不认识的字段直接报错_不悄悄忽略():
 
 
 def test_确认卡的说明和默认值标记由代码填_请求里带来的能被覆盖():
-    # 结构上收得下，但 api 会用自己算的那份覆盖（同 v1）
+    # 结构上收得下，但 api 会用自己算的那份覆盖
     parsed = parse_spec(spec(defaults_used=["scope.exclude"], assumptions=["随便写的"]))
     assert parsed.defaults_used == ("scope.exclude",)
 
