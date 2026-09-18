@@ -186,6 +186,36 @@ def test_卡不走确认卡_提问这一步就算完(client, llm):
     assert steps[-2:] == ["run", "respond"]
 
 
+def test_卡先出_小结再单独取_写了数字重试一次_写过就不重写(client, llm):
+    llm.outputs.append({**CARD, "narrate": True})
+    query = "牧原在农林牧渔里今年涨幅排第几，怎么样"
+    body = client.post("/api/plan", json={"query": query}).json()
+    assert body["status"] == "done", body
+    assert body["result"]["narrate"] is True  # 页面据此先占着小结的位置
+    assert len(llm.calls) == 1  # 卡先出，没等小结
+
+    llm.outputs += [
+        {"text": "今年以来跌了 15.69%，比行业差。"},
+        {"text": "今年以来在跌，而且比农林牧渔行业跌得多。"},
+    ]
+    url = f"/api/run/{body['run_id']}/narrative"
+    first = client.post(url).json()
+    assert first == {"text": "今年以来在跌，而且比农林牧渔行业跌得多。", "error": None}
+    # 交给大模型的是用户原话和卡上的文字
+    assert llm.calls[1].startswith(f"问题：{query}\n卡：\n牧原股份")
+
+    assert client.post(url).json() == first and len(llm.calls) == 3  # 写过就给存下的那段
+    assert client.get(f"/api/run/{body['run_id']}").json()["narrative"] == first["text"]
+
+
+def test_卡不要小结时_取小结报错(client, llm):
+    body = ask(client, llm, CARD)
+    assert body["status"] == "done" and body["result"]["narrate"] is False
+    response = client.post(f"/api/run/{body['run_id']}/narrative")
+    assert response.status_code == 400 and "不是要写小结的卡" in response.json()["detail"]
+    assert client.get(f"/api/run/{body['run_id']}").json()["narrative"] is None
+
+
 def test_卡_点名两只股票_各出一份(client, llm):
     draft = naming(CARD, ("牧原", "牧原股份"), ("温氏", "温氏股份"))
     body = ask(client, llm, {**draft, "scope": {}}, query="牧原跟温氏今年谁涨得多")

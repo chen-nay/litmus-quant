@@ -102,3 +102,11 @@ class RunResponse(BaseModel):
     message: str | None = None
     #: data_not_ready：本地数据状态与同步进度，和 GET /api/data/status 一样
     data: dict[str, Any] | None = None
+
+
+class NarrativeResponse(BaseModel):
+    """卡下面的小结。text 为空时页面上这一块不显示（没什么可说、两次都没写对、大模型调不通）。"""
+
+    text: str = ""
+    #: 没写出来的原因，给开发看
+    error: str | None = None

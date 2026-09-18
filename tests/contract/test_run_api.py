@@ -112,6 +112,22 @@ def test_卡_结果带着卡底下的怎么算的(client):
     assert {step["step"]: step for step in trace["steps"]}["respond"]["cards"] == 1
 
 
+def test_卡要小结但没配大模型_卡照样出_没有小结(client):
+    spec = {
+        "subject": {"kind": "codes", "codes": ["002714.SZ"]},
+        "when": {"as_of": DAY.isoformat()},
+        "metrics": [{"name": "市净率", "expr": "$pb"}],
+        "output": {"kind": "card"},
+        "narrate": True,
+    }
+    body = run(client, spec)
+    assert body["status"] == "done", body
+    assert body["result"]["narrate"] is False and body["result"]["items"]  # 页面不占小结的位置
+    narrative = client.post(f"/api/run/{body['run_id']}/narrative").json()
+    assert narrative == {"text": "", "error": "大模型没有配置好"}
+    assert client.post("/api/run/r20260101-00-00-00abcdef/narrative").status_code == 404
+
+
 def test_个股回看_事件按事件库重新生成(client):
     spec = {
         "subject": {"kind": "codes", "codes": ["000001.SZ"]},

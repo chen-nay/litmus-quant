@@ -24,14 +24,15 @@ from fastapi.concurrency import run_in_threadpool
 
 from litmus.api.checks import Spec, check_spec
 from litmus.api.explain import explain, plan_mentions
-from litmus.api.models import AssumptionItem, CheckResponse, Issue, RunResponse
+from litmus.api.models import AssumptionItem, CheckResponse, Issue, NarrativeResponse, RunResponse
 from litmus.api.serialize import result_to_dict, to_jsonable
 from litmus.api.services import Services, services_of
 from litmus.data import DataStatus, MissingDataError
 from litmus.expr import ExprDataError
+from litmus.llm import LLMCall, narrate
 from litmus.research import run as run_research
 from litmus.spec import Confirm, EventStudyOutput
-from litmus.store import RunRecord, TraceRecord
+from litmus.store import NarrativeRecord, RunRecord, TraceRecord
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -118,12 +119,39 @@ def execute(raw_spec: object, plan_id: str | None, services: Services) -> RunRes
         # 卡不走确认卡，那份说明跟着结果一起给：卡底下的「怎么算的」
         payload["summary"] = confirm.summary
         payload["assumptions"] = [item.model_dump() for item in assumption_items(confirm)]
+        # 小结不在这里写：卡先出，页面再调 POST /api/run/{run_id}/narrative 取小结
+        payload["narrate"] = bool(spec.narrate and services.llm is not None)
     run_id = services.store.save_run(
         _record(spec, plan_id, status.data_through, started, status="done", result=payload)
     )
     steps.append({"step": "respond", "status": "done", **_size(payload), "ms": _ms(started)})
     _save_trace(services, run_id, spec, steps)
     return RunResponse(status="done", run_id=run_id, result=payload)
+
+
+def _question(services: Services, plan_id: str | None) -> str | None:
+    """用户原话：卡下面那段话要先回答用户问的。表单直接提交的没有原话。"""
+    record = services.store.get_plan(plan_id) if plan_id else None
+    return str(record.detail.get("question") or record.query) if record else None
+
+
+def call_step(call: LLMCall, step: str) -> dict[str, object]:
+    """一次大模型调用 → 过程记录里的一步。提示词只记哈希，原始返回整份记（LLMCall 的说明）。"""
+    return {
+        "step": step,
+        "attempt": call.attempt,
+        "prompt_id": call.prompt_id,
+        "prompt_version": call.prompt_version,
+        "rendered_hash": call.rendered_hash,
+        "model": call.model,
+        "user_message": call.user_message,
+        "raw_reply": call.raw_reply,
+        "input_tokens": call.input_tokens,
+        "output_tokens": call.output_tokens,
+        "seconds": call.seconds,
+        "problems": list(call.problems),
+        "error": call.error,
+    }
 
 
 def _ms(mark: float) -> int:
@@ -153,11 +181,48 @@ def _save_trace(
 
 @router.get("/api/run/{run_id}")
 def get_run(run_id: str, request: Request) -> dict[str, object]:
-    """运行记录：spec、结果或错误、数据截至哪天、事件库版本、耗时。"""
-    record = services_of(request).store.get_run(run_id)
+    """运行记录：spec、结果或错误、数据截至哪天、事件库版本、耗时。卡写过小结的，带上小结。"""
+    store = services_of(request).store
+    record = store.get_run(run_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"没有编号为 {run_id} 的运行记录")
-    return asdict(record)
+    narrative = store.get_narrative(run_id)
+    return {**asdict(record), "narrative": None if narrative is None else narrative.text}
+
+
+@router.post("/api/run/{run_id}/narrative")
+async def post_narrative(run_id: str, request: Request) -> NarrativeResponse:
+    """卡下面的小结（DESIGN.md §1.6）。卡先出，页面再调这里；大模型写一次十几秒到一分钟。
+
+    写过就直接给存下的那段，不重写——小结跟着这次运行，分享链接、翻记录看到的是同一段。
+    """
+    return await run_in_threadpool(write_narrative, run_id, services_of(request))
+
+
+def write_narrative(run_id: str, services: Services) -> NarrativeResponse:
+    record = services.store.get_run(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"没有编号为 {run_id} 的运行记录")
+    result = record.result or {}
+    if result.get("kind") != "card" or not record.spec.get("narrate"):
+        raise HTTPException(status_code=400, detail="这次运行不是要写小结的卡")
+    if saved := services.store.get_narrative(run_id):
+        return NarrativeResponse(text=saved.text, error=saved.error)
+    if services.llm is None:
+        return NarrativeResponse(error="大模型没有配置好")
+    narration = narrate(result, _question(services, record.plan_id), services.llm)
+    try:
+        services.store.save_narrative(
+            NarrativeRecord(
+                run_id=run_id,
+                text=narration.text,
+                error=narration.error,
+                calls=[call_step(call, "llm.narrate") for call in narration.calls],
+            )
+        )
+    except Exception:  # noqa: BLE001 —— 存不下来也把这次写好的给用户，下次再要会重写
+        logger.warning("运行 %s 的小结没能存下来", run_id, exc_info=True)
+    return NarrativeResponse(text=narration.text, error=narration.error)
 
 
 @router.get("/api/traces/{record_id}")

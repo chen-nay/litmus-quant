@@ -54,6 +54,21 @@ class TraceRecord:
     created_at: str = ""  # 保存时由 store 填
 
 
+@dataclass(frozen=True)
+class NarrativeRecord:
+    """卡下面的小结：大模型拿卡上的内容写的一段话（DESIGN.md §1.6）。
+
+    卡先出、小结后到，所以不写进运行记录，单独存一条。**不另编号**：编号就是那次运行的 run_id。
+    calls 是这次写小结的每次大模型调用（重试就有两条），形状由写入方定。
+    """
+
+    run_id: str
+    text: str  # 空串：没什么可说，或者两次都没写对
+    error: str | None = None  # 没写出来的原因
+    calls: list[dict[str, object]] = field(default_factory=list)
+    created_at: str = ""  # 保存时由 store 填
+
+
 class Store(Protocol):
     def save_plan(self, plan: PlanRecord) -> str:
         """保存一条提问记录，返回 plan_id。"""
@@ -72,3 +87,9 @@ class Store(Protocol):
 
     def get_trace(self, record_id: str) -> TraceRecord | None:
         """取过程记录；不存在或编号不合法返回 None。"""
+
+    def save_narrative(self, narrative: NarrativeRecord) -> str:
+        """保存一次运行的小结，编号用 narrative.run_id，返回它。"""
+
+    def get_narrative(self, run_id: str) -> NarrativeRecord | None:
+        """取小结；还没写、或编号不合法返回 None。"""

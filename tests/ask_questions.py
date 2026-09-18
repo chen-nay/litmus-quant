@@ -6,7 +6,7 @@
     uv run python tests/ask_questions.py A101 B104 G1    # 只问编号以这些开头的
     uv run python tests/ask_questions.py --workers 1
 
-- 调真实大模型、读本地数据；表和统计只到确认卡，卡提问时就算完。不同步，不连 Tushare
+- 调真实大模型、读本地数据；表和统计只到确认卡，卡提问时就算完，要小结的再取一次小结。不同步，不连 Tushare
 - 提问、运行记录写临时目录，不动 data/store
 - 每条的完整回答写进 data/questions/<时间>.jsonl（本地，不提交），终端打一张对照表
 - 形态对照：清单写「卡」「卡＋话」的，回答要是算完的卡（done）；「表」「统计」要出对应的确认卡；
@@ -114,6 +114,9 @@ def ask(client: TestClient, store: JsonStore, question: Question) -> Answer:
     narrate = None
     if body.get("run_id"):
         narrate = client.get(f"/api/run/{body['run_id']}").json()["spec"].get("narrate")
+        if body["result"].get("narrate"):  # 卡先出，小结再单独取，和页面一样
+            narrative = client.post(f"/api/run/{body['run_id']}/narrative").json()
+            body["result"]["narrative"] = narrative["text"]
     got = landed(body)
     return Answer(
         id=question.id,
@@ -143,9 +146,11 @@ def summary_line(answer: Answer) -> str:
     elif body.get("result"):
         rows = body["result"]["items"][0]["rows"] if body["result"].get("items") else []
         point = "；".join(f"{row['name']} {row['text']}" for row in rows[:4])
+        if narrative := body["result"].get("narrative"):
+            point += f"\n        话：{narrative}"
     return (
         f"{mark} {answer.id:<7} {answer.shape:<5} → {answer.got:<3} {answer.seconds:>5.0f}s"
-        f" ×{answer.attempts or '-'}  {answer.query}\n        {point[:160]}"
+        f" ×{answer.attempts or '-'}  {answer.query}\n        {point[:300]}"
     )
 
 

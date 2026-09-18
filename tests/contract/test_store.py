@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from litmus.store import JsonStore, PlanRecord, RunRecord, TraceRecord
+from litmus.store import JsonStore, NarrativeRecord, PlanRecord, RunRecord, TraceRecord
 
 
 @pytest.fixture
@@ -108,6 +108,21 @@ def test_过程记录的编号必须是合法的提问或运行编号(store):
     assert store.get_trace("p20260914-15-30-12a1b2c3") is None  # 合法但不存在
     assert store.get_trace("../secret") is None
     assert store.get_trace("t20260914-15-30-12a1b2c3") is None  # 落盘名拿来当编号查不到
+
+
+def test_小结_编号就是那次运行的_只能挂在运行上(store):
+    run_id = store.save_run(RUN)
+    calls = [{"step": "llm.narrate", "attempt": 1, "raw_reply": {"text": "在跌"}}]
+    assert store.get_narrative(run_id) is None  # 还没写
+    assert store.save_narrative(NarrativeRecord(run_id=run_id, text="在跌", calls=calls)) == run_id
+    narrative = store.get_narrative(run_id)
+    assert narrative is not None and narrative.created_at
+    assert (narrative.text, narrative.error, narrative.calls) == ("在跌", None, calls)
+
+    plan_id = store.save_plan(PlanRecord(query="问题", status="ok"))
+    with pytest.raises(ValueError, match="run_id"):
+        store.save_narrative(NarrativeRecord(run_id=plan_id, text=""))
+    assert store.get_narrative("../secret") is None
 
 
 def test_转不了JSON的内容直接报错_不留残缺文件(store, tmp_path):

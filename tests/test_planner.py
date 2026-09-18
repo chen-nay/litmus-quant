@@ -95,6 +95,7 @@ def with_output(draft: dict, **changes) -> dict:
 
 def test_提示词文件都能加载_系统提示词的变量都有代码填():
     assert {prompt.id for prompt in all_prompts()} == {
+        "narrator.system",
         "planner.system",
         "planner.repair",
         "planner.followup",

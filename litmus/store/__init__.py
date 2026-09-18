@@ -3,7 +3,7 @@
 其他模块只从这里 import（§1.2 第 3 条）。
 """
 
-from litmus.store.base import PlanRecord, RunRecord, Store, TraceRecord
+from litmus.store.base import NarrativeRecord, PlanRecord, RunRecord, Store, TraceRecord
 from litmus.store.json_store import JsonStore
 
-__all__ = ["JsonStore", "PlanRecord", "RunRecord", "Store", "TraceRecord"]
+__all__ = ["JsonStore", "NarrativeRecord", "PlanRecord", "RunRecord", "Store", "TraceRecord"]

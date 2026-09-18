@@ -30,7 +30,7 @@ from fastapi.concurrency import run_in_threadpool
 from litmus.api.checks import check_spec, issue_text
 from litmus.api.explain import explain
 from litmus.api.models import Candidate, PlanQuestion, PlanResponse
-from litmus.api.routes.runs import assumption_items, execute
+from litmus.api.routes.runs import assumption_items, call_step, execute
 from litmus.api.serialize import to_jsonable
 from litmus.api.services import Services, services_of
 from litmus.data import (
@@ -49,7 +49,6 @@ from litmus.llm import (
     CLARIFY,
     FAILED,
     OK,
-    LLMCall,
     LLMConfig,
     LLMError,
     NameMention,
@@ -153,7 +152,7 @@ def make_plan(
     revise = _for_revise(spec) if spec is not None else None
     result = plan(query, context, services.llm, services.events, previous, revise)
     mentions = _with_names(result)
-    steps: list[dict[str, object]] = [_call_step(call) for call in result.calls]
+    steps: list[dict[str, object]] = [call_step(call, "llm.plan") for call in result.calls]
     response = _respond(result, mentions, services, steps)
 
     detail = {
@@ -203,25 +202,6 @@ def _card(
     return PlanResponse(
         status=run.status, spec=response.spec, message=run.message, run_id=run.run_id, data=run.data
     )
-
-
-def _call_step(call: LLMCall) -> dict[str, object]:
-    """一次大模型调用 → 过程记录里的一步。提示词只记哈希，原始返回整份记（LLMCall 的说明）。"""
-    return {
-        "step": "llm.plan",
-        "attempt": call.attempt,
-        "prompt_id": call.prompt_id,
-        "prompt_version": call.prompt_version,
-        "rendered_hash": call.rendered_hash,
-        "model": call.model,
-        "user_message": call.user_message,
-        "raw_reply": call.raw_reply,
-        "input_tokens": call.input_tokens,
-        "output_tokens": call.output_tokens,
-        "seconds": call.seconds,
-        "problems": list(call.problems),
-        "error": call.error,
-    }
 
 
 def _save_trace(
