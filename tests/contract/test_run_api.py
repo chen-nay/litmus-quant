@@ -69,6 +69,7 @@ def test_股票表(client):
     amounts = [row["成交额"] for row in result["rows"]]
     assert amounts == sorted(amounts, reverse=True)
     assert [c["name"] for c in result["columns"]] == ["成交额"]
+    assert result["understood"].startswith("沪深A股（不含北交所）里") and result["assumptions"]
     assert client.get(f"/api/run/{body['run_id']}").json()["result"] == result
 
 
@@ -103,7 +104,7 @@ def test_卡_结果带着卡底下的怎么算的(client):
     row = item["rows"][0]
     assert row["name"] == "今年以来涨幅排名" and "名（共" in row["text"] and row["note"]
 
-    assert result["summary"] == "牧原股份的今年以来涨幅排名"
+    assert result["understood"] == "牧原股份的今年以来涨幅排名"
     texts = [item["text"] for item in result["assumptions"]]
     assert texts[0].startswith("算的范围：农林牧渔")
     assert not any(text.startswith("股票：") for text in texts)  # 标题上就是它

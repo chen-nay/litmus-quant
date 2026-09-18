@@ -1,11 +1,13 @@
-"""POST /api/plan：中文提问 → 确认卡 / 澄清卡 / 改写建议（ARCHITECTURE §1.4 ①、§5.2、§6）。
+"""POST /api/plan：中文提问 → 确认卡 / 卡 / 澄清卡 / 改写建议（ARCHITECTURE §1.4 ①、§5.2、§6）。
 
 1. 本地数据不够 → data_not_ready，不调大模型
 2. 大模型没配好 → failed，说明缺什么
 3. llm.plan()：大模型填查询条件草稿；表达式、事件、结构不对时带着问题重试一次（防线②）
-4. 防线③：股票按原话查代码，查不到再用大模型猜的名字查；只有一个、或者只有一个代码 / 名称完全一致的直接用，
-   对应多个转成澄清让用户选。板块在申万一级、二级行业和通达信概念里一起查，规则见 _pick_board（2026-09-15 定）；
-   都查不到时列出名字相近的让用户选。再过和 /api/check 同一套检查，不过也转成澄清
+4. 防线③：点名的标的按原话查代码，查不到再用大模型猜的名字查；只有一个、或者只有一个代码 / 名称完全一致的直接用
+   （板块只认完全一致的）。限定的行业、板块在申万一级、二级行业和通达信概念里一起查，规则见 _pick_board
+   （2026-09-15 定）；都查不到时列出名字相近的。对应不止一个的，一句原话一组候选（choices），
+   标明选中的填到「看谁」还是「算的范围」，一次全部给出来；查不到的说明原因、让用户换个说法。
+   再过和 /api/check 同一套检查，不过也转成澄清。卡不走确认卡，查准了直接算（_card）
 5. 生成说明文字（带上原话里的说法），存下这次提问 → plan_id。确认卡上检查、运行时带上 plan_id，
    没改过的栏目继续用原话的说法（explain.plan_mentions）
 6. 追问：把 previous_plan_id 带回来，这次说的话当成对追问的回答
@@ -29,7 +31,7 @@ from fastapi.concurrency import run_in_threadpool
 
 from litmus.api.checks import check_spec, issue_text
 from litmus.api.explain import explain
-from litmus.api.models import Candidate, PlanQuestion, PlanResponse
+from litmus.api.models import Candidate, Choice, PlanQuestion, PlanResponse
 from litmus.api.routes.runs import assumption_items, call_step, execute
 from litmus.api.serialize import to_jsonable
 from litmus.api.services import Services, services_of
@@ -163,8 +165,7 @@ def make_plan(
         "mentions": [{"phrase": m.phrase, "field": m.field} for m in mentions],
         "message": response.message,
         "alternatives": response.alternatives,
-        "stock_candidates": [c.model_dump() for c in response.stock_candidates],
-        "board_candidates": [c.model_dump() for c in response.board_candidates],
+        "choices": [choice.model_dump() for choice in response.choices],
         "attempts": result.attempts,
         "prompt_version": result.prompt_version,
         "error": result.error,
@@ -279,9 +280,10 @@ def _respond(
     note = steps.append if steps is not None else (lambda _step: None)
     ds = services.ds
     spec = dict(result.spec or {})
+    choices: list[Choice] = []
+    missing: list[str] = []
     if result.subjects:
-        if clarify := _resolve_subjects(spec, result.subjects, ds, note):
-            return clarify
+        _resolve_subjects(spec, result.subjects, ds, note, choices, missing)
     if result.board is not None:
         picked, candidates = _pick_board(ds, result.board)
         note(
@@ -298,8 +300,14 @@ def _respond(
             }
         )
         if picked is None:
-            return _choose_board(spec, result.board, candidates, ds)
-        spec["scope"] = _with_board(spec.get("scope") or {}, picked)
+            _choose_board(result.board, candidates, ds, choices, missing)
+        else:
+            spec["scope"] = _with_board(spec.get("scope") or {}, picked)
+    if missing:
+        return PlanResponse(status=CLARIFY, spec=spec, message="；".join(missing))
+    if choices:
+        message = choices[0].message if len(choices) == 1 else "有几个说法对应不止一个，各选一个"
+        return PlanResponse(status=CLARIFY, spec=spec, message=message, choices=choices)
 
     checked, issues = check_spec(spec, ds, services.events)
     note({"step": "check_spec", "issues": [issue_text(issue) for issue in issues]})
@@ -324,12 +332,16 @@ def _respond(
 
 
 def _resolve_subjects(
-    spec: dict, names: tuple[NameMention, ...], ds: DataService, note
-) -> PlanResponse | None:
+    spec: dict,
+    names: tuple[NameMention, ...],
+    ds: DataService,
+    note,
+    choices: list[Choice],
+    missing: list[str],
+) -> None:
     """点名的标的按算的范围是股票还是板块去查，查准的填进 subject.codes。
 
-    有一个对应多个、或者查不到，就停下来让用户选（一次问一个）；查准了的已经填好，选完不用再查。
-    返回 None 表示都查准了。
+    对应不止一个的，每句原话一组候选放进 choices；查不到的说明放进 missing。查准了的已经填好，选完不用再查。
     """
     target = (spec.get("scope") or {}).get("target") or STOCK
     if target == STOCK:
@@ -339,7 +351,7 @@ def _resolve_subjects(
         def resolve(text: str) -> list:
             return ds.resolve_board(text, target)
 
-    codes, said, pending = [], [], None
+    codes, said = [], []
     for name in names:
         matches = _lookup(resolve, name)
         note(
@@ -359,32 +371,37 @@ def _resolve_subjects(
             # 照抄代码进来的（改现有条件）没有原话，和表单改过条件后一样只带代码
             if not name.is_code:
                 said.append({"mention": name.mention, "guess": name.guess})
-        elif pending is None:
-            pending = (name, matches)
+        elif target == STOCK:
+            _choose_stock(name, matches, choices, missing)
+        else:
+            _choose_subject_board(name, matches, target, choices, missing)
     spec["subject"] = {"kind": "codes", "mentions": said, **({"codes": codes} if codes else {})}
-    if pending is None:
-        return None
-    name, matches = pending
-    if target == STOCK:
-        return _choose_stock(spec, name, matches)
-    return _choose_subject_board(spec, name, matches, target)
 
 
 def _choose_subject_board(
-    spec: dict, name: NameMention, boards: list[BoardMatch], target: str
-) -> PlanResponse:
+    name: NameMention,
+    boards: list[BoardMatch],
+    target: str,
+    choices: list[Choice],
+    missing: list[str],
+) -> None:
     label = _BOARD_LABELS[target]
     if not boards:
-        message = f"没找到叫「{name.mention}」的{label}：换个说法，或者打开表单选"
-        return PlanResponse(status=CLARIFY, spec=spec, message=message)
+        missing.append(f"没找到叫「{name.mention}」的{label}：换个说法")
+        return
     if not any(board.exact for board in boards):
         message = (
             f"没有叫「{name.mention}」的{label}，名字相近的是下面这些，选一个；都不是就换个说法"
         )
     else:
         message = f"「{name.mention}」对应 {len(boards)} 个{label}，选一个"
-    return PlanResponse(
-        status=CLARIFY, spec=spec, message=message, board_candidates=_board_candidates(boards)
+    choices.append(
+        Choice(
+            slot="subject",
+            mention=name.mention,
+            message=message,
+            candidates=_board_candidates(boards),
+        )
     )
 
 
@@ -454,10 +471,14 @@ def _decisive(matches: list) -> list:
     return exact if len(exact) == 1 else matches
 
 
-def _choose_stock(spec: dict, name: NameMention, matches: list[StockMatch]) -> PlanResponse:
+def _choose_stock(
+    name: NameMention, matches: list[StockMatch], choices: list[Choice], missing: list[str]
+) -> None:
     if not matches:
-        message = f"没找到「{name.mention}」这只股票：换个说法，或者直接写代码（如 600519.SH）"
-        return PlanResponse(status=CLARIFY, spec=spec, message=message)
+        missing.append(
+            f"没找到「{name.mention}」这只股票：换个说法，或者直接写代码（如 600519.SH）"
+        )
+        return
     candidates = [
         Candidate(
             code=match.code,
@@ -467,16 +488,30 @@ def _choose_stock(spec: dict, name: NameMention, matches: list[StockMatch]) -> P
         for match in matches[:MAX_CANDIDATES]
     ]
     message = f"「{name.mention}」对应 {len(matches)} 只股票，选一只"
-    return PlanResponse(status=CLARIFY, spec=spec, message=message, stock_candidates=candidates)
+    choices.append(
+        Choice(slot="subject", mention=name.mention, message=message, candidates=candidates)
+    )
 
 
 def _choose_board(
-    spec: dict, name: NameMention, boards: list[BoardMatch], ds: DataService
-) -> PlanResponse:
+    name: NameMention,
+    boards: list[BoardMatch],
+    ds: DataService,
+    choices: list[Choice],
+    missing: list[str],
+) -> None:
+    """算的范围限定的行业、板块对不上：列出候选；一个都对不上就列名字相近的。"""
     if boards:
         message = f"「{name.mention}」可能是下面这些行业或板块，选一个"
-        candidates = _board_candidates(boards)
-        return PlanResponse(status=CLARIFY, spec=spec, message=message, board_candidates=candidates)
+        choices.append(
+            Choice(
+                slot="scope",
+                mention=name.mention,
+                message=message,
+                candidates=_board_candidates(boards),
+            )
+        )
+        return
     available = ds.available_targets()
     similar = [
         match
@@ -485,13 +520,17 @@ def _choose_board(
         for match in ds.similar_boards(name.mention, kind)
     ]
     if not similar:
-        message = (
-            f"没找到「{name.mention}」这个行业或板块：换个说法，或者打开表单在行业、概念板块里选"
-        )
-        return PlanResponse(status=CLARIFY, spec=spec, message=message)
+        missing.append(f"没找到「{name.mention}」这个行业或板块：换个说法")
+        return
     message = f"没找到叫「{name.mention}」的行业或板块，下面几个名字相近，选一个；都不是就换个说法"
-    candidates = _board_candidates(similar, "名字相近")
-    return PlanResponse(status=CLARIFY, spec=spec, message=message, board_candidates=candidates)
+    choices.append(
+        Choice(
+            slot="scope",
+            mention=name.mention,
+            message=message,
+            candidates=_board_candidates(similar, "名字相近"),
+        )
+    )
 
 
 #: 候选上写明口径

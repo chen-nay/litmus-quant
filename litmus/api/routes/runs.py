@@ -115,10 +115,10 @@ def execute(raw_spec: object, plan_id: str | None, services: Services) -> RunRes
         return RunResponse(status="failed", run_id=run_id, message=message)
 
     payload = result_to_dict(result)
+    # 确认卡上那份说明跟着结果一起存：结果页上方的「我把你的问题理解成」、卡底下的「怎么算的」都用它
+    payload["understood"] = confirm.summary
+    payload["assumptions"] = [item.model_dump() for item in assumption_items(confirm)]
     if spec.output.kind == "card":
-        # 卡不走确认卡，那份说明跟着结果一起给：卡底下的「怎么算的」
-        payload["summary"] = confirm.summary
-        payload["assumptions"] = [item.model_dump() for item in assumption_items(confirm)]
         # 小结不在这里写：卡先出，页面再调 POST /api/run/{run_id}/narrative 取小结
         payload["narrate"] = bool(spec.narrate and services.llm is not None)
     run_id = services.store.save_run(

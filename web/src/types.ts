@@ -3,7 +3,37 @@
 export type Target = "stock" | BoardType;
 export type BoardType = "sw_industry" | "sw_industry_l2" | "concept";
 
-// ── 查询条件（spec）────────────────────────────────────────────
+// ── 查询条件（spec）：五个部分，对应 litmus/spec/query.py（DESIGN.md §1）──────
+
+export interface Scope {
+  target: Target;
+  base: "all_a" | "hs300" | "zz500";
+  industry: string | null;
+  board: { type: "concept"; code: string } | null;
+  exclude: string[];
+}
+
+export interface Mention {
+  mention: string;
+  guess?: string | null;
+}
+
+export interface Subject {
+  kind: "pool" | "codes" | "aggregate";
+  mentions: Mention[];
+  codes: string[];
+}
+
+export interface When {
+  as_of: string | null;
+  range: { from: string; to: string } | null;
+}
+
+/** 一个名字 + 一个公式 */
+export interface Metric {
+  name: string;
+  expr: string;
+}
 
 export interface Condition {
   expr: string;
@@ -11,74 +41,120 @@ export interface Condition {
 }
 
 export interface Sort {
+  /** metrics 里某一项的 name */
   by: string;
   order: "asc" | "desc";
-  label: string;
 }
 
-export interface Universe {
-  base: "all_a" | "hs300" | "zz500";
-  industry: string | null;
-  board: { type: "concept"; code: string } | null;
-  exclude: string[];
-}
-
-/** 后端检查时由代码填：用了哪些默认值、确认卡上的说明文字。请求里带来的不作数 */
-export interface SpecMeta {
-  assumptions?: string[];
-  defaults_used?: string[];
-}
-
-export interface StockListSpec extends SpecMeta {
-  shape: "stock_list";
-  as_of: string;
+export interface TableOutput {
+  kind: "table";
   filter: Condition | null;
   sort: Sort | null;
   limit: number;
-  universe: Universe;
 }
 
-export interface BoardListSpec extends SpecMeta {
-  shape: "board_list";
-  board_type: BoardType;
-  as_of: string;
-  filter: Condition | null;
-  sort: Sort | null;
-  limit: number;
+export interface CardOutput {
+  kind: "card";
+  benchmark: "industry" | "index:000300.SH" | "index:000905.SH";
 }
 
 export interface EventRef {
   preset_id: string;
   params: Record<string, number>;
+  expr?: string;
   label?: string;
   library_version?: number | null;
 }
 
-export interface StockHistorySpec extends SpecMeta {
-  shape: "stock_history";
-  /** mention、guess 是提问时用户的原话和大模型猜的全称 */
-  target: { code: string; mention?: string; guess?: string | null };
+export interface EventStudyOutput {
+  kind: "event_study";
   event: EventRef;
-  time_range: { from: string; to: string };
   horizons: number[];
   benchmark: string;
   cost_bps: number;
 }
 
-export type Spec = StockListSpec | BoardListSpec | StockHistorySpec;
+export type Output = TableOutput | CardOutput | EventStudyOutput;
+export type Kind = Output["kind"];
+
+export interface Spec {
+  version?: 2;
+  scope: Scope;
+  subject: Subject;
+  when: When;
+  metrics: Metric[];
+  output: Output;
+  narrate?: boolean;
+  /** 后端检查时由代码填：用了哪些默认值、确认卡上的说明文字。请求里带来的不作数 */
+  defaults_used?: string[];
+  assumptions?: string[];
+}
 
 // ── 结果 ────────────────────────────────────────────────────────
 
 export type Cell = string | number | boolean | null;
 export type Row = Record<string, Cell>;
 
-export interface ListResult {
-  shape: "stock_list" | "board_list";
+/** 确认卡上的一条说明。group 是左边的小标题（看谁 / 看哪天 / 看哪些数 / 怎么出 / 什么事件 / 怎么算），空串不分组 */
+export interface AssumptionItem {
+  group: string;
+  field: string | null;
+  text: string;
+  default: boolean;
+}
+
+/** 每种结果都带着：上方那句「我把你的问题理解成」和按部分分好的说明 */
+interface Explained {
+  understood: string;
+  assumptions: AssumptionItem[];
+}
+
+export interface Column {
+  name: string;
+  /** 元 / % / 倍 / 个 / 天 / 小数百分比 / 分位 / 布尔 / 空串 */
+  unit: string;
+  /** 公式就是一个字段时的字段名，决定金额按亿万、涨跌带正负号 */
+  field: string | null;
+}
+
+export interface TableResult extends Explained {
+  kind: "table";
   as_of: string;
   total: number;
-  columns: string[];
+  pool_size: number;
+  /** 前几列：code、name、（股票还有 industry） */
+  head: string[];
+  columns: Column[];
   rows: Row[];
   notes: string[];
+}
+
+export interface CardRow {
+  name: string;
+  value: number | boolean | null;
+  unit: string;
+  /** 屏幕上的值：「3.00」「第 75 名（共 100 只）」「无」 */
+  text: string;
+  /** 解释行，没什么可解释的为空串 */
+  note: string;
+}
+
+export interface CardItem {
+  code: string;
+  name: string | null;
+  /** 股票：「农林牧渔 / 养殖业」；板块为空 */
+  industry: string | null;
+  rows: CardRow[];
+}
+
+export interface CardResult extends Explained {
+  kind: "card";
+  as_of: string;
+  pool_size: number;
+  items: CardItem[];
+  notes: string[];
+  /** 要写小结：卡先出，页面再调 /api/run/{run_id}/narrative */
+  narrate: boolean;
 }
 
 export interface Delay {
@@ -111,8 +187,8 @@ export interface HorizonSummary {
   pending: number;
 }
 
-export interface HistoryResult {
-  shape: "stock_history";
+export interface HistoryResult extends Explained {
+  kind: "event_study";
   code: string;
   name: string | null;
   event_label: string;
@@ -124,7 +200,7 @@ export interface HistoryResult {
   notes: string[];
 }
 
-export type Result = ListResult | HistoryResult;
+export type Result = TableResult | CardResult | HistoryResult;
 
 export interface Issue {
   path: string | null;
@@ -147,12 +223,21 @@ export interface RunRecord {
   created_at: string;
   status: "done" | "failed";
   spec: Spec;
+  /** 旧版查询结构的记录没有 kind，页面上说明打不开 */
   result: Result | null;
   error: string | null;
   plan_id: string | null;
   data_through: string | null;
   library_version: number | null;
   duration_ms: number | null;
+  /** 卡的小结：写过是那段话，没写过是 null */
+  narrative: string | null;
+}
+
+export interface NarrativeResponse {
+  /** 为空时页面上小结这一块不显示 */
+  text: string;
+  error: string | null;
 }
 
 // ── 数据状态与同步 ──────────────────────────────────────────────
@@ -295,18 +380,19 @@ export interface TraceResponse {
 /** 还没检查过的查询条件草稿（大模型给的，可能缺栏目） */
 export type SpecDraft = Record<string, unknown>;
 
-export interface AssumptionItem {
-  field: string | null;
-  text: string;
-  default: boolean;
-}
-
 export interface Candidate {
   code: string;
   name: string;
   note: string;
-  /** 板块候选的口径：选中申万行业填进股票池的行业，概念板块填进板块 */
   board_type?: BoardType | null;
+}
+
+/** 一句原话对应不止一个，要用户选一个。slot：选中的填进「看谁」（subject）还是「算的范围」（scope） */
+export interface Choice {
+  slot: "subject" | "scope";
+  mention: string;
+  message: string;
+  candidates: Candidate[];
 }
 
 export interface PlanQuestion {
@@ -317,6 +403,7 @@ export interface PlanQuestion {
 export interface PlanResponse {
   status:
     | "ok"
+    | "done"
     | "needs_clarification"
     | "unsupported"
     | "not_an_event"
@@ -324,19 +411,24 @@ export interface PlanResponse {
     | "failed";
   plan_id: string | null;
   spec: SpecDraft | null;
+  /** ok：确认卡最上面那句「我把你的问题理解成」 */
+  summary: string;
   assumptions: AssumptionItem[];
   questions: PlanQuestion[];
-  stock_candidates: Candidate[];
-  board_candidates: Candidate[];
+  choices: Choice[];
   alternatives: string[];
   message: string | null;
   data: StatusResponse | null;
+  /** done：卡不走确认卡，提问时就算完了 */
+  run_id: string | null;
+  result: Result | null;
 }
 
 export interface CheckResponse {
   status: "ok" | "needs_revision" | "data_not_ready";
   issues: Issue[];
   spec: Spec | null;
+  summary: string;
   assumptions: AssumptionItem[];
   message: string | null;
   data: StatusResponse | null;

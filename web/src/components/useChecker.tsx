@@ -6,7 +6,7 @@ import { Link } from "react-router-dom";
 
 import { api, errorText } from "../api";
 import { type FieldName, dropUntouchedDefaults, splitIssues } from "../specForm";
-import type { CheckResponse, Issue, Spec, SpecMeta } from "../types";
+import type { CheckResponse, Issue, Spec } from "../types";
 
 interface Problem {
   type: "warning" | "error";
@@ -17,7 +17,7 @@ interface Problem {
 
 export interface CheckerOptions {
   /** 在改的查询条件：原来是默认值、这次没改的栏目不发，确认卡上照样标「默认值」 */
-  initial?: SpecMeta;
+  initial?: Pick<Spec, "defaults_used">;
   /** 提问记录编号：从确认卡点「修改」进来的带上，没改过的栏目继续用提问原话的说法 */
   planId?: string | null;
   /** 打开表单时就要标出来的问题（草稿检查没通过） */
@@ -35,7 +35,9 @@ export function useChecker(
 
   const showIssues = useCallback(
     (list: Issue[]) => {
-      const split = splitIssues(list, fields);
+      // 指标的问题按名字报（metrics.今年以来涨幅），要对到列表里那一行
+      const metrics: { name?: string }[] = form.getFieldValue("metrics") ?? [];
+      const split = splitIssues(list, fields, metrics.map((metric) => metric?.name ?? ""));
       form.setFields(split.fields);
       setProblem({
         type: "warning",

@@ -122,6 +122,16 @@ def naming(draft: dict, *names: tuple[str, str]) -> dict:
     return {**draft, "subject": {"kind": "codes", "mentions": mentions}}
 
 
+def picks(body: dict, slot: str | None = None) -> list[dict]:
+    """要用户选的候选，几组合在一起；给了 slot 只看那一栏的。"""
+    return [
+        c
+        for choice in body["choices"]
+        if slot in (None, choice["slot"])
+        for c in choice["candidates"]
+    ]
+
+
 def texts(body: dict) -> dict[str | None, str]:
     return {item["field"]: item["text"] for item in body["assumptions"]}
 
@@ -229,7 +239,7 @@ def test_点名的板块只包含对上_不直接用_让用户选(client, llm):
     body = ask(client, llm, draft)
     assert body["status"] == "needs_clarification", body
     assert body["message"].startswith("没有叫「银」的申万一级行业，名字相近的是下面这些")
-    assert "银行" in {c["name"] for c in body["board_candidates"]}
+    assert "银行" in {c["name"] for c in picks(body)}
 
 
 def test_两种说法指的是同一只_只留一个代码(client, llm):
@@ -237,6 +247,25 @@ def test_两种说法指的是同一只_只留一个代码(client, llm):
     body = ask(client, llm, naming(HISTORY, ("茅台", "贵州茅台"), ("贵州茅台", "贵州茅台")))
     assert body["status"] == "ok", body
     assert body["spec"]["subject"]["codes"] == ["600519.SH"]
+
+
+def test_两只都对应多只_一次都给出来_各选各的(client, llm):
+    """「平安和茅台」：平安对应 3 只；再点一个查不准的「中国」，两组候选一次给，填进「看谁」。"""
+    draft = naming(CARD, ("平安", "中国平安"), ("中国", "中国"))
+    body = ask(client, llm, {**draft, "scope": {}})
+    assert body["status"] == "needs_clarification", body
+    assert [(c["slot"], c["mention"]) for c in body["choices"]] == [
+        ("subject", "平安"),
+        ("subject", "中国"),
+    ]
+    assert body["message"] == "有几个说法对应不止一个，各选一个"
+
+
+def test_限定的板块对应不止一个_候选填进算的范围(client, llm):
+    if CONCEPT not in _ds.available_targets():
+        pytest.skip("概念板块不可用")
+    body = ask(client, llm, in_board(TABLE, "光模块", "光通信、CPO概念"))
+    assert [(c["slot"], c["mention"]) for c in body["choices"]] == [("scope", "光模块")]
 
 
 def test_卡_其中一只对应多只股票_查准的留着_让用户选另一只(client, llm):
@@ -262,7 +291,7 @@ def test_卡_点名的是板块_按那一类板块查(client, llm):
 def test_个股回看_平安对应多只股票_让用户选(client, llm):
     body = ask(client, llm, naming(HISTORY, ("平安", "中国平安")))
     assert body["status"] == "needs_clarification", body
-    assert {"000001.SZ", "601318.SH", "001359.SZ"} <= {c["code"] for c in body["stock_candidates"]}
+    assert {"000001.SZ", "601318.SH", "001359.SZ"} <= {c["code"] for c in picks(body, "subject")}
     assert "codes" not in body["spec"]["subject"]  # 还没选
 
 
@@ -292,7 +321,7 @@ def test_半导体板块_能对上申万二级就用_只包含对上第三代半
         )
     else:  # 本地还没同步二级
         assert body["status"] == "needs_clarification", body
-        assert {"第三代半导体", "芯片"} <= {c["name"] for c in body["board_candidates"]}
+        assert {"第三代半导体", "芯片"} <= {c["name"] for c in picks(body)}
 
 
 def test_概念板块猜了几个名字_都对得上就让用户选(client, llm):
@@ -301,7 +330,7 @@ def test_概念板块猜了几个名字_都对得上就让用户选(client, llm)
     output = in_board(TABLE, "光模块", "光通信、CPO概念")
     body = ask(client, llm, output)
     assert body["status"] == "needs_clarification", body
-    assert {"光通信", "CPO概念"} <= {c["name"] for c in body["board_candidates"]}
+    assert {"光通信", "CPO概念"} <= {c["name"] for c in picks(body)}
 
 
 def test_概念板块原话和猜测名都查不到_列出名字相近的让用户选(client, llm):
@@ -311,13 +340,13 @@ def test_概念板块原话和猜测名都查不到_列出名字相近的让用�
     body = ask(client, llm, output)
     assert body["status"] == "needs_clarification", body
     assert body["message"].startswith("没找到叫「机器人灵巧手」的行业或板块")
-    assert "机器人概念" in {c["name"] for c in body["board_candidates"]}
+    assert "机器人概念" in {c["name"] for c in picks(body)}
 
     # 连名字相近的都没有：不给接口地址，让用户换个说法或者去表单里选
     output = in_board(TABLE, "光模块", "没有这个板块")
     body = ask(client, llm, output)
-    assert (body["status"], body["board_candidates"]) == ("needs_clarification", [])
-    assert "打开表单" in body["message"] and "/api/" not in body["message"]
+    assert (body["status"], body["choices"]) == ("needs_clarification", [])
+    assert "换个说法" in body["message"] and "/api/" not in body["message"]
 
 
 def test_过程记录_原始返回_token_耗时_解析步骤都记下来(client, llm):

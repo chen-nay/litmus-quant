@@ -66,7 +66,9 @@ describe("K 线配置", () => {
 
 describe("图的范围", () => {
   const result = (exits: (string | null)[]): HistoryResult => ({
-    shape: "stock_history",
+    kind: "event_study",
+    understood: "平安银行历史上每次涨停之后，接下来 5 个交易日涨跌多少",
+    assumptions: [],
     code: "000001.SZ",
     name: "平安银行",
     event_label: "涨停",

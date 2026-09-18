@@ -59,6 +59,7 @@ def test_金额按亿万_涨跌带正负号_空值写无():
     assert format_value(8.4e8, "元", "amount") == "8.40亿"
     assert format_value(-0.178913, RATIO) == "-17.89%"
     assert format_value(0.0312, RATIO) == "+3.12%"
+    assert format_value(0.0066, "分位") == "0.66%"
     assert format_value(-157.7172, "%", "profit_yoy") == "-157.72%"
     assert format_value(2.9955, "倍", "pb") == "3.00"
     assert format_value(None) == "无"

@@ -178,11 +178,25 @@ def test_排名在整个股票池上算_不是只在筛选结果里排():
     assert min(sort_values(result)) < 0.9  # 只在涨停股里排的话，最低的名次也会被抬得很高
 
 
-def test_排序值为空的不进结果():
+def test_排序值为空的不进结果_说清为什么():
+    """QUESTIONS.md 翻车模式 #4：以前只说「有 N 只排序值为空」，用户会以为系统没找到。"""
     result = table(metrics=[by("$pe_ttm")], sort={"by": SORT, "order": "asc"}, limit=500)
     assert all(row[SORT] is not None for row in result.rows)
-    assert any("排序值为空" in note for note in result.notes)
     assert sort_values(result) == sorted(sort_values(result))
+    note = next(note for note in result.notes if "排序值为空" in note)
+    pool = _ds.get_universe_mask(AS_OF, AS_OF, exclude=["ST", "suspended", "new_listing_60d"])
+    pe = _ds.get_fields(pool.get_column("code").to_list(), AS_OF, AS_OF, ["pe_ttm"])
+    empty = pe.get_column("pe_ttm").null_count()
+    assert (
+        note
+        == f"有 {empty} 只排序值为空，没有参与排序：{empty} 只当天没有市盈率TTM（亏损股没有市盈率）"
+    )
+
+
+def test_行情不够长的也说出来():
+    result = table(metrics=[by("Mean($close, 250)")], sort={"by": SORT}, limit=500)
+    note = next(note for note in result.notes if "排序值为空" in note)
+    assert "行情不到 250 个交易日，算不出来" in note
 
 
 def test_不是交易日在检查这一步就拦下():

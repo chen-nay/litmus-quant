@@ -1,19 +1,22 @@
-/** 确认卡：把条件翻译成明确的定义，确认后才运行（README「交互：两步出结果」、ARCHITECTURE §5.4）。 */
+/** 确认卡：把条件翻译成明确的定义，确认后才运行（README「交互：两步出结果」）。只有表和统计走，卡不走。 */
 
-import { Alert, Button, Card, Input, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Input, Space, Typography } from "antd";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { api, errorText } from "../api";
+import { kindTitle } from "../format";
 import { issueText } from "../specForm";
-import { runTitle } from "../specSummary";
 import type { AssumptionItem, Spec } from "../types";
+import { Assumptions } from "./Assumptions";
 import { Thinking } from "./askParts";
 
 export interface Confirm {
   spec: Spec;
-  /** 从提问来的带着提问编号；手填表单来的为空 */
+  /** 从提问来的带着提问编号 */
   planId: string | null;
+  /** 最上面那句「我把你的问题理解成：……」 */
+  summary: string;
   assumptions: AssumptionItem[];
 }
 
@@ -79,26 +82,23 @@ export function ConfirmCard({
   return (
     <Card
       size="small"
-      title={confirm.planId ? "我把你的问题理解成：" : "确认查询条件"}
+      title={
+        <span>
+          <Typography.Text type="secondary" style={{ fontWeight: "normal" }}>
+            {kindTitle(confirm.spec.output.kind, confirm.spec.scope.target)} · 我把你的问题理解成：
+          </Typography.Text>
+          {confirm.summary}
+        </span>
+      }
       extra={
         <Button type="link" size="small" onClick={onClose} disabled={busy}>
           关闭
         </Button>
       }
     >
-      <Typography.Text strong>{runTitle(confirm.spec)}</Typography.Text>
-      <ul style={{ paddingLeft: 20, margin: "8px 0 16px" }}>
-        {confirm.assumptions.map((item, index) => (
-          <li key={`${index}-${item.text}`} style={{ marginBottom: 4 }}>
-            {item.text}
-            {item.default && (
-              <Tag color="orange" style={{ marginLeft: 8 }}>
-                默认值，可修改
-              </Tag>
-            )}
-          </li>
-        ))}
-      </ul>
+      <div style={{ margin: "4px 0 16px" }}>
+        <Assumptions items={confirm.assumptions} />
+      </div>
       {problem && (
         <Alert
           style={{ marginBottom: 12 }}
@@ -113,7 +113,7 @@ export function ConfirmCard({
           value={change}
           disabled={busy}
           maxLength={200}
-          placeholder="修改条件"
+          placeholder="修改条件，比如：改成前 20，日期换成 9 月 11 日"
           onChange={(event) => setChange(event.target.value)}
           onPressEnter={submitChange}
         />
@@ -128,7 +128,7 @@ export function ConfirmCard({
         <Button onClick={onEdit} disabled={busy}>
           打开表单
         </Button>
-        {running && <Typography.Text type="secondary">正在计算，个股回看要几秒</Typography.Text>}
+        {running && <Typography.Text type="secondary">正在计算，统计要几秒</Typography.Text>}
       </Space>
       {revisingSince !== null && <Thinking startedAt={revisingSince} what="你要改的地方" />}
     </Card>

@@ -1081,13 +1081,27 @@ spec 只查结构，表达式对不对由 `expr.validate()` 管。`target.code` 
 
 ```python
 @dataclass
-class ListResult:              # 股票表 / 板块表
-    shape: str                 # stock_list / board_list
+class ListResult:              # 表：每行一个标的
     as_of: date
-    total: int                 # 满足筛选条件的总数（取前 N 之前）
-    columns: tuple[str, ...]   # 展示列，按顺序
-    rows: tuple[dict, ...]     # 代码、名称、行业（股票才有）、排序值、展示列
-    notes: tuple[str, ...]     # 如"没有指定排序，按成交额从高到低排"
+    total: int                 # 满足筛选条件的个数（取前 N 之前）
+    pool_size: int             # 算的范围有多少个标的
+    head: tuple[str, ...]      # 前几列：代码、名称、（股票还有行业）
+    columns: tuple[Column, ...]  # 每个指标一列：{ name, unit, field }
+    rows: tuple[dict, ...]
+    notes: tuple[str, ...]     # 如「有 45 只排序值为空，没有参与排序：45 只当天没有市盈率TTM（亏损股没有市盈率）」
+
+@dataclass
+class Column:
+    name: str
+    unit: str                  # 元 / % / 倍 / 个 / 股 / 天 / 小数百分比（涨跌）/ 分位 / 布尔，空串按普通数字
+    field: str | None          # 公式就是一个字段时的字段名，页面据此把成交额按亿显示、涨跌幅带正负号
+
+@dataclass
+class CardResult:              # 卡：点名几个就几份，每份的行是同一组指标（DESIGN.md §1.5）
+    as_of: date
+    pool_size: int
+    items: tuple[CardItem, ...]  # { code, name, industry, rows: [{ name, value, unit, text, note }] }
+    notes: tuple[str, ...]
 
 @dataclass
 class HistoryResult:           # 个股回看
@@ -1368,9 +1382,10 @@ LLM 既不写也不审查。
   `defaults_used`、`assumptions` 不作数；运行记录里存的是代码生成的那份
 - 个股回看的实际统计起点由 `research.statistics_range()` 算，和算结果用的是同一段代码，确认卡上的区间和结果页对得上
 - 确认卡上改了参数，调 `POST /api/check`（只检查、不计算）刷新说明
-- **页面（第 7c 步）**：提问和手填表单走同一张确认卡——手填的也先生成确认卡、确认后才运行。
-  点「修改」把条件填回对应的表单，改完再调 `/api/check`，说明跟着变；带着 plan_id，没改过的栏目继续用原话的说法。
-  原话对应多只股票时点候选、追问时选选项回答（交给 `/api/plan` 的 previous_plan_id）、回答不了时点改写建议重新提问
+- **页面**：表和统计先出确认卡、确认后才运行；卡提问时就算完，直接出在问题下面（DESIGN.md §1.7）。
+  确认卡上点「打开表单」把条件填回表单，改完再调 `/api/check`，说明跟着变；带着 plan_id，没改过的栏目继续用原话的说法。
+  表单只用来改现有的条件，没有从空白开始填的表单（2026-09-18 定）。
+  原话里的名字对应不止一个时一次给出全部候选、每个说法一组各选一个；追问时选选项回答（交给 `/api/plan` 的 previous_plan_id）、回答不了时点改写建议重新提问
 - **第 7d 步补充**：表单把每一栏都填上带回来，接口只看缺了哪些栏目，「默认值」标记会全丢——
   提交前把原来是默认值、这次没改的栏目去掉不发（`web/src/specForm.ts` 的 `dropUntouchedDefaults`），接口补上同一个值、照样标出来。
   原话就是说明开头的名称时不写「理解为」：「板块口径：申万一级行业，……」，不写「「申万一级行业」理解为：申万一级行业，……」
@@ -1380,7 +1395,8 @@ LLM 既不写也不审查。
   本地数据上「低于 50 亿」2016 年占 17%、2019 年占 59%、2026 年占 38%，固定门槛在不同年份含义差得远，回看较长历史时要注意。
   确认卡上一万以上的数一律按亿、万显示（`expr.describe`）
 - **涨跌幅的小数**：`Pct` 算出来是小数，确认卡上「涨跌幅 > 0.1」容易看成 0.1%，写成「> 10%」；
-  结果表里按 `Pct(...)` 排序的那一列也按小数显示成「+12.34%」、红涨绿跌（`web/src/format.ts`）
+  结果表里 `Pct(...)` 那一列也按小数显示成「+12.34%」、红涨绿跌（`web/src/format.ts`）。
+  分位（`Rank`、`TsRank`）也是小数，列的单位标「分位」，显示成「0.66%」，不带正负号、不上色（`expr.result_unit`）
 - **本地数据截至**（2026-09-15 定）：确认卡最后一条列出这个问题用到的几类数据各自截至哪天，如「本地数据截至：股票行情 2026-09-14，财务公告 2026-09-10」。
   股票表列股票行情，用到财务字段加财务公告，股票池是沪深300 / 中证500 加指数成分；板块表列对应板块的行情；
   个股回看列股票行情，对照选指数加指数行情。概念板块成分另有一条说明，不重复列（`api/explain.py`）
@@ -1434,19 +1450,22 @@ POST /api/plan
   body: { "query": "...", "previous_plan_id": "...", "spec": QuerySpec }
         # previous_plan_id 可选：回答追问时带上
         # spec 可选：确认卡上用一句话改条件时带上「现在的条件」，query 就是要改哪里（§5.2）
-  resp: { "status": "ok|needs_clarification|unsupported|not_an_event|data_not_ready|failed",
-          "plan_id": "...", "spec": QuerySpec, "assumptions": [{ "field", "text", "default" }],
-          "questions": [{ "question", "options" }], "stock_candidates": [...], "board_candidates": [...],
-          "alternatives": [...], "message": "..." }
-  说明：本地数据不够不调大模型；调 llm.plan()，再做确定性兜底核对（股票、概念板块按原话查代码，
-        没找到或对应多个转成澄清让用户选；再过 /api/check 同一套检查）；保存原话与 spec 得到 plan_id。
+  resp: { "status": "ok|done|needs_clarification|unsupported|not_an_event|data_not_ready|failed",
+          "plan_id": "...", "spec": QuerySpec, "summary": "…", "assumptions": [{ "group", "field", "text", "default" }],
+          "questions": [{ "question", "options" }],
+          "choices": [{ "slot": "subject|scope", "mention", "message", "candidates": [...] }],
+          "run_id": "...", "result": CardResult, "alternatives": [...], "message": "..." }
+  说明：本地数据不够不调大模型；调 llm.plan()，再做确定性兜底核对（股票、板块按原话查代码，
+        没找到的一起追问；对应不止一个的每个说法一组放进 choices，一次全给出来。slot 说候选填到哪：
+        subject 是点名看的标的，scope 是算的范围里限定的板块；再过 /api/check 同一套检查）；保存原话与 spec 得到 plan_id。
+        卡不走确认卡：检查通过就直接算，status=done，带 run_id 和 result（和 /api/run 的一样）。
         确认卡上检查、运行时带上 plan_id，没改过的栏目继续用原话的说法。
         带了 spec 就走 planner.revise：在这份条件上改，不从原话重新生成。请求体写错返回 400
 
 POST /api/check
   body: 同 /api/run
   resp: { "status": "ok|needs_revision|data_not_ready", "issues": [...], "spec": QuerySpec,
-          "assumptions": [{ "field", "text", "default" }] }
+          "summary": "…", "assumptions": [{ "group", "field", "text", "default" }] }
   说明：只检查、不计算。返回整理好的 spec（事件按事件库生成、默认值已标出）和说明文字；确认卡上改了参数用它刷新（§5.4）
 
 GET  /api/stocks?q=平安
@@ -1457,9 +1476,11 @@ POST /api/run
   body: { "spec": QuerySpec, "plan_id": "..." }                # plan_id 可选
   resp: { "status": "done|needs_revision|data_not_ready|failed",
           "issues": [{ "path", "message", "allowed", "position" }], "run_id": "...",
-          "result": ListResult | HistoryResult, "message": "...", "data": {...} }
+          "result": ListResult | CardResult | HistoryResult, "message": "...", "data": {...} }
   说明：本地数据够不够（data_not_ready，data 里附数据状态和同步进度）→ 确定性检查（needs_revision）
-        → research.run() → 存运行记录。用户改过参数走同一套检查，不再调 LLM；说明文字由代码重新生成，和运行记录一起存
+        → research.run() → 存运行记录。用户改过参数走同一套检查，不再调 LLM；说明文字由代码重新生成，和运行记录一起存。
+        每种结果都带 understood（确认卡上那句「理解成」）和 assumptions（确认卡上的说明），结果页和分享链接上照着显示；
+        卡另带 narrate（要不要占小结的位置）。结果表的列是 { name, unit, field }，field 是字段本身时才有，页面按它定显示方式
 
 GET  /api/run/{run_id}
   说明：运行记录（spec、结果或错误、数据截至、事件库版本、耗时）；分享链接打开。没有这条记录返回 404。
@@ -1700,13 +1721,12 @@ web/                        # React 前端（第 6 步）
 └── src/
     ├── api.ts / types.ts   # 调接口、接口类型
     ├── format.ts           # 数字怎么显示：三种单位（百分数、小数、基点）、亿 / 万、红涨绿跌
-    ├── specForm.ts         # 表单 ↔ 查询条件（确认卡上点修改时预填）；接口返回的问题 → 对应输入框
-    ├── planFlow.ts         # 提问流程：拼追问的回答、把选中的候选填进条件、示例问句
-    ├── specSummary.ts      # 结果页顶部的条件说明
+    ├── specForm.ts         # 表单 ↔ 查询条件（确认卡上点「打开表单」时预填）；接口返回的问题 → 对应输入框
+    ├── planFlow.ts         # 提问流程：拼追问的回答、把各组选中的候选填进条件、示例问句
     ├── kline.ts            # K 线图配置
     ├── context.tsx         # 数据状态（同步中 3 秒刷新）、清单（事件、字段、板块）
     ├── pages/              # 查询页、同步页、结果页 /runs/<运行编号>
-    └── components/         # 提问区、确认卡、追问 / 候选 / 改写建议、三张表单、两种结果、K 线图、状态条
+    └── components/         # 提问区、确认卡、追问 / 候选 / 改写建议、表和统计两张表单、卡 / 表 / 统计三种结果、K 线图、状态条
 tests/
 ├── contract/               # 契约测试：test_dataservice.py / test_store.py
 ├── fixtures/               # 合成数据集与生成脚本（推迟，见 §11）
@@ -1762,7 +1782,7 @@ def test_mean():
 | api | TestClient + 替身：请求体写错返回 `needs_revision` 而不是 422；结构、事件有问题时不读数据；中文说明、栏目路径、可选范围；计算出错存失败记录并返回编号；同步启动、不重复开、停止、查进度（`tests/test_api.py`）。本地真实数据上跑三种结果，数据量都很小（`tests/contract/test_run_api.py`） |
 | K 线 | 本地真实数据：基准日前复权价等于真实价、涨跌幅和后复权一样、送转当天真实价断崖而前复权连续、还没上市返回空表；接口参数写错 400、没有这只股票 404（`tests/contract/test_kline.py`） |
 | 页面开关 | `/api/settings` 默认开、关掉后接口照常；环境变量的解读（1 / true / yes / on 算开，其余非空算关，空用默认）（`tests/test_api.py`） |
-| 前端 | `make web`（接入 `make ready`）：类型检查 + 单元测试 + 构建。单元测试覆盖最容易出错的纯逻辑——三种单位的显示、红涨绿跌、列名、表单转查询条件（日期格式、文字转数值）、改条件前去掉默认值、问题对到输入框、K 线配置（开收低高顺序、触发标记、高亮范围）、查询条件填回表单（来回一致）、拼追问的回答、选候选。页面本身在浏览器里验收：第 7c 步用无头 Chrome 的调试协议按真实问题点了一遍（提问 → 确认卡 → 修改成本 → 说明跟着变 → 运行；「平安」选候选；「最近哪个板块最强」回答追问；「现在能买茅台吗」看改写建议），脚本不进仓库 |
+| 前端 | `make web`（接入 `make ready`）：类型检查 + 单元测试 + 构建。单元测试覆盖最容易出错的纯逻辑——单位的显示（百分数、涨跌小数、分位、基点、亿 / 万）、红涨绿跌、列名、表单转查询条件（日期格式、文字转数值）、改条件前去掉默认值、问题对到输入框（指标按名字对到那一行的公式）、K 线配置（开收低高顺序、触发标记、高亮范围）、查询条件填回表单（来回一致）、拼追问的回答、几组候选各选一个填进条件。页面本身在浏览器里验收：第 7c 步用无头 Chrome 的调试协议按真实问题点了一遍；DESIGN.md 第 8 步在内置浏览器里按真实问题点了 A、B、C 三组（卡和小结、并排对比、「平安」选候选到统计、表打开表单改取前几、板块卡、按分位排的表带空值原因、卡的分享链接、旧版记录），脚本不进仓库 |
 | validator | 未来函数必须被拦截：`Ref($close, -1)` 应抛错；字段不在白名单、能力不可用时报错 |
 | collector | lookback 推导：并列取最大、嵌套累加、EMA 按 4n |
 | operators | 每个算子用小表格验证，特别是 `Cross` 的边界和 `Rank` 的空值处理 |
@@ -1770,7 +1790,7 @@ def test_mean():
 | 空值与非有限值 | `~($pe_ttm > 10)` 不会选中市盈率为空的股票；除以 0、Log 非正数得到空值，不会被当成极大值选中或排第一 |
 | 预热期与股票池 | 停过牌的股票预热期按它自己的行情补够，不会因为行数不够被悄悄剔掉；`Rank` 只在当天池内排，不在池内的日子照样参与时序窗口 |
 | expr 契约 | 在本地真实数据上核对：停牌股预热补够、股票表结果与长历史直接计算一致、MACD 按 8n 预热与完整历史一致、实际统计起点（`tests/contract/test_expr.py`） |
-| research 契约 | 本地真实数据上手工核对：涨停后一字板买入顺延、长期停牌无法成交、持有期内退市按最后价格、MACD 回看的统计起点与自身涨跌、全A等权与沪深300 对照、观察中；股票表的总数、排名范围、空排序值（`tests/contract/test_history.py`、`test_screener.py`） |
+| research 契约 | 本地真实数据上手工核对：涨停后一字板买入顺延、长期停牌无法成交、持有期内退市按最后价格、MACD 回看的统计起点与自身涨跌、全A等权与沪深300 对照、观察中；股票表的总数、排名范围、空排序值不进结果并按字段说清为什么（亏损股没有市盈率、行情不够长）（`tests/contract/test_history.py`、`test_table.py`） |
 | signals | 15 个事件都能生成；参数越界、不认识、类型不对时报错并说明可选范围；事件库文件写错（占位符、默认值、某个参数组合预热超限）加载就报错；默认值和 `spec.DEFAULTS` 一致；真实数据上 15 个事件各跑一次个股回看（`tests/test_signals.py`、`tests/contract/test_signals_history.py`） |
 | returns | 手工构造 5 个触发点，核对起止价格、买入/卖出顺延、扣成本、无法成交的剔除 |
 | history | 事件只在"由不满足变为满足"那天触发（连续成立不重复计、三连板只算一次）；同期市场平均与这只股票平时平均的计算口径 |
@@ -1783,7 +1803,7 @@ def test_mean():
 | 大模型规划 | 离线用假客户端：转换、防线②重试、澄清、改写建议过滤、追问、确认卡上改条件（交给大模型的是现在的条件不是原问题；股票、概念板块照抄代码按代码查，不当成原话）（`tests/test_planner.py`、`tests/contract/test_plan_api.py`）。真实大模型 + 本地数据按 §9 第 7 步的验收标准逐条问（`tests/test_plan_live.py`，十来次调用、约 5 分钟，平时不跑；只核对结构，不核对措辞） |
 | prompts | 所有 prompt 能渲染；变量不缺不多；id 与文件名一致；系统提示词的变量都由代码填（`tests/test_llm_client.py`、`tests/test_planner.py`） |
 | llm.plan | 用假 LLMClient：编造字段、写错表达式、事件参数越界时带着问题重试一次，还不对返回 failed；漏填 status 按内容推断；澄清的选项最多三个；改写建议去掉买卖建议、百分比、太长的；追问把原问题和回答一起交给大模型（`tests/test_planner.py`）。客户端：认证方式按域名选、401 自动换、强制工具调用、跳过思考块、超时（`tests/test_llm_client.py`） |
-| /api/plan | 本地数据不够不调大模型；请求体写错 400（`tests/test_api.py`）。真实数据 + 假大模型：股票按原话解析、「平安」给候选、查不到让用户换说法、概念板块原话查不到用猜的名字、说明文字带原话、改过的栏目不再用原话、追问、日期不是交易日转澄清、确认卡上改条件时选过的概念板块和股票代码不会丢（`tests/contract/test_plan_api.py`） |
+| /api/plan | 本地数据不够不调大模型；请求体写错 400（`tests/test_api.py`）。真实数据 + 假大模型：股票按原话解析、「平安」给候选、查不到让用户换说法、概念板块原话查不到用猜的名字、说明文字带原话、改过的栏目不再用原话、追问、日期不是交易日转澄清、确认卡上改条件时选过的概念板块和股票代码不会丢、两个说法都对应不止一个时一次给出两组候选、限定的板块对应不止一个时候选填进算的范围、卡直接算出结果（`tests/contract/test_plan_api.py`） |
 | assumptions | 改了参数说明文字跟着变；默认值栏目标出"默认值"；原话说法写成「理解为」；概念板块成分、排名范围、长窗口、实际统计起点的说明（`tests/test_assumptions.py`）；检查接口不计算、请求里带来的说明和默认值标记不作数、确认卡上的实际统计起点和结果对得上（`tests/test_api.py`、`tests/contract/test_run_api.py`） |
 
 ---

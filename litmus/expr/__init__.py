@@ -3,7 +3,7 @@
 其他模块只从这里 import（§1.2 第 3 条）。
 """
 
-from litmus.expr.catalog import RATIO, field_catalog, operator_catalog, result_unit
+from litmus.expr.catalog import PERCENTILE, RATIO, field_catalog, operator_catalog, result_unit
 from litmus.expr.collector import anchor_date, collect_fields, collect_lookback, compares_below
 from litmus.expr.describer import describe
 from litmus.expr.evaluator import Evaluation, ExprDataError, ExprWarmupError, evaluate
@@ -26,6 +26,7 @@ __all__ = [
     "COMPARISONS",
     "MAX_LOOKBACK",
     "MAX_WINDOW",
+    "PERCENTILE",
     "RATIO",
     "Binary",
     "Call",

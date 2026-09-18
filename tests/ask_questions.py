@@ -94,7 +94,7 @@ def landed(body: dict) -> str:
     if status in ("unsupported", "not_an_event"):
         return "拒"
     if status == "needs_clarification":
-        return "候选" if body.get("stock_candidates") or body.get("board_candidates") else "澄清"
+        return "候选" if body.get("choices") else "澄清"
     return "失败"
 
 

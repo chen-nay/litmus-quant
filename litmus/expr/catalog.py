@@ -63,18 +63,23 @@ def operator_catalog() -> list[dict[str, str]]:
     return operators + rules
 
 
-#: 算出来是分位或涨跌幅的算子，结果是 0 附近的小数，页面按百分比显示
-_RATIO_CALLS = frozenset({"Rank", "TsRank", "Pct", "PctSince"})
+#: 算出来是涨跌幅的算子，结果是 0 附近的小数，页面按百分比显示、带正负号
+_RATIO_CALLS = frozenset({"Pct", "PctSince"})
+#: 算出来是分位的算子：0~1 的小数，页面按百分比显示，不带正负号、不分红绿
+_PERCENTILE_CALLS = frozenset({"Rank", "TsRank"})
 
-#: 分位、涨跌幅这类小数的单位标记，和 FIELDS 里的「%」区分开——那个已经是百分数了
+#: 涨跌幅这类小数的单位标记，和 FIELDS 里的「%」区分开——那个已经是百分数了
 RATIO = "小数百分比"
+#: 分位的单位标记
+PERCENTILE = "分位"
 
 
 def result_unit(text: str | Node) -> str:
     """一个表达式算出来的数该怎么显示。
 
     - 就是一个字段：用那个字段的单位（`$market_cap` → 元，`$pct_chg` → %）
-    - 顶上是 Rank / TsRank / Pct / PctSince：算出来是小数，按百分比显示
+    - 顶上是 Pct / PctSince：涨跌，算出来是小数，按百分比显示
+    - 顶上是 Rank / TsRank：分位，也是小数按百分比显示，但它不是涨跌，页面上不带正负号、不分红绿
     - `x / y - 1`、`1 - x / y`：偏离、回撤这类比例，也按百分比显示（2026-09-18 实测「比最高点跌了多少」
       写成 `1 - $close / Max($close, 1000)`，卡上显示成 0.28）
     - 顶上是 Count：天数，按整数显示
@@ -86,6 +91,8 @@ def result_unit(text: str | Node) -> str:
         return definition.unit if definition else ""
     if isinstance(node, Call) and node.name in _RATIO_CALLS:
         return RATIO
+    if isinstance(node, Call) and node.name in _PERCENTILE_CALLS:
+        return PERCENTILE
     if isinstance(node, Call) and node.name == "Count":
         return "个"
     if _relative(node):

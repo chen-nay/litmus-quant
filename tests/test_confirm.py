@@ -74,7 +74,7 @@ def defaults(raw: dict, facts: Facts) -> list[str]:
 
 def test_总结_表():
     assert summarize(parse_spec(TABLE), TABLE_FACTS) == (
-        "农林牧渔里，按 「今年以来涨幅」 从高到低取前 10 只股票"
+        "农林牧渔里，按「今年以来涨幅」从高到低取前 10 只股票"
     )
 
 
@@ -104,7 +104,7 @@ def test_总结_板块表不重复量词():
         "metrics": [{"name": "10日涨停家数", "expr": "Sum($limit_up_num, 10)"}],
         "output": {"kind": "table", "sort": {"by": "10日涨停家数"}, "limit": 5},
     }
-    assert summarize(parse_spec(raw)) == "通达信概念板块里，按 「10日涨停家数」 从高到低取前 5 个"
+    assert summarize(parse_spec(raw)) == "通达信概念板块里，按「10日涨停家数」从高到低取前 5 个"
 
 
 def test_总结_统计_写事件全称():

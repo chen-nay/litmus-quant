@@ -38,8 +38,10 @@ SHORT = "short"  # 行情不够长
 GAPS = "gaps"  # 窗口里有空值
 NOT_FINITE = "not_finite"  # 除以 0 之类
 
-#: 小数，按百分比显示（和 expr.RATIO 同一个标记）
+#: 涨跌，小数，按百分比显示、带正负号（和 expr.RATIO 同一个标记）
 RATIO = "小数百分比"
+#: 分位，0~1 的小数，按百分比显示、不带正负号（和 expr.PERCENTILE 同一个标记）
+PERCENTILE_UNIT = "分位"
 EMPTY = "无"
 
 _MONEY_FIELDS = frozenset({"amount", "market_cap", "circ_mv"})
@@ -144,6 +146,8 @@ def format_value(value: float | bool | None, unit: str = "", field: str | None =
         return _yuan(value)
     if unit == RATIO:
         return _percent(value * 100, sign=True)
+    if unit == PERCENTILE_UNIT:
+        return _percent(value * 100)
     if unit == "%":
         return _percent(value, sign=field in _SIGNED_FIELDS)
     if unit in ("个", "股", "天"):

@@ -7,6 +7,7 @@ import type {
   EventsResponse,
   FieldsResponse,
   KlineResponse,
+  NarrativeResponse,
   PlanResponse,
   RunRecord,
   RunResponse,
@@ -82,6 +83,9 @@ export const api = {
   run: (spec: Spec, planId?: string | null) =>
     post<RunResponse>("/api/run", planId ? { spec, plan_id: planId } : { spec }),
   record: (runId: string) => request<RunRecord>(`/api/run/${encodeURIComponent(runId)}`),
+  /** 卡下面的小结：卡先出，再调这里。大模型写一次十几秒到一分钟；写过就给存下的那段 */
+  narrative: (runId: string) =>
+    post<NarrativeResponse>(`/api/run/${encodeURIComponent(runId)}/narrative`),
   /** 过程记录：编号用 plan_id 或 run_id。没记到返回 404 */
   trace: (recordId: string) => request<TraceResponse>(`/api/traces/${encodeURIComponent(recordId)}`),
   kline: (code: string, from: string, to: string) =>

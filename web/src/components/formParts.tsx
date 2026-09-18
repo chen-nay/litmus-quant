@@ -1,77 +1,25 @@
-/** 股票表、板块表共用的输入框：筛选、排序、字段参考；三张表单共用的提交按钮和参数。 */
+/** 改条件的两张表单（表、统计）共用的零件：分块标题、字段参考、提交按钮。 */
 
-import { Button, Col, Form, Input, Row, Select, Space, Table, Typography } from "antd";
+import { Button, Divider, Form, Space, Table, Typography } from "antd";
 
 import { useCatalog } from "../context";
-import type { FieldName } from "../specForm";
-import type { CheckResponse, FieldInfo, Issue, Target } from "../types";
+import type { CheckResponse, FieldInfo, Issue, Spec, Target } from "../types";
 
-/** 三张表单的参数：不给 initial 就是空白表单；从确认卡点「修改」进来时带着查询条件、提问编号 */
-export interface FormProps<S> {
-  initial?: Partial<S>;
+/** 改条件的表单的参数：从确认卡点「打开表单」进来，带着现在的条件和提问编号 */
+export interface FormProps {
+  initial: Spec;
   planId?: string | null;
   issues?: Issue[];
   onChecked: (response: CheckResponse) => void;
-  onCancel?: () => void;
+  onCancel: () => void;
 }
 
-export const CONDITION_FIELDS: FieldName[] = [
-  ["as_of"],
-  ["limit"],
-  ["filter", "expr"],
-  ["filter", "label"],
-  ["sort", "by"],
-  ["sort", "order"],
-  ["sort", "label"],
-];
-
-export function ConditionFields({ target }: { target: Target }) {
+/** 表单里的一块：「看谁」「看哪天」…… */
+export function Section({ title }: { title: string }) {
   return (
-    <>
-      <Row gutter={12}>
-        <Col span={16}>
-          <Form.Item
-            label="筛选条件（表达式，可以不填）"
-            name={["filter", "expr"]}
-            extra="例：$amount > Mean(Ref($amount, 1), 5) * 1.4。多个条件用 & 连接，比较要加括号：($pct_chg > 5) & ($pe_ttm < 30)。金额可以写成 30亿、5000万：$market_cap < 30亿"
-          >
-            <Input.TextArea autoSize={{ minRows: 2, maxRows: 6 }} placeholder="$pct_chg > 9" />
-          </Form.Item>
-        </Col>
-        <Col span={8}>
-          <Form.Item label="条件名称（可选）" name={["filter", "label"]}>
-            <Input placeholder="涨幅超过 9%" />
-          </Form.Item>
-        </Col>
-      </Row>
-      <Row gutter={12}>
-        <Col span={12}>
-          <Form.Item
-            label="排序依据（表达式，不填按成交额）"
-            name={["sort", "by"]}
-            extra="例：$amount / Mean(Ref($amount, 1), 20)"
-          >
-            <Input placeholder="$pct_chg" />
-          </Form.Item>
-        </Col>
-        <Col span={4}>
-          <Form.Item label="顺序" name={["sort", "order"]}>
-            <Select
-              options={[
-                { value: "desc", label: "从高到低" },
-                { value: "asc", label: "从低到高" },
-              ]}
-            />
-          </Form.Item>
-        </Col>
-        <Col span={8}>
-          <Form.Item label="排序列名称（可选，显示成表头）" name={["sort", "label"]}>
-            <Input placeholder="放大倍数" />
-          </Form.Item>
-        </Col>
-      </Row>
-      <FieldReference target={target} />
-    </>
+    <Divider titlePlacement="start" style={{ margin: "8px 0 12px" }}>
+      <Typography.Text type="secondary">{title}</Typography.Text>
+    </Divider>
   );
 }
 
@@ -116,16 +64,16 @@ export function SubmitButtons({
 }: {
   running: boolean;
   ready: boolean | undefined;
-  onCancel?: () => void;
+  onCancel: () => void;
 }) {
   const blocked = ready === false;
   return (
-    <Form.Item style={{ marginBottom: 0 }}>
+    <Form.Item style={{ marginBottom: 0, marginTop: 8 }}>
       <Space>
         <Button type="primary" htmlType="submit" loading={running} disabled={blocked}>
           {blocked ? "本地数据还不够，先去同步" : "下一步：确认条件"}
         </Button>
-        {onCancel && <Button onClick={onCancel}>取消修改</Button>}
+        <Button onClick={onCancel}>取消修改</Button>
       </Space>
     </Form.Item>
   );

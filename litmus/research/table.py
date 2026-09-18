@@ -6,15 +6,16 @@ metrics 已经由 compute 算好，这里只做整形：
   这样确认卡上也看得见
 - **排序在整个池子上算，再取出满足筛选条件的那些**：`Rank` 的范围是算的范围，
   先筛再排就成了只在筛选结果里排
-- 排序值为空的不进结果（亏损股按市盈率排时没有值），同分按代码排
+- 排序值为空的不进结果（亏损股按市盈率排时没有值），同分按代码排。**空的要说清为什么**
+  （QUESTIONS.md 翻车模式 #4）：按排序公式用到的字段逐个数，当天没有这个字段的几只、行情不够长的几只
 """
 
 from __future__ import annotations
 
 import polars as pl
 
-from litmus.data import STOCK, DataService
-from litmus.expr import evaluate
+from litmus.data import FIELDS, STOCK, DataService
+from litmus.expr import collect_fields, collect_lookback, evaluate, parse
 from litmus.research.compute import Computed, board_notes, compute
 from litmus.research.results import ListResult
 from litmus.spec.query import QuerySpec, TableOutput
@@ -49,15 +50,46 @@ def run_table(spec: QuerySpec, ds: DataService) -> ListResult:
     if output.sort is None:
         raise ValueError("表要有排序：api.checks 会在没给时补一个「成交额」指标")
     by = output.sort.by
-    missing = matched.get_column(by).null_count()
-    if missing:
-        notes.append(f"有 {missing} 只排序值为空，没有参与排序")
+    missing = matched.filter(pl.col(by).is_null())
+    if missing.height:
+        expr = next(metric.expr for metric in spec.metrics if metric.name == by)
+        reasons = _why_empty(expr, missing.get_column("code").to_list(), computed.day, ds, spec)
+        unit = "只" if spec.scope.target == STOCK else "个"
+        notes.append(f"有 {missing.height} {unit}排序值为空，没有参与排序：{reasons}")
 
     descending = output.sort.order == "desc"
     top = (
         matched.drop_nulls(by).sort([by, "code"], descending=[descending, False]).head(output.limit)
     )
     return _to_result(spec, computed, top, matched.height, ds, tuple(notes))
+
+
+def _why_empty(expr: str, codes: list[str], day, ds: DataService, spec: QuerySpec) -> str:
+    """排序值为空的几只为什么空：先按公式用到的字段逐个数当天没有值的，剩下的看行情够不够长。"""
+    target = spec.scope.target
+    unit = "只" if target == STOCK else "个"
+    node = parse(expr)
+    fields = [name for name in FIELDS if name in collect_fields(node)]
+    today = ds.get_fields(codes, day, day, fields, target)
+    left = set(codes)
+    parts = []
+    for name in fields:
+        empty = left - set(today.filter(pl.col(name).is_not_null()).get_column("code").to_list())
+        if empty:
+            why = "（亏损股没有市盈率）" if name == "pe_ttm" else ""
+            parts.append(f"{len(empty)} {unit}当天没有{FIELDS[name].label}{why}")
+            left -= empty
+    lookback = collect_lookback(node)
+    if left and lookback:
+        history = ds.get_fields(sorted(left), day, day, fields[:1], target, lookback=lookback)
+        rows = dict(history.group_by("code").len().iter_rows())
+        short = {code for code in left if rows.get(code, 0) < lookback + 1}
+        if short:
+            parts.append(f"{len(short)} {unit}行情不到 {lookback + 1} 个交易日，算不出来")
+            left -= short
+    if left:
+        parts.append(f"{len(left)} {unit}算出来不是有限的数（比如除以 0）")
+    return "；".join(parts)
 
 
 def _to_result(

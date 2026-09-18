@@ -1,25 +1,23 @@
 /**
- * 数字怎么显示。结果里混着三种单位，集中在这一处并有单元测试：
- * - 字段单位是 % 的（涨跌幅 pct_chg、换手率等）是百分数：1.41 表示 1.41%
- * - 个股回看的涨跌、同期对照、跑赢比例，按 Pct(...) 排序的排序值，都是小数：-0.0078 表示 -0.78%
+ * 数字怎么显示。结果里混着几种单位，集中在这一处并有单元测试：
+ * - 单位是 % 的字段（涨跌幅 pct_chg、换手率等）是百分数：1.41 表示 1.41%
+ * - 单位是「小数百分比」的（Pct、PctSince 算出来的，偏离、回撤）是涨跌，小数：-0.0078 表示 -0.78%
+ * - 单位是「分位」的（Rank、TsRank 算出来的）也是小数，但不带正负号、不分红绿
  * - 成本是基点：30 表示 0.3%
+ * 单位由后端随结果给出（结果里每一列的 unit、field），和卡上的写法一致（litmus/spec/card.py）。
  * 颜色按 A 股习惯：红涨绿跌。
  */
 
-import type { BoardType, Cell, DataDate, Delay, FieldInfo, Sort, SyncState } from "./types";
+import type { BoardType, Cell, Column, DataDate, Delay, Kind, SyncState, Target } from "./types";
 
 export const UP_COLOR = "#d9363e";
 export const DOWN_COLOR = "#2f9e44";
 export const EMPTY = "—";
 
-export interface FieldMeta {
-  name: string; // 不带 $
-  label: string;
-  unit: string;
-}
-
-/** 结果是小数的那一列的单位：按 Pct(...) 排序的排序值 */
-export const FRACTION_UNIT = "小数";
+/** 涨跌：小数，按百分比显示、带正负号（和后端 expr.RATIO 同一个标记） */
+export const RATIO_UNIT = "小数百分比";
+/** 分位：0~1 的小数，按百分比显示，不带正负号、不分红绿（后端 expr.PERCENTILE） */
+export const PERCENTILE_UNIT = "分位";
 
 const MONEY_FIELDS = new Set(["amount", "market_cap", "circ_mv"]);
 const SIGNED_FIELDS = new Set(["pct_chg", "revenue_yoy", "profit_yoy"]);
@@ -74,80 +72,38 @@ export function trendColor(value: number | null | undefined): string | undefined
   return value > 0 ? UP_COLOR : DOWN_COLOR;
 }
 
-/** 结果表里的一格。name 不带 $，unit 来自 /api/fields */
-export function formatCell(name: string, value: Cell | undefined, unit: string): string {
+/** 结果表里的一格：单位和字段来自结果里的这一列 */
+export function formatCell(value: Cell | undefined, column: Pick<Column, "unit" | "field">): string {
   if (typeof value === "boolean") return value ? "是" : "否";
   if (typeof value === "string") return value;
   if (!isNumber(value)) return EMPTY;
-  if (MONEY_FIELDS.has(name)) return formatYuan(value);
-  if (unit === FRACTION_UNIT) return formatFraction(value);
-  if (unit === "%") return formatPercentValue(value, 2, SIGNED_FIELDS.has(name));
-  if (unit === "个" || unit === "股" || unit === "天") return fixed(value, 0);
+  if (column.field && MONEY_FIELDS.has(column.field)) return formatYuan(value);
+  if (column.unit === RATIO_UNIT) return formatFraction(value);
+  if (column.unit === PERCENTILE_UNIT) return formatFraction(value, 2, false);
+  if (column.unit === "%") return formatPercentValue(value, 2, SIGNED_FIELDS.has(column.field ?? ""));
+  if (column.unit === "个" || column.unit === "股" || column.unit === "天") return fixed(value, 0);
   return fixed(value, 2);
 }
 
-/** 涨跌类的字段、按 Pct(...) 排序的排序值红涨绿跌，其余不上色 */
-export function cellColor(name: string, value: Cell | undefined, unit = ""): string | undefined {
-  const signed = SIGNED_FIELDS.has(name) || unit === FRACTION_UNIT;
+/** 涨跌类红涨绿跌，其余不上色 */
+export function cellColor(value: Cell | undefined, column: Pick<Column, "unit" | "field">): string | undefined {
+  const signed = SIGNED_FIELDS.has(column.field ?? "") || column.unit === RATIO_UNIT;
   return signed && typeof value === "number" ? trendColor(value) : undefined;
 }
 
 /** 列名。金额、百分数的格子里已经带了单位，列名不再写；板块的价格是点位 */
-export function columnTitle(field: FieldMeta, board: boolean): string {
-  if (!field.unit || field.unit === "%" || field.unit === "布尔" || MONEY_FIELDS.has(field.name)) {
-    return field.label;
-  }
-  const unit = board && BOARD_POINT_FIELDS.has(field.name) ? "点" : field.unit;
+export function columnTitle(column: Column, board: boolean): string {
+  const unit =
+    board && BOARD_POINT_FIELDS.has(column.field ?? "")
+      ? "点"
+      : column.field && MONEY_FIELDS.has(column.field)
+        ? ""
+        : ["倍", "元", "个", "股", "天"].includes(column.unit)
+          ? column.unit
+          : "";
+  if (!unit) return column.name;
   // 「收盘价（不复权）」不写成「收盘价（不复权）（元）」
-  return field.label.endsWith("）")
-    ? `${field.label.slice(0, -1)}，${unit}）`
-    : `${field.label}（${unit}）`;
-}
-
-export function fieldMap(fields: FieldInfo[] | undefined): Map<string, FieldMeta> {
-  return new Map(
-    (fields ?? []).map((field) => {
-      const name = field.name.replace(/^\$/, "");
-      return [name, { name, label: field.label, unit: field.unit }];
-    }),
-  );
-}
-
-/** 排序值那一列：有名称用名称；排序依据就是一个字段时用字段名；没指定排序时是成交额 */
-export function sortColumn(
-  sort: Pick<Sort, "by" | "label"> | null,
-  fields: Map<string, FieldMeta>,
-): FieldMeta {
-  const by = sort ? sort.by.trim() : "$amount";
-  const match = /^\$([a-z_]+)$/.exec(by);
-  const field = match ? fields.get(match[1]) : undefined;
-  return {
-    name: field?.name ?? "",
-    label: sort?.label || field?.label || "排序值",
-    unit: field?.unit ?? (isPctCall(by) ? FRACTION_UNIT : ""),
-  };
-}
-
-/** 排序依据整个就是一次 Pct(...) 或 PctSince(...)：算出来是小数。Pct(...) / Std(...) 这种不算 */
-function isPctCall(by: string): boolean {
-  const open = by.indexOf("(");
-  if (!["Pct", "PctSince"].includes(by.slice(0, open))) return false;
-  let depth = 0;
-  for (let i = open; i < by.length; i += 1) {
-    if (by[i] === "(") depth += 1;
-    if (by[i] === ")") {
-      depth -= 1;
-      if (depth === 0) return i === by.length - 1;
-    }
-  }
-  return false;
-}
-
-/** 排序依据就是结果里已有的一列（比如按涨跌幅排）时，不再重复显示排序值那一列 */
-export function visibleColumns(columns: string[], sort: FieldMeta): string[] {
-  return sort.name && columns.includes(sort.name)
-    ? columns.filter((name) => name !== "sort_value")
-    : columns;
+  return column.name.endsWith("）") ? `${column.name.slice(0, -1)}，${unit}）` : `${column.name}（${unit}）`;
 }
 
 export function formatDelay(delay: Delay | null | undefined, action: "买入" | "卖出"): string {
@@ -178,10 +134,17 @@ export function compareCells(a: Cell | undefined, b: Cell | undefined): number {
 // ── 中文名 ──────────────────────────────────────────────────────
 
 export const BENCHMARK_LABELS: Record<string, string> = {
-  universe_equal_weight: "买入日全A等权",
+  universe_equal_weight: "买入日算的范围等权平均",
   "index:000300.SH": "沪深300",
   "index:000905.SH": "中证500",
 };
+
+/** 结果、确认卡的标题：股票表 / 板块表 · 申万一级行业 / 卡 / 统计 */
+export function kindTitle(kind: Kind, target: Target = "stock"): string {
+  if (kind === "table") return target === "stock" ? "股票表" : `板块表 · ${BOARD_TYPE_LABELS[target]}`;
+  if (kind === "card") return "卡";
+  return "统计";
+}
 
 export function benchmarkLabel(value: string): string {
   return BENCHMARK_LABELS[value] ?? value;

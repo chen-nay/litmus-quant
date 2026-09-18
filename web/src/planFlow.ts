@@ -1,12 +1,12 @@
 /** 提问流程里的纯逻辑：拼追问的回答、把选中的候选填进查询条件、示例问句。 */
 
-import type { Candidate, EventInfo, PlanQuestion, SpecDraft } from "./types";
+import type { Candidate, Choice, EventInfo, Kind, PlanQuestion, SpecDraft } from "./types";
 
-export type Shape = "stock_list" | "board_list" | "stock_history";
-
-/** 事件库示例之外，股票表、板块表的问法 */
+/** 表、卡的问法；统计的问法用事件库里的示例 */
 export const GENERAL_EXAMPLES = [
-  "昨天涨停的股票里成交额最大的 20 只",
+  "牧原股份最近走势如何？",
+  "牧原股份跟温氏股份，今年谁涨得多？",
+  "农林牧渔里今年以来涨幅前 10 的股票",
   "最近 5 个交易日涨得最多的申万行业",
 ];
 
@@ -24,29 +24,43 @@ export function composeAnswer(
   return parts.join("；");
 }
 
-/** 从候选里选了一只股票：只填代码，原话留着（确认卡上写「「平安」理解为：中国平安」） */
-export function withStock(spec: SpecDraft, candidate: Candidate): SpecDraft {
-  const target = (spec.target as Record<string, unknown> | undefined) ?? {};
-  return { ...spec, target: { ...target, code: candidate.code } };
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
-export function withBoard(spec: SpecDraft, candidate: Candidate): SpecDraft {
-  const universe = (spec.universe as Record<string, unknown> | undefined) ?? {};
-  // 候选里有申万行业也有概念板块（2026-09-15 定）：申万行业填股票池的行业，概念板块填板块
-  if (candidate.board_type === "sw_industry" || candidate.board_type === "sw_industry_l2") {
-    return { ...spec, universe: { ...universe, industry: candidate.name } };
+/**
+ * 每组候选选中的那个填进条件：填进「看谁」的加到 subject.codes（原话留着，确认卡上写「「平安」理解为：中国平安」）；
+ * 填进「算的范围」的，申万行业填 scope.industry，概念板块填 scope.board（2026-09-15 定）。
+ */
+export function withPicks(spec: SpecDraft, choices: Choice[], picked: Candidate[]): SpecDraft {
+  const subject = record(spec.subject);
+  const scope = { ...record(spec.scope) };
+  const codes = Array.isArray(subject.codes) ? [...(subject.codes as string[])] : [];
+  choices.forEach((choice, index) => {
+    const candidate = picked[index];
+    if (!candidate) return;
+    if (choice.slot === "subject") {
+      if (!codes.includes(candidate.code)) codes.push(candidate.code);
+    } else if (candidate.board_type === "sw_industry" || candidate.board_type === "sw_industry_l2") {
+      scope.industry = candidate.name;
+    } else {
+      scope.board = { type: "concept", code: candidate.code };
+    }
+  });
+  const next: SpecDraft = { ...spec, scope };
+  if (choices.some((choice) => choice.slot === "subject")) {
+    next.subject = { ...subject, kind: "codes", codes };
   }
-  return { ...spec, universe: { ...universe, board: { type: "concept", code: candidate.code } } };
+  return next;
 }
 
-export function shapeOf(spec: SpecDraft | null | undefined): Shape | null {
-  const shape = spec?.shape;
-  return shape === "stock_list" || shape === "board_list" || shape === "stock_history"
-    ? shape
-    : null;
+/** 草稿要出成表、卡还是统计 */
+export function kindOf(spec: SpecDraft | null | undefined): Kind | null {
+  const kind = record(spec?.output).kind;
+  return kind === "table" || kind === "card" || kind === "event_study" ? kind : null;
 }
 
-/** 给用户看的示例问句：两句股票表、板块表，其余用事件库里的示例，去重 */
+/** 给用户看的示例问句：表、卡各几句，其余用事件库里的示例，去重 */
 export function exampleQuestions(events: EventInfo[], limit = 6): string[] {
   const fromEvents = events.map((event) => event.example.question).filter(Boolean);
   return [...new Set([...GENERAL_EXAMPLES, ...fromEvents])].slice(0, limit);

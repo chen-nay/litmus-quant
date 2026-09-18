@@ -1,43 +1,42 @@
 /**
- * 查询页（ARCHITECTURE §1.4、§5）：两步出结果。
- * 1. 用一句话提问（或者直接填条件）
- * 2. 确认卡把条件翻译成明确的定义；确认后才运行。改条件有两条路：在卡上用一句话说要改哪里
- *    （连同现在的条件一起交给大模型，见 revise），或者点「打开表单」逐栏改，改完说明文字都跟着变
+ * 查询页：用一句话提问，答案出在问题下面。
  *
- * 提问之后也可能是追问、选候选、回答不了——见 PlanOutcome。
+ * - 卡：提问时就算完了，直接出在问题下面，卡上有分享链接（2026-09-18 定）；小结后到
+ * - 表、统计：先出确认卡，确认后运行，跳到结果页。确认卡上改条件有两条路：用一句话说要改哪里
+ *   （连同现在的条件一起交给大模型，见 revise），或者点「打开表单」逐栏改
+ * - 提问之后也可能是追问、选候选、回答不了——见 PlanOutcome
+ *
+ * 不提供从空白开始填条件的表单（2026-09-18 定）：表单只用来改现有的条件。
  */
 
-import { App as AntApp, Button, Card, Input, Space, Tabs, Typography } from "antd";
+import { App as AntApp, Button, Card, Input, Space, Typography } from "antd";
 import { useRef, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api, errorText } from "../api";
-import { BoardListForm } from "../components/BoardListForm";
+import { CardView } from "../components/CardView";
 import { type Confirm, ConfirmCard } from "../components/ConfirmCard";
-import { HistoryForm } from "../components/HistoryForm";
 import { PlanOutcome } from "../components/PlanOutcome";
-import { StockListForm } from "../components/StockListForm";
+import { StudyForm } from "../components/StudyForm";
+import { TableForm } from "../components/TableForm";
 import { Suggestions, Thinking } from "../components/askParts";
 import { useCatalog, useStatus } from "../context";
-import { type Shape, exampleQuestions, shapeOf, withBoard, withStock } from "../planFlow";
+import { exampleQuestions, kindOf, withPicks } from "../planFlow";
 import { dropUntouchedDefaults } from "../specForm";
-import type {
-  BoardListSpec,
-  Candidate,
-  CheckResponse,
-  Issue,
-  PlanResponse,
-  SpecDraft,
-  StockHistorySpec,
-  StockListSpec,
-} from "../types";
+import type { Candidate, CardResult, CheckResponse, Issue, PlanResponse, Spec } from "../types";
 
 interface Editing {
-  spec: SpecDraft;
+  spec: Spec;
   planId: string | null;
   issues: Issue[];
   /** 取消修改时回到的确认卡 */
   back: Confirm | null;
   key: number;
+}
+
+interface Answered {
+  result: CardResult;
+  runId: string;
 }
 
 export function QueryPage() {
@@ -51,32 +50,44 @@ export function QueryPage() {
   const [checking, setChecking] = useState(false);
   const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [card, setCard] = useState<Answered | null>(null);
   const [revisingSince, setRevisingSince] = useState<number | null>(null);
   const [editing, setEditing] = useState<Editing | null>(null);
-  const [tab, setTab] = useState<Shape>("stock_list");
   const top = useRef<HTMLDivElement>(null);
   const forms = useRef<HTMLDivElement>(null);
   const busy = thinkingSince !== null || checking || revisingSince !== null;
+
+  function clear() {
+    setPlan(null);
+    setConfirm(null);
+    setCard(null);
+    setEditing(null);
+  }
+
+  /** 提问、改条件得到的回答：卡直接显示，要确认的出确认卡，其余交给 PlanOutcome */
+  function show(response: PlanResponse) {
+    if (response.status === "done" && response.result?.kind === "card" && response.run_id) {
+      setCard({ result: response.result, runId: response.run_id });
+    } else if (response.status === "ok" && response.spec) {
+      setConfirm({
+        spec: response.spec as unknown as Spec,
+        planId: response.plan_id,
+        summary: response.summary,
+        assumptions: response.assumptions,
+      });
+    } else {
+      setPlan(response);
+    }
+  }
 
   async function ask(query: string, previousPlanId?: string | null) {
     const text = query.trim();
     if (!text) return;
     if (!previousPlanId) setQuestion(text);
     setThinkingSince(Date.now());
-    setPlan(null);
-    setConfirm(null);
-    setEditing(null);
+    clear();
     try {
-      const response = await api.plan(text, previousPlanId);
-      if (response.status === "ok" && response.spec) {
-        setConfirm({
-          spec: response.spec as unknown as Confirm["spec"],
-          planId: response.plan_id,
-          assumptions: response.assumptions,
-        });
-      } else {
-        setPlan(response);
-      }
+      show(await api.plan(text, previousPlanId));
     } catch (reason) {
       setPlan(failure(errorText(reason)));
     } finally {
@@ -86,8 +97,8 @@ export function QueryPage() {
 
   /**
    * 确认卡上用一句话改条件。和提问不同的是把现在的条件一起发过去，大模型在这份条件上改：
-   * 之前从候选里选的板块、表单上改过的栏目都不会丢（后端 routes/plan.py 第 7 条）。
-   * 发之前去掉这次没碰过的默认值，后端重新补一遍，确认卡上照样标「默认值，可修改」。
+   * 之前从候选里选的、表单上改过的栏目都不会丢（后端 routes/plan.py 第 7 条）。
+   * 发之前去掉这次没碰过的默认值，后端重新补一遍，确认卡上照样标「默认」。
    */
   async function revise(change: string) {
     if (!confirm) return;
@@ -96,16 +107,8 @@ export function QueryPage() {
     try {
       const spec = dropUntouchedDefaults(confirm.spec, confirm.spec);
       const response = await api.revise(spec, change, confirm.planId);
-      if (response.status === "ok" && response.spec) {
-        setConfirm({
-          spec: response.spec as unknown as Confirm["spec"],
-          planId: response.plan_id,
-          assumptions: response.assumptions,
-        });
-      } else {
-        setConfirm(null);
-        setPlan(response);
-      }
+      setConfirm(null);
+      show(response);
     } catch (reason) {
       setConfirm(null);
       setPlan(failure(errorText(reason)));
@@ -114,16 +117,27 @@ export function QueryPage() {
     }
   }
 
-  async function pick(kind: "stock" | "board", candidate: Candidate) {
+  /** 每组候选都选好了：卡直接算，表和统计先检查、出确认卡 */
+  async function pick(picked: Candidate[]) {
     if (!plan?.spec) return;
-    const draft = kind === "stock" ? withStock(plan.spec, candidate) : withBoard(plan.spec, candidate);
+    const draft = withPicks(plan.spec, plan.choices, picked);
     setChecking(true);
     try {
+      if (kindOf(draft) === "card") {
+        const response = await api.run(draft as unknown as Spec, plan.plan_id);
+        if (response.status === "done" && response.result?.kind === "card" && response.run_id) {
+          setPlan(null);
+          setCard({ result: response.result, runId: response.run_id });
+        } else {
+          message.warning(response.message ?? response.issues.map((issue) => issue.message).join("；"));
+        }
+        return;
+      }
       const response = await api.check(draft, plan.plan_id);
       if (response.status === "ok" && response.spec) {
         showConfirm(response, plan.plan_id);
       } else if (response.status === "needs_revision") {
-        startEdit(draft, plan.plan_id, response.issues);
+        startEdit(draft as unknown as Spec, plan.plan_id, response.issues);
       } else {
         message.warning(`本地数据还不够：${response.message ?? ""}`);
       }
@@ -138,12 +152,11 @@ export function QueryPage() {
     if (!response.spec) return;
     setPlan(null);
     setEditing(null);
-    setConfirm({ spec: response.spec, planId, assumptions: response.assumptions });
+    setConfirm({ spec: response.spec, planId, summary: response.summary, assumptions: response.assumptions });
     top.current?.scrollIntoView({ behavior: "smooth" });
   }
 
-  function startEdit(spec: SpecDraft, planId: string | null, issues: Issue[] = []) {
-    setTab(shapeOf(spec) ?? "stock_list");
+  function startEdit(spec: Spec, planId: string | null, issues: Issue[] = []) {
     setEditing({ spec, planId, issues, back: confirm, key: Date.now() });
     setConfirm(null);
     window.setTimeout(() => forms.current?.scrollIntoView({ behavior: "smooth" }), 0);
@@ -154,17 +167,14 @@ export function QueryPage() {
     setEditing(null);
   }
 
-  /** 表单预填：只给当前在改的那种形状 */
-  function initialFor<S>(shape: Shape): Partial<S> | undefined {
-    return editing && shapeOf(editing.spec) === shape ? (editing.spec as Partial<S>) : undefined;
-  }
-
-  const formProps = (shape: Shape) => ({
-    planId: editing?.planId ?? null,
-    issues: editing && shapeOf(editing.spec) === shape ? editing.issues : undefined,
-    onChecked: (response: CheckResponse) => showConfirm(response, editing?.planId ?? null),
-    onCancel: editing ? cancelEdit : undefined,
-  });
+  const formProps = editing && {
+    key: editing.key,
+    initial: editing.spec,
+    planId: editing.planId,
+    issues: editing.issues,
+    onChecked: (response: CheckResponse) => showConfirm(response, editing.planId),
+    onCancel: cancelEdit,
+  };
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -175,7 +185,7 @@ export function QueryPage() {
           onChange={(event) => setQuestion(event.target.value)}
           autoSize={{ minRows: 2, maxRows: 4 }}
           maxLength={500}
-          placeholder="比如：茅台每次放量突破年线之后表现怎么样？"
+          placeholder="比如：牧原股份最近走势如何？"
           onPressEnter={(event) => {
             if (event.ctrlKey || event.metaKey) void ask(question);
           }}
@@ -194,11 +204,19 @@ export function QueryPage() {
           </Typography.Text>
         </Space>
         {thinkingSince !== null && <Thinking startedAt={thinkingSince} />}
-        {thinkingSince === null && !plan && !confirm && !editing && (
+        {thinkingSince === null && !plan && !confirm && !card && !editing && (
           <Suggestions title="试试这些：" items={examples} disabled={ready === false} onAsk={ask} />
         )}
       </Card>
 
+      {card && (
+        <CardView
+          key={card.runId}
+          result={card.result}
+          runId={card.runId}
+          extra={<Link to={`/runs/${card.runId}`}>分享链接</Link>}
+        />
+      )}
       {plan && (
         <PlanOutcome
           key={plan.plan_id ?? "none"}
@@ -208,7 +226,7 @@ export function QueryPage() {
           onAnswer={(text) => ask(text, plan.plan_id)}
           onPick={pick}
           onAsk={ask}
-          onEdit={() => startEdit(plan.spec ?? {}, plan.plan_id)}
+          onEdit={() => plan.spec && startEdit(plan.spec as unknown as Spec, plan.plan_id)}
         />
       )}
       {confirm && (
@@ -217,53 +235,17 @@ export function QueryPage() {
           confirm={confirm}
           revisingSince={revisingSince}
           onRevise={revise}
-          onEdit={() => startEdit(confirm.spec as unknown as SpecDraft, confirm.planId)}
+          onEdit={() => startEdit(confirm.spec, confirm.planId)}
           onClose={() => setConfirm(null)}
         />
       )}
 
       <div ref={forms}>
-        <Card size="small" title={editing ? "修改条件（改完点「下一步」，确认卡上的说明跟着变）" : "或者直接填条件"}>
-          <Tabs
-            activeKey={tab}
-            onChange={(key) => setTab(key as Shape)}
-            items={[
-              {
-                key: "stock_list",
-                label: "股票表",
-                children: (
-                  <StockListForm
-                    key={editing?.key ?? 0}
-                    initial={initialFor<StockListSpec>("stock_list")}
-                    {...formProps("stock_list")}
-                  />
-                ),
-              },
-              {
-                key: "board_list",
-                label: "板块表",
-                children: (
-                  <BoardListForm
-                    key={editing?.key ?? 0}
-                    initial={initialFor<BoardListSpec>("board_list")}
-                    {...formProps("board_list")}
-                  />
-                ),
-              },
-              {
-                key: "stock_history",
-                label: "个股回看",
-                children: (
-                  <HistoryForm
-                    key={editing?.key ?? 0}
-                    initial={initialFor<StockHistorySpec>("stock_history")}
-                    {...formProps("stock_history")}
-                  />
-                ),
-              },
-            ]}
-          />
-        </Card>
+        {formProps && (
+          <Card size="small" title="修改条件（改完点「下一步」，确认卡上的说明跟着变）">
+            {editing.spec.output.kind === "event_study" ? <StudyForm {...formProps} /> : <TableForm {...formProps} />}
+          </Card>
+        )}
       </div>
     </div>
   );
@@ -274,12 +256,14 @@ function failure(text: string): PlanResponse {
     status: "failed",
     plan_id: null,
     spec: null,
+    summary: "",
     assumptions: [],
     questions: [],
-    stock_candidates: [],
-    board_candidates: [],
+    choices: [],
     alternatives: [],
     message: text,
     data: null,
+    run_id: null,
+    result: null,
   };
 }

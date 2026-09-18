@@ -22,7 +22,7 @@ from datetime import date
 import polars as pl
 
 from litmus.data import CONCEPT, STOCK, DataService
-from litmus.expr import ExprWarmupError, evaluate, result_unit
+from litmus.expr import ExprWarmupError, Field, evaluate, parse, result_unit
 from litmus.research.results import Column
 from litmus.spec.query import QuerySpec, Scope
 
@@ -79,7 +79,7 @@ def compute(spec: QuerySpec, ds: DataService) -> Computed:
         table = table.join(
             values.select("code", pl.col("value").alias(metric.name)), on="code", how="left"
         )
-        columns.append(Column(metric.name, result_unit(metric.expr)))
+        columns.append(Column(metric.name, result_unit(metric.expr), _field(metric.expr)))
     return Computed(
         day=day,
         pool_size=pool.height,
@@ -88,6 +88,11 @@ def compute(spec: QuerySpec, ds: DataService) -> Computed:
         pool=pool,
         ranked=ranked,
     )
+
+
+def _field(expr: str) -> str | None:
+    node = parse(expr)
+    return node.name if isinstance(node, Field) else None
 
 
 def _values(

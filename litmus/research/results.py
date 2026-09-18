@@ -14,6 +14,8 @@ class Column:
 
     name: str
     unit: str = ""
+    #: 公式就是一个字段时的字段名：成交额、市值按亿、万显示，涨跌幅带正负号，页面据此区分同样单位是元的价格
+    field: str | None = None
 
 
 @dataclass(frozen=True)

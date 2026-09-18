@@ -69,8 +69,11 @@ class Asker:
                     f"      {row['name']}：{row['text']}"
                     + (f" └ {row['note']}" if row["note"] else "")
                 )
-        for candidate in body["stock_candidates"] + body["board_candidates"]:
-            print(f"    候选：{candidate['name']}（{candidate['code']}，{candidate['note']}）")
+        for choice in body["choices"]:
+            for candidate in choice["candidates"]:
+                print(
+                    f"    候选（{choice['mention']}）：{candidate['name']}（{candidate['code']}，{candidate['note']}）"
+                )
         for question in body["questions"]:
             print(f"    追问：{question['question']} {question['options']}")
         for alternative in body["alternatives"]:
@@ -169,7 +172,7 @@ def test_外号对不上的概念板块_能用上或者从候选里选(ask):
         assert body["spec"]["scope"]["board"]["code"], body
     else:
         assert body["status"] == "needs_clarification", body
-        assert body["board_candidates"] or "打开表单" in body["message"], body
+        assert body["choices"] or "换个说法" in body["message"], body
 
 
 # ── 卡：提问时就算完 ────────────────────────────────────────────
@@ -247,7 +250,7 @@ def test_数据里没有的_不会编个字段算出来(ask, query):
 def test_平安_对应多只股票_选一只之后出确认卡(ask, client):
     body = ask("平安每次放量之后一周涨跌怎样")
     assert body["status"] == "needs_clarification", body
-    assert {"000001.SZ", "601318.SH"} <= {c["code"] for c in body["stock_candidates"]}
+    assert {"000001.SZ", "601318.SH"} <= {c["code"] for c in body["choices"][0]["candidates"]}
 
     # 页面上点候选：只填代码
     spec = {**body["spec"], "subject": {"kind": "codes", "codes": ["601318.SH"]}}
@@ -261,7 +264,7 @@ def test_平安_对应多只股票_选一只之后出确认卡(ask, client):
 def test_最近哪个板块最强_先追问_回答之后出板块表(ask):
     first = ask("最近哪个板块最强")
     assert first["status"] == "needs_clarification", first
-    assert first["questions"] and not first["stock_candidates"]
+    assert first["questions"] and not first["choices"]
     assert all(2 <= len(question["options"]) <= 3 for question in first["questions"])
 
     # 每个问题选第一个选项，拼法同 web/src/planFlow.ts 的 composeAnswer

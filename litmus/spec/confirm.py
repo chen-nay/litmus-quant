@@ -149,7 +149,7 @@ def summarize(spec: QuerySpec, facts: Facts | None = None) -> str:
         if spec.scope.target == "stock"
         else f"{spec.output.limit} {unit}"
     )
-    return f"{where}里{f'{narrowed}的' if narrowed else ''}，按 {by} {order}取前 {what}"
+    return f"{where}里{f'{narrowed}的' if narrowed else ''}，按{by}{order}取前 {what}"
 
 
 def _filter_phrase(output: TableOutput, facts: Facts) -> str:

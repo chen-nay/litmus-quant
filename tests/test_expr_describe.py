@@ -99,3 +99,7 @@ def test_偏离和回撤按百分比显示_天数按整数():
     assert result_unit("Count($is_limit_up, 10)") == "个"
     assert result_unit("$close / Mean($close, 250)") == ""  # 倍数不是涨跌
     assert result_unit("$market_cap") == "元"
+    from litmus.expr import PERCENTILE
+
+    assert result_unit("TsRank($pe_ttm, 500)") == result_unit("Rank($amount)") == PERCENTILE
+    assert result_unit("PctSince($close, 20251231)") == RATIO

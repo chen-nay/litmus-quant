@@ -51,8 +51,23 @@ class Candidate(BaseModel):
     name: str
     #: 股票：命中的规则（名称包含、拼音首字母、曾用名……），已退市的标出来；板块：口径
     note: str = ""
-    #: 板块候选的口径：sw_industry / sw_industry_l2 / concept。选中申万行业填进股票池的行业，概念板块填进板块
+    #: 板块候选的口径：sw_industry / sw_industry_l2 / concept
     board_type: str | None = None
+
+
+class Choice(BaseModel):
+    """一句原话对应不止一个，要用户选一个。
+
+    slot 说选中的填到哪：subject 是点名看的那几个（选中的代码加进 subject.codes）；
+    scope 是算的范围限定的行业、板块（申万行业填 scope.industry，概念板块填 scope.board）。
+    """
+
+    slot: Literal["subject", "scope"]
+    #: 用户原话里的说法：「平安」「光模块」
+    mention: str
+    #: 「「平安」对应 3 只股票，选一只」
+    message: str
+    candidates: list[Candidate]
 
 
 class PlanQuestion(BaseModel):
@@ -79,8 +94,8 @@ class PlanResponse(BaseModel):
     summary: str = ""
     assumptions: list[AssumptionItem] = Field(default_factory=list)
     questions: list[PlanQuestion] = Field(default_factory=list)
-    stock_candidates: list[Candidate] = Field(default_factory=list)
-    board_candidates: list[Candidate] = Field(default_factory=list)
+    #: needs_clarification：要用户选的，一句原话一组；都选完了再往下走
+    choices: list[Choice] = Field(default_factory=list)
     #: done：卡不走确认卡，这里已经算完了。运行记录编号和结果同 /api/run
     run_id: str | None = None
     result: dict[str, Any] | None = None
