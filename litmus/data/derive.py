@@ -38,7 +38,7 @@ class AmbiguousDataError(RuntimeError):
 
 
 def finance_timeline(fina: pl.DataFrame) -> pl.DataFrame:
-    """每个公告日起生效的财务值：(code, ann_date, roe, revenue_yoy, profit_yoy)。
+    """每个公告日起生效的财务值：(code, ann_date, period, roe, revenue_yoy, profit_yoy)。period 是报告期。
 
     两条规则，都是实测逼出来的：
 
@@ -99,6 +99,7 @@ def finance_timeline(fina: pl.DataFrame) -> pl.DataFrame:
     return timeline.select(
         "code",
         "ann_date",
+        "period",
         *(pl.col(column).alias(name) for name, column in FINANCE_FIELDS.items()),
     ).sort("code", "ann_date")
 
@@ -115,7 +116,7 @@ def with_finance(rows: pl.DataFrame, timeline: pl.DataFrame) -> pl.DataFrame:
             strategy="backward",
             check_sortedness=False,
         )
-        .drop("ann_date")
+        .drop("ann_date", "period")
     )
 
 

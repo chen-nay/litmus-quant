@@ -4,6 +4,8 @@
 所以「过去 n 个交易日」数的是该标的自己有行情的日子——长期停牌股复牌当天不会把停牌期间的成交额按 0 算进窗口。
 
 窗口没满 n 条、或窗口里有空值，结果为空值，不猜（Polars 的默认行为）。
+**TsRank 例外**：分位只在窗口里有值的那些天中排，亏损股没有市盈率的日子不算进去
+（2026-09-18 定；牧原股份两年 500 天里有 121 天亏损）。当天自己没有值仍为空，窗口没满 n 条仍为空。
 """
 
 from __future__ import annotations
@@ -35,6 +37,13 @@ def pct_since(x: pl.Expr, day: date) -> pl.Expr:
     return pl.when(pl.col("date") > day).then(finite(x / base - 1))
 
 
+def ts_rank(x: pl.Expr, n: int) -> pl.Expr:
+    """当天的值在最近 n 条里的分位：在有值的那些天中的名次 ÷ 有值的天数，并列取平均，最高为 1。"""
+    place = x.rolling_rank(n, method="average", min_samples=1).over(BY)
+    counted = x.is_not_null().cast(pl.Float64).rolling_sum(n).over(BY)
+    return place / counted
+
+
 def cross(x: pl.Expr, y: pl.Expr) -> pl.Expr:
     """上穿：前一个交易日 x <= y，当天 x > y。"""
     return (ref(x, 1) <= ref(y, 1)) & (x > y)
@@ -51,7 +60,6 @@ WINDOWED: dict[str, Callable[[pl.Expr, int], pl.Expr]] = {
     "Ref": ref,
     "Delta": lambda x, n: x - ref(x, n),
     "Pct": pct,
-    # 当天的值在窗口里的名次 ÷ n，并列取平均，最高为 1
-    "TsRank": lambda x, n: x.rolling_rank(n, method="average").over(BY) / n,
+    "TsRank": lambda x, n: ts_rank(x, n),
     "Count": lambda cond, n: cond.cast(pl.Float64).rolling_sum(n).over(BY),
 }

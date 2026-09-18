@@ -14,11 +14,12 @@ from datetime import date
 from typing import Any
 
 from litmus.data import CONCEPT, STOCK, SW_INDUSTRY, SW_INDUSTRY_L2, DataService
-from litmus.expr import collect_fields, collect_lookback, compares_below, describe, parse
+from litmus.expr import Call, collect_fields, collect_lookback, compares_below, describe, parse
 from litmus.research import pool_of, statistics_range
 from litmus.spec import (
     DEFAULTS,
     Assumption,
+    CardOutput,
     Confirm,
     EventStudyOutput,
     Facts,
@@ -91,8 +92,9 @@ def _facts(spec: QuerySpec, ds: DataService, mentions: tuple[Mention, ...]) -> F
         return Facts(first_date=first, **common)
 
     target = spec.scope.target
+    card = isinstance(spec.output, CardOutput)
     return Facts(
-        metric_texts={name: describe(expr, target) for name, expr in texts.items()},
+        metric_texts={name: _metric_text(expr, target, card) for name, expr in texts.items()},
         filter_text=describe(filter_expr, target) if filter_expr else "",
         pool_size=_pool_size(spec, ds),
         industry_scope=_industry_scope(spec.scope.industry, ds),
@@ -104,6 +106,14 @@ def _facts(spec: QuerySpec, ds: DataService, mentions: tuple[Mention, ...]) -> F
         defaulted=_defaulted(texts, filter_expr, mentions),
         **common,
     )
+
+
+def _metric_text(expr: str, target: str, card: bool) -> str:
+    """指标的中文。卡上排名写成第几名，说明也照这个说法写。"""
+    node = parse(expr)
+    if card and isinstance(node, Call) and node.name == "Rank":
+        return f"按{describe(node.args[0], target)}，在算的范围里从高到低排名"
+    return describe(node, target)
 
 
 def _industry_mentions(spec: QuerySpec, mentions: tuple[Mention, ...]) -> tuple[Mention, ...]:

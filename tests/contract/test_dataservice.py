@@ -358,6 +358,26 @@ def test_股票信息_退市日_查不到的老代码照样返回(ds):
     assert rows["000022.SZ"]["list_date"] is None  # 股票列表里没有这个老代码
 
 
+def test_股票信息_二级行业(ds):
+    info = ds.stock_info(["002714.SZ"], D(2026, 9, 11)).row(0, named=True)
+    assert (info["industry"], info["industry_l2"]) == ("农林牧渔", "养殖业")
+
+
+def test_最新一期财报_按公告日截到当天(ds):
+    """牧原股份 2026 半年报 2026-08-21 公告：公告前取到的还是一季报。"""
+    after = ds.latest_reports(["002714.SZ"], D(2026, 9, 11)).row(0, named=True)
+    before = ds.latest_reports(["002714.SZ"], D(2026, 8, 20)).row(0, named=True)
+    assert (after["period"], after["ann_date"]) == (D(2026, 6, 30), D(2026, 8, 21))
+    assert after["roe"] < 0 and after["profit_yoy"] < 0
+    assert before["period"] == D(2026, 3, 31)
+
+
+def test_整段停牌的股票_往前带的行照样给(ds):
+    """603159.SH 2026-09-11 停牌。卡要说出停牌前最后一个交易日，所以这一行不能被滤掉。"""
+    rows = ds.get_fields(["603159.SH"], D(2026, 9, 11), D(2026, 9, 11), ["close"], lookback=1)
+    assert rows.height == 1 and rows.get_column("date").item() < D(2026, 9, 11)
+
+
 def test_指数日线(ds):
     table = ds.get_index_daily("000300.SH", D(2026, 9, 10), D(2026, 9, 11))
     assert table.columns == ["date", "code", "open", "close"]

@@ -81,6 +81,18 @@ def test_时序分位_并列取平均():
     assert on("TsRank($close, 3)", close=[3.0, 1.0, 2.0, 2.0]) == [None, None, 0.666667, 0.833333]
 
 
+def test_时序分位_窗口里的空值跳过_当天为空仍为空():
+    """亏损股没有市盈率的日子不算：窗口 [3, 空, 1] 里 1 在有值的 2 天中排第 1 → 1/2；
+    窗口 [空, 1, 4] 里 4 排第 2 → 2/2；当天为空的结果为空；窗口没满 3 条的为空。"""
+    assert on("TsRank($pe_ttm, 3)", pe_ttm=[3.0, None, 1.0, 4.0, None]) == [
+        None,
+        None,
+        0.5,
+        1.0,
+        None,
+    ]
+
+
 def test_数条件成立的天数():
     assert on("Count($is_limit_up, 2)", is_limit_up=[True, False, True, True]) == [
         None,

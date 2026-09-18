@@ -30,7 +30,7 @@ from fastapi.concurrency import run_in_threadpool
 from litmus.api.checks import check_spec, issue_text
 from litmus.api.explain import explain
 from litmus.api.models import Candidate, PlanQuestion, PlanResponse
-from litmus.api.routes.runs import assumption_items
+from litmus.api.routes.runs import assumption_items, execute
 from litmus.api.serialize import to_jsonable
 from litmus.api.services import Services, services_of
 from litmus.data import (
@@ -173,9 +173,36 @@ def make_plan(
     plan_id = services.store.save_plan(
         PlanRecord(query=query, status=response.status, spec=response.spec, detail=detail)
     )
+    if response.status == OK and (response.spec or {}).get("output", {}).get("kind") == "card":
+        response = _card(response, plan_id, services, steps)
     steps.append({"step": "respond", "status": response.status, "message": response.message})
     _save_trace(services, plan_id, query, steps)
     return response.model_copy(update={"plan_id": plan_id})
+
+
+def _card(
+    response: PlanResponse, plan_id: str, services: Services, steps: list[dict[str, object]]
+) -> PlanResponse:
+    """卡不走确认卡，提问这一步就算完，结果跟着回去（DESIGN.md §1.5）。"""
+    run = execute(response.spec, plan_id, services)
+    steps.append({"step": "run", "run_id": run.run_id, "status": run.status})
+    if run.status == "done":
+        # 一句话总结和说明跟着结果走（卡底下的「怎么算的」），不再放一份在外面
+        return response.model_copy(
+            update={
+                "status": "done",
+                "run_id": run.run_id,
+                "result": run.result,
+                "summary": "",
+                "assumptions": [],
+            }
+        )
+    if run.status == "needs_revision":
+        message = "；".join(issue_text(issue) for issue in run.issues)
+        return PlanResponse(status=CLARIFY, spec=response.spec, message=f"条件要改一下：{message}")
+    return PlanResponse(
+        status=run.status, spec=response.spec, message=run.message, run_id=run.run_id, data=run.data
+    )
 
 
 def _call_step(call: LLMCall) -> dict[str, object]:

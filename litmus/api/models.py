@@ -62,7 +62,13 @@ class PlanQuestion(BaseModel):
 
 class PlanResponse(BaseModel):
     status: Literal[
-        "ok", "needs_clarification", "unsupported", "not_an_event", "data_not_ready", "failed"
+        "ok",
+        "done",
+        "needs_clarification",
+        "unsupported",
+        "not_an_event",
+        "data_not_ready",
+        "failed",
     ]
     #: 这次提问的记录编号：回答追问时作为 previous_plan_id 带回来；确认卡上检查、运行时作为 plan_id 带上
     plan_id: str | None = None
@@ -75,6 +81,9 @@ class PlanResponse(BaseModel):
     questions: list[PlanQuestion] = Field(default_factory=list)
     stock_candidates: list[Candidate] = Field(default_factory=list)
     board_candidates: list[Candidate] = Field(default_factory=list)
+    #: done：卡不走确认卡，这里已经算完了。运行记录编号和结果同 /api/run
+    run_id: str | None = None
+    result: dict[str, Any] | None = None
     #: unsupported / not_an_event：系统能回答的问法，点一下当成新的提问
     alternatives: list[str] = Field(default_factory=list)
     message: str | None = None
@@ -87,7 +96,7 @@ class RunResponse(BaseModel):
     issues: list[Issue] = Field(default_factory=list)
     #: done / failed：运行记录编号，GET /api/run/{run_id} 取回
     run_id: str | None = None
-    #: done：股票表 / 板块表 / 个股回看，按 shape 区分
+    #: done：表 / 卡 / 统计，按 kind 区分。卡上还带着 summary 和 assumptions（卡底下的「怎么算的」）
     result: dict[str, Any] | None = None
     #: data_not_ready / failed：给人看的一句话
     message: str | None = None

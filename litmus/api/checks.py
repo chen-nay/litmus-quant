@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import date
 from typing import Any
 
 from pydantic import ValidationError
@@ -56,8 +57,8 @@ _MESSAGES = {
     "model_attributes_type": "要是一个对象",
     "list_type": "要是一个列表",
     "tuple_type": "要是一个列表",
-    "union_tag_invalid": "shape 只能是 {expected_tags}",
-    "union_tag_not_found": "缺少 shape，可选 'stock_list'、'board_list'、'stock_history'",
+    "union_tag_invalid": "只能是 {expected_tags}",
+    "union_tag_not_found": "缺少 kind，可选 'table'、'card'、'event_study'",
     "finite_number": "要是有限的数字",
 }
 _PREFIXES = (("date", "日期要写成 YYYY-MM-DD"), ("int", "要是整数"), ("float", "要是数字"))
@@ -216,10 +217,18 @@ def _expression_issues(spec: Spec, ds: DataService) -> list[Issue]:
     if isinstance(spec.output, EventStudyOutput):
         return []  # 事件表达式来自事件库，库加载时已经把全部参数组合校验过
     issues: list[Issue] = []
-    for metric in spec.metrics:
-        issues += _expr_issues(f"metrics.{metric.name}", metric.expr, target, "sort")
-    if isinstance(spec.output, TableOutput) and spec.output.filter is not None:
-        issues += _expr_issues("output.filter.expr", spec.output.filter.expr, target, "filter")
+    exprs = {metric.name: metric.expr for metric in spec.metrics}
+    for name, text in exprs.items():
+        issues += _expr_issues(f"metrics.{name}", text, target, "metric")
+    if isinstance(spec.output, TableOutput):
+        if spec.output.filter is not None:
+            issues += _expr_issues("output.filter.expr", spec.output.filter.expr, target, "filter")
+        # 指标可以是「是 / 否」（卡上一行「站上年线：是」），但排序要按数值排
+        if spec.output.sort is not None and (by := exprs.get(spec.output.sort.by)):
+            issues += [
+                Issue(path="output.sort.by", message=issue.message, position=issue.position)
+                for issue in _expr_issues("output.sort.by", by, target, "sort")
+            ]
     return issues
 
 
@@ -317,23 +326,39 @@ def _subject_issues(spec: Spec, ds: DataService) -> list[Issue]:
     """点名看的标的要在算的范围里，否则排名、对照都算不对。
 
     范围是全市场时只查代码本身存不存在——展开 5000 多只太贵。
+    **只看归属，不看当天被剔除没有**：当天停牌、是 ST、上市不满 60 个交易日的照样出卡，
+    卡上写清它没参与排名（research/card.py）。
     """
+    if spec.subject.kind == "aggregate":
+        return [Issue(path="subject.kind", message="把整个范围算成一个数还不支持")]
     if spec.subject.kind != "codes" or not spec.subject.codes or spec.when.as_of is None:
         return []
     if spec.scope.target != STOCK:
         known = {board.code for board in ds.list_boards(spec.scope.target)}
         missing = [code for code in spec.subject.codes if code not in known]
         message = "没有这个板块代码"
-    elif spec.scope.industry or spec.scope.board is not None:
-        inside = set(pool_of(spec.scope, spec.when.as_of, ds).get_column("code").to_list())
-        missing = [code for code in spec.subject.codes if code not in inside]
-        message = "不在算的范围里，或者当天被剔除了（ST、停牌、次新）"
+    elif spec.scope.industry or spec.scope.board is not None or spec.scope.base != "all_a":
+        inside = set(
+            pool_of(spec.scope, spec.when.as_of, ds, exclude=False).get_column("code").to_list()
+        )
+        outside = [code for code in spec.subject.codes if code not in inside]
+        # 当天没有行情的分不出是停牌还是真不属于这个范围，交给卡去说
+        traded = _traded(outside, spec.when.as_of, ds)
+        missing = [code for code in outside if code in traded]
+        message = "不在算的范围里"
     else:
         info = ds.stock_info(list(spec.subject.codes), spec.when.as_of)
         listed = dict(zip(info.get_column("code"), info.get_column("list_date"), strict=True))
         missing = [code for code in spec.subject.codes if listed.get(code) is None]
         message = "本地没有这个股票代码，代码要带交易所后缀，如 600519.SH"
     return [Issue(path="subject.codes", message=f"{code}：{message}") for code in missing]
+
+
+def _traded(codes: list[str], day: date, ds: DataService) -> set[str]:
+    if not codes:
+        return set()
+    rows = ds.get_fields(codes, day, day, ["close"])
+    return set(rows.get_column("code").to_list())
 
 
 def _event_study_issues(spec: Spec, ds: DataService) -> list[Issue]:

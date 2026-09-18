@@ -103,7 +103,11 @@ def eval_ast(node: Node, panel: pl.DataFrame, pool: pl.DataFrame | None = None) 
 
 
 class ExprDataError(ValueError):
-    """扣掉预热期之后，区间里一天都算不出来。"""
+    """数据不够算：PctSince 的起点不在本地数据里，或者扣掉预热期之后区间里一天都算不出来。"""
+
+
+class ExprWarmupError(ExprDataError):
+    """扣掉预热期之后，区间里一天都算不出来。卡上点名的标的停牌、还没上市时也是这个错，由卡说明原因。"""
 
 
 @dataclass(frozen=True)
@@ -191,7 +195,7 @@ def evaluate(
     )
     computable = result.filter(warmed)
     if computable.is_empty():
-        raise ExprDataError(
+        raise ExprWarmupError(
             f"这个表达式要往前读 {full} 条行情，{start} ~ {end} 里一天都算不出来"
             f"（本地数据从 {coverage_start} 起）"
         )

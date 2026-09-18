@@ -6,19 +6,23 @@
     subject 决定最后留哪几行
 
 表达式里没有 `Rank` 时，点名看几个就只在那几行上算，不用扫整个池子。
-有 `Rank` 就必须在整个池子上算，排名才有意义。
+有 `Rank` 就必须在整个池子上算，排名才有意义，整池的结果留着——卡要数出它排第几。
+
+**点名看的标的不从池子里筛**：当天停牌、是 ST、上市不满 60 个交易日的照样留一行，
+值为空，由卡说清为什么（QUESTIONS.md 翻车模式 #4）。
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 
 import polars as pl
 
 from litmus.data import CONCEPT, STOCK, DataService
-from litmus.expr import evaluate, result_unit
+from litmus.expr import ExprWarmupError, evaluate, result_unit
 from litmus.research.results import Column
 from litmus.spec.query import QuerySpec, Scope
 
@@ -35,10 +39,14 @@ class Computed:
     pool_size: int
     columns: tuple[Column, ...]
     table: pl.DataFrame  # date, code, <每个 metric 一列>
+    #: 算的范围：(date, code)
+    pool: pl.DataFrame
+    #: 带 Rank 的指标在整个算的范围里的值：指标名 → (date, code, value)
+    ranked: Mapping[str, pl.DataFrame]
 
 
-def pool_of(scope: Scope, day: date, ds: DataService) -> pl.DataFrame:
-    """算的范围：(date, code) 两列。"""
+def pool_of(scope: Scope, day: date, ds: DataService, exclude: bool = True) -> pl.DataFrame:
+    """算的范围：(date, code) 两列。exclude=False 只看归属，不剔除 ST、次新。"""
     if scope.target != STOCK:
         return ds.get_fields(None, day, day, ["close"], target=scope.target).select("date", "code")
     return ds.get_universe_mask(
@@ -47,7 +55,7 @@ def pool_of(scope: Scope, day: date, ds: DataService) -> pl.DataFrame:
         base=scope.base,
         industry=scope.industry,
         board=None if scope.board is None else scope.board.model_dump(),
-        exclude=list(scope.exclude),
+        exclude=list(scope.exclude) if exclude else [],
     )
 
 
@@ -58,25 +66,54 @@ def compute(spec: QuerySpec, ds: DataService) -> Computed:
     _require_trading_day(ds, day)
 
     pool = pool_of(spec.scope, day, ds)
-    rows = _rows_to_keep(spec, pool)
+    rows = _rows(spec, pool, day)
+    named = spec.subject.kind == "codes"
     table = rows
-    columns = []
+    columns, ranked = [], {}
     for metric in spec.metrics:
         # 排名要在整个池子里排；其余只在要显示的那几行上算，省一次全池扫描
-        on = pool if _RANK.search(metric.expr) else rows
-        values = evaluate(metric.expr, "sort", on, day, day, ds, target=spec.scope.target).values
+        in_pool = bool(_RANK.search(metric.expr))
+        values = _values(metric.expr, pool if in_pool else rows, day, ds, spec, lenient=named)
+        if in_pool:
+            ranked[metric.name] = values
         table = table.join(
             values.select("code", pl.col("value").alias(metric.name)), on="code", how="left"
         )
         columns.append(Column(metric.name, result_unit(metric.expr)))
-    return Computed(day=day, pool_size=pool.height, columns=tuple(columns), table=table)
+    return Computed(
+        day=day,
+        pool_size=pool.height,
+        columns=tuple(columns),
+        table=table,
+        pool=pool,
+        ranked=ranked,
+    )
 
 
-def _rows_to_keep(spec: QuerySpec, pool: pl.DataFrame) -> pl.DataFrame:
-    """要显示哪几行。点名的只留点名的那几只，点名里不在池子中的也留着——由检查负责报错。"""
+def _values(
+    expr: str, on: pl.DataFrame, day: date, ds: DataService, spec: QuerySpec, lenient: bool
+) -> pl.DataFrame:
+    """一个指标在这些标的上的值。
+
+    点名看的标的行情不够（停牌、还没上市、上市太短）时，预热期一天都算不出来是正常的：
+    整列留空，由卡说明原因。表要算一池子，一天都算不出来就是条件本身有问题，照常报错。
+    """
+    try:
+        return evaluate(expr, "metric", on, day, day, ds, target=spec.scope.target).values
+    except ExprWarmupError:
+        if not lenient:
+            raise
+        return pl.DataFrame(schema={"date": pl.Date, "code": pl.String, "value": pl.Float64})
+
+
+def _rows(spec: QuerySpec, pool: pl.DataFrame, day: date) -> pl.DataFrame:
+    """要显示哪几行。点名的就是点名那几只，在不在池子里都留着。"""
     if spec.subject.kind != "codes":
         return pool
-    return pool.filter(pl.col("code").is_in(list(spec.subject.codes)))
+    return pl.DataFrame(
+        {"date": [day] * len(spec.subject.codes), "code": list(spec.subject.codes)},
+        schema={"date": pl.Date, "code": pl.String},
+    )
 
 
 def board_notes(spec: QuerySpec, ds: DataService) -> tuple[str, ...]:

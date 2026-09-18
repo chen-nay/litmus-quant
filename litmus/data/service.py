@@ -133,14 +133,15 @@ def _previous_month(month: str) -> str:
 
 
 def _trim_before(rows: pl.DataFrame, start: date, lookback: int) -> pl.DataFrame:
-    """留下 start 起的行，再给这些标的各留 start 之前自己最近的 lookback 条。"""
+    """留下 start 起的行，再给每只标的各留 start 之前自己最近的 lookback 条。
+
+    这段里一行都没有的标的（整段停牌）也留：卡要说出它停牌前最后一个交易日。
+    """
     in_range = rows.filter(pl.col("date") >= start)
     if lookback == 0:
         return in_range
-    earlier = (
-        rows.filter(pl.col("date") < start)
-        .join(in_range.select("code").unique(), on="code", how="semi")
-        .filter(pl.col("date").rank("ordinal", descending=True).over("code") <= lookback)
+    earlier = rows.filter(pl.col("date") < start).filter(
+        pl.col("date").rank("ordinal", descending=True).over("code") <= lookback
     )
     return pl.concat([earlier, in_range])
 
@@ -165,15 +166,16 @@ class DataService:
     # ── 股票信息与指数 ──────────────────────────────────────────
 
     def stock_info(self, codes: Collection[str], as_of: date) -> pl.DataFrame:
-        """股票在 as_of 那天的名称、申万一级行业，以及上市日、退市日。
+        """股票在 as_of 那天的名称、申万一级和二级行业，以及上市日、退市日。
 
-        返回 (code, name, industry, list_date, delist_date)，按代码排序，每个代码一行；查不到的字段为空值，不报错。
+        返回 (code, name, industry, industry_l2, list_date, delist_date)，按代码排序，每个代码一行；
+        查不到的字段为空值，不报错。没同步过申万二级行业时 industry_l2 全为空。
 
         - **名称取当天的**：曾用名表里 as_of 之后还有改名记录，说明 as_of 那天的名字已经收录，
           就用当天生效的那条（开始日期最大的一条，§2.6）；否则用股票列表里的现用名。
           曾用名表有滞后——2026-09-14 实测 688189.SH 已改名「ST南新」、000595.SZ 已改名「新能股份」，
           曾用名表都还没收录——所以最近一次改名还没收录时，显示的是现用名
-        - 行业是申万一级，按当天的归属，规则同按行业选股（universe.industry_of）
+        - 行业按当天的归属，一级、二级分开判断，规则同按行业选股（universe.industry_of）
         """
         chosen = sorted(set(codes))
         frame = pl.DataFrame({"code": chosen}, schema={"code": pl.String})
@@ -197,25 +199,39 @@ class DataService:
             .group_by("code", maintain_order=True)
             .agg(pl.col("name").last().alias("_name_then"))
         )
-        sw_member = self._sw_member("L1").filter(pl.col("code").is_in(chosen))
         industry_names = (
             self._scan_table(SW_INDUSTRY_TABLE)
-            .select(pl.col("code").alias("industry_code"), pl.col("name").alias("industry"))
+            .select(pl.col("code").alias("industry_code"), "name")
             .collect()
         )
-        belongs = (
-            industry_of(frame.with_columns(pl.lit(as_of).alias("date")), sw_member)
-            .join(industry_names, on="industry_code", how="left")
-            .select("code", "industry")
-        )
-        return (
+        day = frame.with_columns(pl.lit(as_of).alias("date"))
+        table = (
             frame.join(basic, on="code", how="left")
             .join(name_then, on="code", how="left")
             .with_columns(pl.coalesce("_name_then", "name").alias("name"))
-            .join(belongs, on="code", how="left")
-            .select("code", "name", "industry", "list_date", "delist_date")
-            .sort("code")
         )
+        for level, column in (("L1", "industry"), ("L2", "industry_l2")):
+            sw_member = self._sw_member(level).filter(pl.col("code").is_in(chosen))
+            belongs = (
+                industry_of(day, sw_member)
+                .join(industry_names, on="industry_code", how="left")
+                .select("code", pl.col("name").alias(column))
+            )
+            table = table.join(belongs, on="code", how="left")
+        return table.select(
+            "code", "name", "industry", "industry_l2", "list_date", "delist_date"
+        ).sort("code")
+
+    def latest_reports(self, codes: Collection[str], as_of: date) -> pl.DataFrame:
+        """截至 as_of 已经公告的最新一期财报：(code, ann_date, period, roe, revenue_yoy, profit_yoy)。
+
+        和表达式里的财务字段同一套规则（derive.finance_timeline）：公告日 <= as_of，取报告期最大的一期，
+        有更正取最新的一次。period 是报告期（2026-06-30 就是半年报）。还没有任何公告的股票不出现。
+        """
+        chosen = sorted(set(codes))
+        fina = self._scan_table(FINA_INDICATOR_TABLE).filter(pl.col("code").is_in(chosen))
+        timeline = finance_timeline(fina.collect()).filter(pl.col("ann_date") <= as_of)
+        return timeline.sort("code", "ann_date").group_by("code", maintain_order=True).last()
 
     def get_index_daily(self, code: str, start: date, end: date) -> pl.DataFrame:
         """宽基指数日线：(date, code, open, close)，按日期排序。个股回看把对照换成指数时用。
@@ -317,6 +333,7 @@ class DataService:
         - 股票价格一律后复权；财务按公告日对齐；事件、状态为布尔值。涨跌停标记只在数据源缺了涨跌停价的日子
           为空值（2016~2019 年 886 行，判断不了、不猜）；不设涨跌幅限制的日子（上市首日、退市整理期等）都是 False
         - lookback：每只标的再往前带上**它自己的**最多 lookback 条行情（停牌日不算，不够就有多少带多少）。
+          点名的股票在这段里整段停牌、一行都没有时，往前带的行照样给
           这些行早于 start，给表达式引擎预热用，算完由调用方截掉。按交易日历往前推会让停过牌的股票凑不够（§3.6）
         - 停牌日没有行（面板不补齐，§2.2）
         - 股票可以取 research 用的内部列（INTERNAL_COLUMNS）。表达式碰不到它们，由 expr 的校验器按 FIELDS 拦
@@ -389,8 +406,10 @@ class DataService:
         # 往前带的条数：预热要 lookback 条；除权、公告顺延还要拿最早那条和它的前一条比，再多带一条，最后截掉
         count = lookback + (1 if wanted & _NEEDS_PREVIOUS_ROW else 0)
         if count:
+            # 点名要的股票在这段里一行都没有（整段停牌）时也往前带：卡要说出停牌前最后一个交易日
+            wanted_codes = pl.Series("code", codes) if codes else rows.get_column("code").unique()
             earlier = self._rows_before(
-                start, rows.get_column("code").unique(), columns, count, list_dates, coverage_start
+                start, wanted_codes, columns, count, list_dates, coverage_start
             )
             rows = pl.concat([*earlier, rows])
 

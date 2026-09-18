@@ -160,6 +160,12 @@ def test_结果类型要和用途对上():
     assert "排序依据要是数值" in one_issue("$close > 1", purpose="sort")
 
 
+def test_指标数值和条件都收():
+    """卡上一行「站上年线：是」，所以指标不像排序依据那样必须是数值。"""
+    assert validate(parse("$close > Mean($close, 250)"), "stock", "metric").ok
+    assert validate(parse("$pe_ttm"), "stock", "metric").ok
+
+
 def test_没有字段的常量表达式():
     assert "没有任何字段" in one_issue("1 > 0")
 

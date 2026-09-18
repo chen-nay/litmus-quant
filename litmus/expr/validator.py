@@ -43,8 +43,8 @@ from litmus.expr.operators import (
 )
 from litmus.expr.parser import Binary, Call, Field, Node, Number, Unary
 
-#: 用途 → 表达式结果必须是什么类型
-PURPOSES: dict[str, str] = {"filter": BOOL, "event": BOOL, "sort": NUM}
+#: 用途 → 表达式结果必须是什么类型。指标（metric）是要显示的数，数值、条件都行
+PURPOSES: dict[str, str] = {"filter": BOOL, "event": BOOL, "sort": NUM, "metric": ANY}
 
 _TARGET_LABELS = {
     STOCK: "股票",
@@ -92,7 +92,7 @@ class ValidationResult:
 
 
 def validate(node: Node, target: str, purpose: str) -> ValidationResult:
-    """校验表达式。target：stock / sw_industry / sw_industry_l2 / concept；purpose：filter / sort / event。"""
+    """校验表达式。target：stock / sw_industry / sw_industry_l2 / concept；purpose：filter / sort / event / metric。"""
     if target not in _TARGET_LABELS:
         raise ValueError(f"不认识的标的类型 {target!r}")
     if purpose not in PURPOSES:
@@ -102,7 +102,7 @@ def validate(node: Node, target: str, purpose: str) -> ValidationResult:
     result = checker.type_of(node, None)
     issues = checker.issues
     expected = PURPOSES[purpose]
-    if result is not None and result != expected:
+    if result is not None and expected != ANY and result != expected:
         what = {"filter": "筛选条件", "event": "事件", "sort": "排序依据"}[purpose]
         issues.append(
             Issue(f"{what}要是{_TYPE_LABELS[expected]}，这个表达式算出来是{_TYPE_LABELS[result]}")

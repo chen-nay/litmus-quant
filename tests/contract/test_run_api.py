@@ -86,6 +86,32 @@ def test_板块表(client):
     assert body["result"]["total"] == 31
 
 
+def test_卡_结果带着卡底下的怎么算的(client):
+    spec = {
+        "scope": {"target": "stock", "industry": "农林牧渔"},
+        "subject": {"kind": "codes", "codes": ["002714.SZ"]},
+        "when": {"as_of": DAY.isoformat()},
+        "metrics": [{"name": "今年以来涨幅排名", "expr": "Rank(PctSince($close, 20251231))"}],
+        "output": {"kind": "card"},
+    }
+    body = run(client, spec)
+    assert body["status"] == "done", body
+    result = body["result"]
+    assert (result["kind"], result["as_of"]) == ("card", DAY.isoformat())
+    item = result["items"][0]
+    assert (item["code"], item["name"]) == ("002714.SZ", "牧原股份")
+    row = item["rows"][0]
+    assert row["name"] == "今年以来涨幅排名" and "名（共" in row["text"] and row["note"]
+
+    assert result["summary"] == "牧原股份的今年以来涨幅排名"
+    texts = [item["text"] for item in result["assumptions"]]
+    assert texts[0].startswith("算的范围：农林牧渔")
+    assert not any(text.startswith("股票：") for text in texts)  # 标题上就是它
+
+    trace = client.get(f"/api/traces/{body['run_id']}").json()
+    assert {step["step"]: step for step in trace["steps"]}["respond"]["cards"] == 1
+
+
 def test_个股回看_事件按事件库重新生成(client):
     spec = {
         "subject": {"kind": "codes", "codes": ["000001.SZ"]},

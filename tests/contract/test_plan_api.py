@@ -19,7 +19,7 @@ from litmus.data import (
     MarketStore,
     MissingDataError,
 )
-from litmus.llm import LLMClient, StructuredReply
+from litmus.llm import LLMClient, NameMention, PlanResult, StructuredReply
 from litmus.signals import load_events
 from litmus.store import JsonStore
 
@@ -142,6 +142,34 @@ def test_大模型没记原话的说法_股票和概念板块的原话照样用�
     body = ask(client, llm, {**STOCK_LIST, "board_mention": "光模块", "board_guess": "光通信"})
     assert body["status"] == "ok", body
     assert texts(body)["scope.board"].startswith("「光模块」理解为：光通信")
+
+
+def test_卡不走确认卡_提问这一步就算完(monkeypatch, client):
+    """大模型第 6 步才会填卡，这里直接给一份卡的查询条件，验后面这一段路。"""
+    card = {
+        "scope": {"target": "stock", "industry": "农林牧渔"},
+        "subject": {"kind": "codes"},
+        "when": {"as_of": DAY.isoformat()},
+        "metrics": [{"name": "今年以来涨幅排名", "expr": "Rank(PctSince($close, 20251231))"}],
+        "output": {"kind": "card"},
+    }
+    stock = NameMention("牧原", "牧原股份")
+    monkeypatch.setattr(
+        "litmus.api.routes.plan.plan",
+        lambda *args, **kwargs: PlanResult("ok", spec=card, stock=stock),
+    )
+    body = client.post("/api/plan", json={"query": "牧原在农林牧渔里涨幅排第几"}).json()
+
+    assert body["status"] == "done", body
+    assert body["result"]["kind"] == "card"
+    assert body["result"]["items"][0]["name"] == "牧原股份"
+    assert body["run_id"].startswith("r") and body["plan_id"].startswith("p")
+    assert not body["assumptions"]  # 说明跟着结果走，在卡底下
+
+    run = client.get(f"/api/run/{body['run_id']}").json()
+    assert run["plan_id"] == body["plan_id"] and run["status"] == "done"
+    steps = [step["step"] for step in client.get(f"/api/traces/{body['plan_id']}").json()["steps"]]
+    assert steps[-2:] == ["run", "respond"]
 
 
 def test_个股回看_平安对应多只股票_让用户选(client, llm):

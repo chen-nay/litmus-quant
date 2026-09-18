@@ -114,6 +114,10 @@ def execute(raw_spec: object, plan_id: str | None, services: Services) -> RunRes
         return RunResponse(status="failed", run_id=run_id, message=message)
 
     payload = result_to_dict(result)
+    if spec.output.kind == "card":
+        # 卡不走确认卡，那份说明跟着结果一起给：卡底下的「怎么算的」
+        payload["summary"] = confirm.summary
+        payload["assumptions"] = [item.model_dump() for item in assumption_items(confirm)]
     run_id = services.store.save_run(
         _record(spec, plan_id, status.data_through, started, status="done", result=payload)
     )
@@ -127,9 +131,11 @@ def _ms(mark: float) -> int:
 
 
 def _size(payload: dict[str, Any]) -> dict[str, object]:
-    """结果多大：股票表 / 板块表看满足条件的只数和取回几行，个股回看看触发了几次。"""
+    """结果多大：表看满足条件几个、取回几行，卡看几个标的，统计看触发了几次。"""
     if "total" in payload:
         return {"total": payload["total"], "rows": len(payload.get("rows") or ())}
+    if payload["kind"] == "card":
+        return {"cards": len(payload.get("items") or ())}
     return {"triggers": len(payload.get("triggers") or ())}
 
 

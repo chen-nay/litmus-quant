@@ -1,8 +1,10 @@
-"""QuerySpec 的定义与校验、默认值表、确认卡文案的生成。零内部依赖。
+"""QuerySpec 的定义与校验、默认值表、确认卡和卡上文字的生成。零内部依赖。
 
 其他模块只从这里 import（ARCHITECTURE §1.2 第 3 条）。
 """
 
+from litmus.spec import card
+from litmus.spec.card import MetricFacts, Missing, Report, render_row
 from litmus.spec.confirm import (
     AFTER,
     EVENT,
@@ -70,15 +72,20 @@ __all__ = [
     "Facts",
     "Mention",
     "Metric",
+    "MetricFacts",
+    "Missing",
+    "Report",
     "QuerySpec",
     "Scope",
     "Sort",
     "Subject",
     "TableOutput",
     "When",
+    "card",
     "group_order",
     "parse_spec",
     "render_confirm",
+    "render_row",
     "small_cap_note",
     "summarize",
 ]

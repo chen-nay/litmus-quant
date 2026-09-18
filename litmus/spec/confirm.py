@@ -1,6 +1,7 @@
 """确认卡的文案：QuerySpec → 一句话总结 + 按维度分组的说明（DESIGN.md §1）。
 
-只服务表和统计——卡直接出结果，不走确认环节。
+表和统计跑之前给用户核对，卡直接出结果、把这份说明放在卡底下的「怎么算的」里。
+卡上只写用得着的：不排名就不写算的范围（池子影响不到结果），指标的中文和它的名字一样就不重复写。
 
 文字全部从 spec 现生成，不存在「文字和参数对不上」。spec 自己算不出来的东西
 （表达式的中文、池子多大、股票名、数据截至哪天）由上层查好放进 `Facts`，
@@ -108,10 +109,11 @@ class Confirm:
 def render_confirm(spec: QuerySpec, facts: Facts | None = None) -> Confirm:
     facts = facts or Facts()
     notes = _Notes((*spec.defaults_used, *facts.defaulted), facts.mentions)
-    _who(spec, facts, notes)
+    card = isinstance(spec.output, CardOutput)
+    _who(spec, facts, notes, card)
     _when(spec, facts, notes)
     if spec.metrics:
-        _what(spec, facts, notes)
+        _what(spec, facts, notes, card)
     if isinstance(spec.output, EventStudyOutput):
         _event(spec.output, facts, notes)
         _after(spec.output, notes)
@@ -176,10 +178,15 @@ def _subject_phrase(spec: QuerySpec, facts: Facts) -> str:
 # ── 看谁 ────────────────────────────────────────────────────────
 
 
-def _who(spec: QuerySpec, facts: Facts, notes: _Notes) -> None:
+def _who(spec: QuerySpec, facts: Facts, notes: _Notes, card: bool = False) -> None:
     scope, subject = spec.scope, spec.subject
     kind, unit = _TARGET[scope.target]
 
+    if card:
+        # 卡的标题上就是看谁；不排名时算的范围影响不到卡上任何一个数，不写
+        if facts.uses_rank:
+            _scope(spec, facts, notes)
+        return
     if subject.kind == "codes":
         label = "股票" if scope.target == "stock" else "板块"
         for code in subject.codes:
@@ -190,8 +197,13 @@ def _who(spec: QuerySpec, facts: Facts, notes: _Notes) -> None:
                 notes.add(WHO, "subject", label, mention.mention)
     elif subject.kind == "aggregate":
         notes.note(f"{_scope_phrase(scope, facts)}整体，算成一个数", group=WHO)
+    _scope(spec, facts, notes)
 
-    # 算的范围：点名看某几个时也要写，Rank、全A等权都在这个范围里算
+
+def _scope(spec: QuerySpec, facts: Facts, notes: _Notes) -> None:
+    """算的范围：点名看某几个时也要写，Rank、全A等权都在这个范围里算。"""
+    scope = spec.scope
+    kind, unit = _TARGET[scope.target]
     size = f"，{facts.pool_size} {unit}" if facts.pool_size is not None else ""
     detail = "，".join(x for x in (facts.industry_scope, size.lstrip("，")) if x)
     if scope.industry:
@@ -238,10 +250,14 @@ def _when(spec: QuerySpec, facts: Facts, notes: _Notes) -> None:
 # ── 看哪些数 ────────────────────────────────────────────────────
 
 
-def _what(spec: QuerySpec, facts: Facts, notes: _Notes) -> None:
+def _what(spec: QuerySpec, facts: Facts, notes: _Notes, card: bool = False) -> None:
     for metric in spec.metrics:
         text = facts.metric_texts.get(metric.name, metric.expr)
+        if card and text == metric.name:
+            continue  # 「市盈率TTM：市盈率TTM」，写了等于没写
         notes.add(WHAT, f"metrics.{metric.name}", metric.name, text)
+    if card:
+        return  # 排名怎么排写在指标那一行；算不出来的卡上逐条说了原因，不用再提预热
     if facts.uses_rank:
         notes.note("排名在上面「算的范围」里排，不是全市场", group=WHAT)
     if facts.lookback:

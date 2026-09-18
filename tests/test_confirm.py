@@ -157,9 +157,11 @@ def test_点名看谁时_算的范围仍然写出来_排名在这里面排():
     raw = {
         "scope": {"target": "stock", "industry": "农林牧渔"},
         "subject": {"kind": "codes", "codes": ["002714.SZ"]},
-        "when": {"as_of": "2026-09-16"},
-        "metrics": [{"name": "涨幅排名", "expr": "Rank(PctSince($close, 20251231))"}],
-        "output": {"kind": "card"},
+        "when": {"range": {"from": "2016-01-04", "to": "2026-09-16"}},
+        "output": {
+            "kind": "event_study",
+            "event": {"preset_id": "limit_up", "expr": "$is_limit_up", "label": "涨停"},
+        },
     }
     facts = Facts(
         names={"002714.SZ": "牧原股份"},
@@ -170,7 +172,59 @@ def test_点名看谁时_算的范围仍然写出来_排名在这里面排():
     grouped = lines(raw, facts)
     assert grouped[WHO][0] == "股票：牧原股份（002714.SZ）"
     assert grouped[WHO][1] == "算的范围：农林牧渔（申万一级行业，116 只）"
-    assert "排名在上面「算的范围」里排，不是全市场" in grouped[WHAT]
+
+
+# ── 卡底下的「怎么算的」 ────────────────────────────────────────
+
+CARD = {
+    "scope": {"target": "stock", "industry": "农林牧渔"},
+    "subject": {"kind": "codes", "codes": ["002714.SZ"]},
+    "when": {"as_of": "2026-09-16"},
+    "metrics": [{"name": "今年以来涨幅排名", "expr": "Rank(PctSince($close, 20251231))"}],
+    "output": {"kind": "card"},
+    "defaults_used": ["when.as_of", "scope.base", "scope.exclude"],
+}
+CARD_FACTS = Facts(
+    metric_texts={
+        "今年以来涨幅排名": "按收盘价从 2025-12-31 到当天的涨跌幅，在算的范围里从高到低排名"
+    },
+    names={"002714.SZ": "牧原股份"},
+    pool_size=100,
+    industry_scope="申万一级行业",
+    uses_rank=True,
+    lookback=180,
+    data_dates=(("股票行情", date(2026, 9, 16)),),
+)
+
+
+def test_卡不写看谁_标题上就是它():
+    grouped = lines(CARD, CARD_FACTS)
+    assert not any(text.startswith("股票：") for group in grouped.values() for text in group)
+
+
+def test_卡排名时写出算的范围_怎么排写在指标那一行():
+    grouped = lines(CARD, CARD_FACTS)
+    assert grouped[WHO] == [
+        "算的范围：农林牧渔（申万一级行业，100 只）",
+        "按每个交易日当时的归属取成分",
+        "股票池：沪深A股（不含北交所）",
+        "剔除：ST / *ST、停牌、上市不满 60 个交易日",
+    ]
+    assert grouped[WHAT] == [
+        "今年以来涨幅排名：按收盘价从 2025-12-31 到当天的涨跌幅，在算的范围里从高到低排名"
+    ]
+
+
+def test_卡不排名时不写算的范围_池子影响不到卡上的数():
+    raw = {**CARD, "metrics": [{"name": "市净率", "expr": "$pb"}]}
+    facts = Facts(metric_texts={"市净率": "市净率在近 500 日里的分位"}, pool_size=100)
+    assert WHO not in lines(raw, facts)
+
+
+def test_卡上指标的中文和名字一样时不重复写():
+    raw = {**CARD, "metrics": [{"name": "市净率", "expr": "$pb"}]}
+    facts = Facts(metric_texts={"市净率": "市净率"})
+    assert WHAT not in lines(raw, facts)
 
 
 def test_看哪天_回看区间写出实际起点():

@@ -30,6 +30,37 @@ class ListResult:
 
 
 @dataclass(frozen=True)
+class CardRow:
+    """卡上的一个指标。value 是算出来的原始数，text 和 note 是屏幕上的字。"""
+
+    name: str
+    value: float | bool | None
+    unit: str
+    text: str  # 「3.00」「第 75 名（共 100 只）」「无」
+    note: str = ""  # 解释行，没什么可解释的为空串
+
+
+@dataclass(frozen=True)
+class CardItem:
+    """点名看的一个标的。"""
+
+    code: str
+    name: str | None
+    industry: str | None  # 股票：「农林牧渔 / 养殖业」；板块为空
+    rows: tuple[CardRow, ...]
+
+
+@dataclass(frozen=True)
+class CardResult:
+    """卡：点名几个就几份，每份的行是同一组指标。"""
+
+    as_of: date
+    pool_size: int  # 算的范围有多少个标的
+    items: tuple[CardItem, ...]
+    notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class TriggerRecord:
     """个股回看里的一次触发。按持有天数分档的字段，key 是持有天数。"""
 

@@ -6,7 +6,7 @@ import math
 from dataclasses import fields, is_dataclass
 from datetime import date
 
-from litmus.research import HistoryResult, ListResult
+from litmus.research import CardResult, HistoryResult, ListResult
 
 
 def to_jsonable(value: object) -> object:
@@ -27,8 +27,12 @@ def to_jsonable(value: object) -> object:
     return value
 
 
-def result_to_dict(result: ListResult | HistoryResult) -> dict[str, object]:
+#: 结果的类型 → output.kind，前端靠它决定怎么展示
+_KINDS = ((HistoryResult, "event_study"), (CardResult, "card"), (ListResult, "table"))
+
+
+def result_to_dict(result: ListResult | CardResult | HistoryResult) -> dict[str, object]:
     """补上 kind，前端靠它决定怎么展示。"""
     data: dict[str, object] = to_jsonable(result)  # type: ignore[assignment]
-    kind = "event_study" if isinstance(result, HistoryResult) else "table"
+    kind = next(name for cls, name in _KINDS if isinstance(result, cls))
     return {"kind": kind, **data}
