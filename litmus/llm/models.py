@@ -43,7 +43,7 @@ class Question:
 
 @dataclass(frozen=True)
 class NameMention:
-    """用户原话里的股票或概念板块，和大模型猜的全称。代码由 api 用 ds.resolve_* 核对（§2.3）。"""
+    """用户原话里的股票或板块，和大模型猜的全称。代码由 api 用 ds.resolve_* 核对（§2.3）。"""
 
     mention: str
     guess: str | None = None
@@ -95,9 +95,11 @@ class LLMCall:
 @dataclass(frozen=True)
 class PlanResult:
     status: str
-    #: ok：查询条件草稿，结构同 QuerySpec；股票、概念板块还没解析成代码，没说的栏目也没补默认值
+    #: ok：查询条件草稿，结构同 QuerySpec；点名的标的、限定的板块还没解析成代码，没说的栏目也没补默认值
     spec: dict[str, Any] | None = None
-    stock: NameMention | None = None
+    #: 点名看的标的（subject），按 scope.target 是股票还是板块去查
+    subjects: tuple[NameMention, ...] = ()
+    #: 算的范围限定在哪个行业、板块（scope.board）：申万行业和通达信概念一起查
     board: NameMention | None = None
     mentions: tuple[Mention, ...] = ()
     questions: tuple[Question, ...] = ()

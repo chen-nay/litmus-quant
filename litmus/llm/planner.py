@@ -1,12 +1,14 @@
-"""llm.plan()：中文提问 → 查询条件草稿（ARCHITECTURE §5.2）。
+"""llm.plan()：中文提问 → 查询条件草稿（ARCHITECTURE §5.2、DESIGN.md §4）。
 
-- 大模型填一份扁平的格式（OUTPUT_SCHEMA），代码转成 QuerySpec 的结构。2026-09-15 实测扁平格式能被火山引擎接受；
-  QuerySpec 本身的格式（6000 字符、10 个子定义、oneOf）没有实测过
+- 大模型填的格式和 QuerySpec 同一个样子（五个维度，嵌套），只有两处不同：点名的标的、限定的板块
+  只填原话和猜的名字（mentions / board.mention），代码由 api 用 ds.resolve_* 查（§2.3）。
+  嵌套格式 2026-09-17 在火山引擎 glm-5.3-flash 上实测通过
+- 一次调用就分出去向：status 分出改写建议、澄清卡，output.kind 分出表、卡、统计（DESIGN.md §5）
 - 大模型只填用户说到的栏目，没说的由代码补默认值并在确认卡上标出来（§5.3、§5.4）
-- 股票、概念板块只填原话和猜测名，不填代码，由 api 用 ds.resolve_stock / resolve_board 核对（§2.3）
-- 防线②：表达式过 expr.parse + validate，事件编号和参数过 signals.render_event，结构过 spec.parse_spec。
-  不过就带着问题清单用 planner.repair 重试一次，还不过返回 failed
-- 实测大模型偶尔漏填 status：有问题清单就当澄清，填了形状就当 ok
+- 防线②：表达式过 expr.parse + validate，事件编号和参数过 signals.render_event，结构过 spec.parse_spec，
+  再加几条实测抓到的毛病（卡带了排序、猜的名字填成代码）。不过就带着问题清单用 planner.repair 重试一次，
+  还不过返回 failed
+- 实测大模型偶尔漏填 status：有问题清单就当澄清，填了 output 就当 ok
 - 改写建议只留几句像样的：条数、长度、禁用词、带百分比的丢掉（§5.2）
 """
 
@@ -24,7 +26,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from litmus.expr import ExprSyntaxError, field_catalog, operator_catalog, parse, validate
-from litmus.llm.client import LLMClient, LLMError
+from litmus.llm.client import LLMClient, LLMError, LLMFormatError
 from litmus.llm.models import (
     CLARIFY,
     FAILED,
@@ -40,11 +42,19 @@ from litmus.llm.models import (
 )
 from litmus.llm.prompts import load_prompt
 from litmus.signals import EventLibrary, EventParamError, event_catalog, render_event
-from litmus.spec import DEFAULTS, Mention, parse_spec
+from litmus.spec import (
+    BENCHMARKS,
+    CARD_BENCHMARKS,
+    DEFAULT_CARD_METRICS,
+    DEFAULTS,
+    TARGETS,
+    Mention,
+    parse_spec,
+)
 
 logger = logging.getLogger(__name__)
 
-#: 原话里的说法能对应的栏目（spec.render_assumptions 按这些栏目写「理解为」）
+#: 原话里的说法能对应的栏目（确认卡按这些栏目写「理解为」）。指标写成 metrics.<指标名>
 MENTION_FIELDS = (
     "when.as_of",
     "when.range",
@@ -54,7 +64,6 @@ MENTION_FIELDS = (
     "scope.board",
     "scope.exclude",
     "subject",
-    "metrics",
     "output.filter",
     "output.sort",
     "output.limit",
@@ -65,54 +74,150 @@ MENTION_FIELDS = (
 )
 
 _STR: dict[str, Any] = {"type": "string"}
+_DAY: dict[str, Any] = {"type": "string", "description": "YYYY-MM-DD"}
+_KINDS = ("table", "card", "event_study")
+
+#: 用户原话里说的一个标的
+_NAMED: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "mention": {
+            "type": "string",
+            "description": "用户原话里的说法，如「茅台」「宁王」「半导体」",
+        },
+        "guess": {
+            "type": "string",
+            "description": "你猜的全称，如「贵州茅台」「宁德时代」。不是代码，不要写 600519 这类数字",
+        },
+    },
+    "required": ["mention"],
+}
 
 OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "status": {"type": "string", "enum": [OK, CLARIFY, UNSUPPORTED, NOT_AN_EVENT]},
-        "shape": {"type": "string", "enum": ["stock_list", "board_list", "stock_history"]},
-        "as_of": {"type": "string", "description": "YYYY-MM-DD"},
-        "filter_expr": _STR,
-        "filter_label": _STR,
-        "sort_by": _STR,
-        "sort_order": {"type": "string", "enum": ["asc", "desc"]},
-        "sort_label": _STR,
-        "limit": {"type": "integer"},
-        "board_type": {"type": "string", "enum": ["sw_industry", "sw_industry_l2", "concept"]},
-        "universe_base": {"type": "string", "enum": ["all_a", "hs300", "zz500"]},
-        "industry": {"type": "string", "description": "申万一级或二级行业名，只从行业清单里选"},
-        "board_mention": _STR,
-        "board_guess": {
-            "type": "string",
-            "description": "猜的板块名：申万行业名或通达信概念板块名，拿不准可以写 2~3 个，用「、」隔开",
+        "scope": {
+            "type": "object",
+            "description": "在谁身上算：排名在这里面排。用户没说就整个不填",
+            "properties": {
+                "target": {"type": "string", "enum": list(TARGETS)},
+                "base": {"type": "string", "enum": ["all_a", "hs300", "zz500"]},
+                "board": {
+                    "type": "object",
+                    "description": "限定在某个行业、板块、概念里",
+                    "properties": {
+                        "mention": {
+                            "type": "string",
+                            "description": "用户原话，如「半导体板块」「银行股」",
+                        },
+                        "guess": {
+                            "type": "string",
+                            "description": "猜的申万行业名或通达信概念板块名，拿不准写 2~3 个，用「、」隔开",
+                        },
+                        "code": {
+                            "type": "string",
+                            "description": "只在修改现有条件、概念板块没换时填：照抄 scope.board.code",
+                        },
+                    },
+                },
+                "industry": {
+                    "type": "string",
+                    "description": "只在修改现有条件、行业没换时填：照抄 scope.industry",
+                },
+                "exclude": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": list(DEFAULTS["exclude"])},  # type: ignore[call-overload]
+                    "description": "只在用户要看 ST 股或次新股时填：写还要剔除的那几项。"
+                    '看次新股填 ["ST", "suspended"]，看 ST 股填 ["suspended", "new_listing_60d"]',
+                },
+            },
         },
-        "stock_mention": _STR,
-        "stock_guess": _STR,
-        "stock_code": {
-            "type": "string",
-            "description": "只在修改现有条件、股票没换时填：照抄条件里的 target.code，如 600519.SH",
+        "subject": {
+            "type": "object",
+            "description": "最后看谁：pool 整个范围（表），codes 点名看某几个（卡、统计）",
+            "properties": {
+                "kind": {"type": "string", "enum": ["pool", "codes"]},
+                "mentions": {"type": "array", "items": _NAMED},
+                "codes": {
+                    "type": "array",
+                    "items": _STR,
+                    "description": "只在修改现有条件、看的对象没换时填：照抄 subject.codes",
+                },
+            },
         },
-        "board_code": {
-            "type": "string",
-            "description": "只在修改现有条件、概念板块没换时填：照抄条件里的 universe.board.code",
+        "when": {
+            "type": "object",
+            "description": "用户没说日期就整个不填",
+            "properties": {
+                "as_of": _DAY,
+                "range": {"type": "object", "properties": {"from": _DAY, "to": _DAY}},
+            },
         },
-        "event_id": _STR,
-        "event_params": {"type": "object", "additionalProperties": {"type": "number"}},
-        "time_from": {"type": "string", "description": "YYYY-MM-DD"},
-        "time_to": {"type": "string", "description": "YYYY-MM-DD"},
-        "horizons": {"type": "array", "items": {"type": "integer"}},
-        "benchmark": {
-            "type": "string",
-            "enum": ["universe_equal_weight", "index:000300.SH", "index:000905.SH"],
+        "metrics": {
+            "type": "array",
+            "description": "算哪些数：一项一个名字和一个公式",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "几个字的中文名，也是 sort.by 引用它的钥匙",
+                    },
+                    "expr": {"type": "string", "description": "公式，只能用给定的字段和算子"},
+                },
+                "required": ["name", "expr"],
+            },
         },
-        "cost_bps": {"type": "number"},
+        "output": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": list(_KINDS)},
+                "filter": {"type": "object", "properties": {"expr": _STR, "label": _STR}},
+                "sort": {
+                    "type": "object",
+                    "properties": {
+                        "by": {
+                            "type": "string",
+                            "description": "metrics 里某一项的 name，不是公式",
+                        },
+                        "order": {"type": "string", "enum": ["asc", "desc"]},
+                    },
+                },
+                "limit": {"type": "integer"},
+                "event": {
+                    "type": "object",
+                    "properties": {
+                        "preset_id": _STR,
+                        "params": {"type": "object", "additionalProperties": {"type": "number"}},
+                    },
+                },
+                "horizons": {"type": "array", "items": {"type": "integer"}},
+                "benchmark": {
+                    "type": "string",
+                    "enum": list(BENCHMARKS),
+                    "description": "统计的同期对照；卡只在要和沪深300 / 中证500 比时填 index:…",
+                },
+                "cost_bps": {"type": "number"},
+            },
+            "required": ["kind"],
+        },
+        "narrate": {
+            "type": "boolean",
+            "description": "卡下面再写一段话。只在卡上、用户要一个判断或概括时填 true",
+        },
         "mentions": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
                     "phrase": _STR,
-                    "field": {"type": "string", "enum": list(MENTION_FIELDS)},
+                    "field": {
+                        "type": "string",
+                        "description": "栏目："
+                        + "、".join(MENTION_FIELDS)
+                        + "，指标写 metrics.<指标名>",
+                    },
                 },
                 "required": ["phrase", "field"],
             },
@@ -181,7 +286,7 @@ def plan(
         return call
 
     for attempt in (1, 2):
-        if attempt == 2:
+        if attempt == 2 and problems:
             message = load_prompt("planner.repair").render(
                 query=user,
                 previous_output=json.dumps(draft, ensure_ascii=False, indent=1),
@@ -189,6 +294,16 @@ def plan(
             )
         try:
             reply = client.structured(system, message, OUTPUT_SCHEMA)
+        except LLMFormatError as exc:
+            # 没调用工具就没有输出可改，原样再问一次
+            logger.warning("planner.system@%s 第 %d 次没按格式返回：%s", version, attempt, exc)
+            record(error=str(exc))
+            problems = []
+            if attempt == 1:
+                continue
+            return PlanResult(
+                FAILED, attempts=attempt, prompt_version=version, error=str(exc), calls=tuple(calls)
+            )
         except LLMError as exc:
             logger.warning("planner.system@%s 第 %d 次调用失败：%s", version, attempt, exc)
             record(error=str(exc))
@@ -235,11 +350,11 @@ def read_output(
     questions = _questions(draft.get("questions"))
     status = _text(draft.get("status"))
     if not status:
-        status = CLARIFY if questions else (OK if _text(draft.get("shape")) else "")
+        status = CLARIFY if questions else (OK if isinstance(draft.get("output"), Mapping) else "")
     if status not in (OK, CLARIFY, UNSUPPORTED, NOT_AN_EVENT):
         allowed = "ok、needs_clarification、unsupported、not_an_event"
         return PlanResult(FAILED), [f"status 只能是 {allowed}，收到 {draft.get('status')!r}"]
-    mentions = _mentions(draft.get("mentions"))
+    mentions = _mentions(draft.get("mentions"), _metric_names(draft))
     if status == CLARIFY:
         if not questions:
             return PlanResult(FAILED), [
@@ -264,102 +379,196 @@ def _read_ok(
     events: EventLibrary,
     mentions: tuple[Mention, ...],
 ) -> tuple[PlanResult, list[str]]:
-    """扁平格式 → QuerySpec v2 的草稿。
+    """大模型的格式 → QuerySpec 的草稿，顺手查出问题。
 
-    扁平格式里没有 metrics：排序依据顺手做成一个指标，名字用 sort_label 或表达式本身。
+    格式和 QuerySpec 一样，这里只做三件事：把点名的标的、限定的板块拿出来交给 api 去查代码；
+    查表达式、事件；查几条实测抓到的毛病。结构对不对最后交给 spec.parse_spec。
     """
-    shape = _text(draft.get("shape"))
     problems: list[str] = []
-    stock = board = None
+    scope_in, subject_in = _object(draft.get("scope")), _object(draft.get("subject"))
+    output_in = _object(draft.get("output"))
+    kind = _text(output_in.get("kind"))
+    if kind not in _KINDS:
+        return PlanResult(FAILED), [f"status=ok 时 output.kind 要填 {'、'.join(_KINDS)}"]
+
+    target = _text(scope_in.get("target")) or "stock"
+    if target not in TARGETS:
+        problems.append(f"scope.target 只能是 {'、'.join(TARGETS)}")
+    elif target not in context.targets:
+        usable = "、".join(t for t in TARGETS if t in context.targets)
+        problems.append(f"{_TARGET_LABELS[target]}当前不可用，scope.target 只能是 {usable}")
     scope: dict[str, Any] = {}
-    subject: dict[str, Any] = {}
-    metrics: list[dict[str, str]] = []
-    output: dict[str, Any] = {}
-    when: dict[str, Any] = {}
-
-    if shape in ("stock_list", "board_list"):
-        target = "stock"
-        if shape == "board_list":
-            target = _text(draft.get("board_type"))
-            if target not in _BOARD_LABELS:
-                problems.append("板块表要填 board_type：sw_industry、sw_industry_l2 或 concept")
-            elif target not in context.targets:
-                usable = "、".join(kind for kind in _BOARD_LABELS if kind in context.targets)
-                problems.append(f"{_BOARD_LABELS[target]}当前不可用，board_type 只能是 {usable}")
+    if _text(scope_in.get("target")):
         scope["target"] = target
-        output["kind"] = "table"
-        subject["kind"] = "pool"
-        if as_of := _text(draft.get("as_of")):
-            when["as_of"] = as_of
-        if expr := _text(draft.get("filter_expr")):
-            output["filter"] = {"expr": expr, "label": _text(draft.get("filter_label"))}
-            problems += _expression_problems("filter_expr", expr, target, "filter")
-        if by := _text(draft.get("sort_by")):
-            name = _text(draft.get("sort_label")) or by
-            metrics.append({"name": name, "expr": by})
-            output["sort"] = {"by": name, "order": _text(draft.get("sort_order")) or "desc"}
-            problems += _expression_problems("sort_by", by, target, "sort")
-        _copy(draft, output, "limit")
-        if shape == "stock_list":
-            if base := _text(draft.get("universe_base")):
-                scope["base"] = base
-            if industry := _text(draft.get("industry")):
-                if industry not in _industry_names(context):
-                    problems.append(
-                        f"industry 要从申万行业清单（一级或二级）里选，收到「{industry}」"
-                    )
-                scope["industry"] = industry
-            if mention := _text(draft.get("board_mention")):
-                # 申万行业、概念板块都按它查，由 api 按规则挑口径
-                board = NameMention(mention, _text(draft.get("board_guess")) or None)
-            elif code := _text(draft.get("board_code")):
-                board = NameMention(code, is_code=True)
+    if base := _text(scope_in.get("base")):
+        scope["base"] = base
+    if isinstance(scope_in.get("exclude"), list):
+        scope["exclude"] = [_text(item) for item in scope_in["exclude"] if _text(item)]
+    if industry := _text(scope_in.get("industry")):
+        if industry not in _industry_names(context):
+            problems.append(f"scope.industry 要照抄现有条件里的申万行业名，收到「{industry}」")
+        scope["industry"] = industry
+    board = _board(_object(scope_in.get("board")))
+    if board is not None and target != "stock":
+        problems.append("按板块排行、比较时（scope.target 是板块）不要再填 scope.board")
 
-    elif shape == "stock_history":
-        scope["target"] = "stock"
-        subject["kind"] = "codes"
-        output["kind"] = "event_study"
-        if mention := _text(draft.get("stock_mention")):
-            stock = NameMention(mention, _text(draft.get("stock_guess")) or None)
-        elif code := _text(draft.get("stock_code")):
-            # 改现有条件、股票没换：照抄的代码照样过 ds.resolve_stock，抄错了就当查不到
-            stock = NameMention(code, is_code=True)
-        else:
-            problems.append("个股回看要填 stock_mention（用户原话里说的股票）")
-        event_id, params = _text(draft.get("event_id")), draft.get("event_params") or {}
-        if not event_id:
-            problems.append(
-                "个股回看要填 event_id，只能从事件库里选；条件不是事件时 status 填 not_an_event"
-            )
-        elif not isinstance(params, Mapping):
-            problems.append("event_params 要是一个对象")
-        else:
-            try:
-                render_event(event_id, params, events)
-            except EventParamError as exc:
-                problems.append(str(exc))
-            output["event"] = {"preset_id": event_id, "params": dict(params)}
-        first, last = _text(draft.get("time_from")), _text(draft.get("time_to"))
-        if first or last:
-            when["range"] = {
-                "from": first or context.history_from.isoformat(),
-                "to": last or context.latest_trading_day.isoformat(),
-            }
-        for key in ("horizons", "benchmark", "cost_bps"):
-            _copy(draft, output, key)
-    else:
-        return PlanResult(FAILED), [
-            "status=ok 时 shape 要填 stock_list、board_list 或 stock_history"
-        ]
+    subject_kind = _text(subject_in.get("kind")) or ("pool" if kind == "table" else "codes")
+    subject: dict[str, Any] = {"kind": subject_kind}
+    subjects: tuple[NameMention, ...] = ()
+    if subject_kind == "codes":
+        subjects, subject_problems = _subjects(subject_in)
+        problems += subject_problems
+    if subject_kind == "codes" and not subjects:
+        problems.append("点名看谁时 subject.mentions 要填用户原话里的股票或板块")
+    if kind == "event_study" and target != "stock":
+        problems.append("事件统计只能看股票：scope.target 不填")
 
-    spec: dict[str, Any] = {"scope": scope, "subject": subject, "output": output}
+    metrics = _metrics(draft.get("metrics"))
+    for metric in metrics:
+        problems += _expression_problems(
+            f"指标「{metric['name']}」", metric["expr"], target, "metric"
+        )
+    output, output_problems = _output(output_in, kind, metrics, target, events)
+    problems += output_problems
+
+    spec: dict[str, Any] = {"subject": subject, "output": output}
+    if scope:
+        spec["scope"] = scope
     if metrics:
         spec["metrics"] = metrics
+    when = _when(_object(draft.get("when")), context)
     if when:
         spec["when"] = when
+    if draft.get("narrate") is True:
+        spec["narrate"] = True
     if not problems:
         problems = _structure_problems(spec, context, events)
-    return PlanResult(OK, spec=spec, stock=stock, board=board, mentions=mentions), problems
+    result = PlanResult(OK, spec=spec, subjects=subjects, board=board, mentions=mentions)
+    return result, problems
+
+
+def _output(
+    raw: Mapping[str, Any],
+    kind: str,
+    metrics: list[dict[str, str]],
+    target: str,
+    events: EventLibrary,
+) -> tuple[dict[str, Any], list[str]]:
+    output: dict[str, Any] = {"kind": kind}
+    problems: list[str] = []
+    names = [metric["name"] for metric in metrics]
+    if kind == "card":
+        extra = [key for key in ("filter", "sort", "limit") if raw.get(key) not in (None, {}, "")]
+        if extra:
+            problems.append(f"卡不筛不排，output 里不要填 {'、'.join(extra)}")
+        if benchmark := _text(raw.get("benchmark")):
+            if benchmark not in CARD_BENCHMARKS:
+                indexes = "、".join(b for b in CARD_BENCHMARKS if b.startswith("index:"))
+                problems.append(f"卡的 output.benchmark 只能是 {indexes}，不和指数比就不填")
+            output["benchmark"] = benchmark
+        return output, problems
+    if kind == "table":
+        condition = _object(raw.get("filter"))
+        if expr := _text(condition.get("expr")):
+            output["filter"] = {"expr": expr, "label": _text(condition.get("label"))}
+            problems += _expression_problems("筛选条件", expr, target, "filter")
+        sort = _object(raw.get("sort"))
+        if by := _text(sort.get("by")):
+            output["sort"] = {"by": by, "order": _text(sort.get("order")) or "desc"}
+            if by not in names:
+                listed = "、".join(names) if names else "（还没有指标）"
+                problems.append(
+                    f"sort.by 要填 metrics 里某一项的 name，不是公式：收到「{by}」，可选：{listed}。"
+                    "按一个新的数排序，先把它加进 metrics"
+                )
+            else:
+                expr = metrics[names.index(by)]["expr"]
+                problems += _expression_problems(f"排序用的指标「{by}」", expr, target, "sort")
+        _copy(raw, output, "limit")
+        return output, problems
+    event = _object(raw.get("event"))
+    event_id, params = _text(event.get("preset_id")), event.get("params") or {}
+    if not event_id:
+        problems.append(
+            "事件统计要填 output.event.preset_id，只能从事件库里选；条件不是事件时 status 填 not_an_event"
+        )
+    elif not isinstance(params, Mapping):
+        problems.append("output.event.params 要是一个对象")
+    else:
+        try:
+            render_event(event_id, params, events)
+        except EventParamError as exc:
+            problems.append(str(exc))
+        output["event"] = {"preset_id": event_id, "params": dict(params)}
+    for key in ("horizons", "benchmark", "cost_bps"):
+        _copy(raw, output, key)
+    return output, problems
+
+
+def _board(raw: Mapping[str, Any]) -> NameMention | None:
+    """限定的行业、板块：改现有条件时照抄的代码，或者原话加猜的名字。"""
+    if code := _text(raw.get("code")):
+        return NameMention(code, is_code=True)
+    if mention := _text(raw.get("mention")):
+        return NameMention(mention, _text(raw.get("guess")) or None)
+    return None
+
+
+#: 猜的名字填成了代码：002714、002714.SZ（2026-09-17 实测）
+_LOOKS_LIKE_CODE = re.compile(r"^\d{6}(\.[A-Za-z]{2})?$")
+
+
+def _subjects(raw: Mapping[str, Any]) -> tuple[tuple[NameMention, ...], list[str]]:
+    """点名看的标的：改现有条件时照抄的代码在前，新说的在后。"""
+    found: list[NameMention] = []
+    problems: list[str] = []
+    for code in raw.get("codes") if isinstance(raw.get("codes"), list) else []:
+        if text := _text(code):
+            found.append(NameMention(text, is_code=True))
+    for item in raw.get("mentions") if isinstance(raw.get("mentions"), list) else []:
+        entry = _object(item)
+        mention, guess = _text(entry.get("mention")), _text(entry.get("guess"))
+        if not mention:
+            continue
+        if _LOOKS_LIKE_CODE.match(guess):
+            problems.append(f"「{mention}」的 guess 要填你猜的全称，不要填代码（收到 {guess}）")
+        found.append(NameMention(mention, guess or None))
+    unique = tuple(dict.fromkeys(found))
+    return unique, problems
+
+
+def _metrics(raw: object) -> list[dict[str, str]]:
+    metrics = []
+    for item in raw if isinstance(raw, list) else []:
+        entry = _object(item)
+        name, expr = _text(entry.get("name")), _text(entry.get("expr"))
+        if name and expr:
+            metrics.append({"name": name, "expr": expr})
+    return metrics
+
+
+def _metric_names(draft: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(metric["name"] for metric in _metrics(draft.get("metrics")))
+
+
+def _when(raw: Mapping[str, Any], context: PlanContext) -> dict[str, Any]:
+    """只说了一头的区间（「2020 年以来」）另一头用本地数据的起点、终点。"""
+    if as_of := _text(raw.get("as_of")):
+        return {"as_of": as_of}
+    span = _object(raw.get("range"))
+    first, last = _text(span.get("from")), _text(span.get("to"))
+    if first or last:
+        full = _full_range(context)
+        return {"range": {"from": first or full["from"], "to": last or full["to"]}}
+    return {}
+
+
+def _full_range(context: PlanContext) -> dict[str, str]:
+    return {"from": context.history_from.isoformat(), "to": context.latest_trading_day.isoformat()}
+
+
+def _object(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
 def _structure_problems(
@@ -368,17 +577,10 @@ def _structure_problems(
     """用 spec.parse_spec 查结构。代码、日期这些由 api 补的栏目先填个占位，只查大模型填的部分。"""
     trial = {key: dict(value) if isinstance(value, dict) else value for key, value in spec.items()}
     output = dict(trial["output"])
-    if output["kind"] == "event_study":
+    if trial["subject"].get("kind") == "codes":
         trial["subject"] = {"kind": "codes", "codes": ["000001.SZ"]}
-        trial.setdefault(
-            "when",
-            {
-                "range": {
-                    "from": context.history_from.isoformat(),
-                    "to": context.latest_trading_day.isoformat(),
-                }
-            },
-        )
+    if output["kind"] == "event_study":
+        trial.setdefault("when", {"range": _full_range(context)})
         event = output["event"]
         rendered = render_event(event["preset_id"], event["params"], events)
         output["event"] = {**event, "expr": rendered.expr}
@@ -394,10 +596,6 @@ def _structure_problems(
             for error in exc.errors()
         ]
     return []
-
-
-#: pydantic 按 kind 分派 output 时会把形态名插进路径里
-_KINDS = ("table", "card", "event_study")
 
 
 def _expression_problems(name: str, text: str, target: str, purpose: str) -> list[str]:
@@ -439,14 +637,16 @@ def _questions(raw: object) -> tuple[Question, ...]:
     return tuple(questions[:3])
 
 
-def _mentions(raw: object) -> tuple[Mention, ...]:
+def _mentions(raw: object, metric_names: tuple[str, ...] = ()) -> tuple[Mention, ...]:
+    """原话的说法挂在哪一栏。栏目不认识的丢掉；指标只认 metrics.<这次的指标名>。"""
+    fields = {*MENTION_FIELDS, *(f"metrics.{name}" for name in metric_names)}
     found: list[Mention] = []
     for item in raw if isinstance(raw, list) else []:
         if not isinstance(item, Mapping):
             continue
         phrase, field = _text(item.get("phrase")), _text(item.get("field"))
         mention = Mention(phrase, field)
-        if phrase and field in MENTION_FIELDS and mention not in found:
+        if phrase and field in fields and mention not in found:
             found.append(mention)
     return tuple(found)
 
@@ -475,6 +675,8 @@ def system_variables(context: PlanContext, events: EventLibrary) -> dict[str, st
         "events": _events(events),
         "industries": _industries(context),
         "defaults": _defaults(context),
+        "default_metrics": _default_metrics(context),
+        "since_new_year": _since_new_year(context),
         "dates": _date_table(context),
     }
 
@@ -491,15 +693,17 @@ def _fields(target: str) -> str:
 
 
 def _board_fields(context: PlanContext) -> str:
-    parts = [f"申万一级行业（board_type=sw_industry）：\n{_fields('sw_industry')}"]
+    parts = [f"申万一级行业（scope.target=sw_industry）：\n{_fields('sw_industry')}"]
     if "sw_industry_l2" in context.targets:
-        parts.append("申万二级行业（board_type=sw_industry_l2）：字段和一级一样")
+        parts.append("申万二级行业（scope.target=sw_industry_l2）：字段和一级一样")
     else:
-        parts.append("申万二级行业当前不可用：不要用 board_type=sw_industry_l2")
+        parts.append("申万二级行业当前不可用：scope.target 不要填 sw_industry_l2")
     if "concept" in context.targets:
-        parts.append(f"通达信概念板块（board_type=concept）：\n{_fields('concept')}")
+        parts.append(f"通达信概念板块（scope.target=concept）：\n{_fields('concept')}")
     else:
-        parts.append("通达信概念板块当前不可用：不要用 board_type=concept，也不要填 board_mention")
+        parts.append(
+            "通达信概念板块当前不可用：scope.target 不要填 concept，scope.board 也只能是申万行业"
+        )
     return "\n\n".join(parts)
 
 
@@ -526,26 +730,42 @@ def _defaults(context: PlanContext) -> str:
     small_cap = f"{DEFAULTS['small_cap'] / 1e8:g}亿"  # type: ignore[operator]
     return "\n".join(
         [
-            f"- 股票表、板块表的日期：最近已收盘交易日 {context.latest_trading_day}",
-            f"- 取前几名：{DEFAULTS['top_n']}；没有指定排序时按成交额从高到低",
-            "- 股票池：沪深A股（不含北交所），剔除 ST、停牌、上市不满 60 个交易日",
-            f"- 个股回看的回看区间：本地全部数据（{context.history_from} ~ {context.latest_trading_day}）",
+            f"- 表和卡的日期：最近已收盘交易日 {context.latest_trading_day}",
+            f"- 表取前几名：{DEFAULTS['top_n']}；没有指定排序时按成交额从高到低",
+            "- 算的范围：沪深A股（不含北交所），剔除 ST、停牌、上市不满 60 个交易日",
+            f"- 事件统计的回看区间：本地全部数据（{context.history_from} ~ {context.latest_trading_day}）",
             f"- 持有天数：{horizons} 个交易日",
-            "- 同期对照：买入日全A等权平均",
+            "- 同期对照：买入日算的范围（默认全A）等权平均",
             f"- 交易成本：{DEFAULTS['cost_bps']} 基点，买卖双边合计",
             f"- 「放量」：成交额超过前 20 日均额的 {DEFAULTS['volume_surge_ratio']:g} 倍；"
             f"「缩量」：{DEFAULTS['volume_shrink_ratio']:g} 倍",
             "- 「成交量」理解为成交额 $amount",
+            "- 「涨幅」完全没提时间：当日涨跌幅 $pct_chg，最近一个交易日",
             f"- 「小市值」没给数字：总市值低于 {small_cap}，写成 $market_cap < {small_cap}",
         ]
     )
 
 
-#: 板块表的口径
-_BOARD_LABELS = {
+def _since_new_year(context: PlanContext) -> str:
+    """「今年以来」的 PctSince 起点：去年最后一个交易日。本地日历数不到时退回 12 月 31 日。"""
+    first_day = date(context.today.year, 1, 1)
+    before = [day for day in context.trading_days if day < first_day]
+    return (before[-1] if before else first_day - timedelta(days=1)).strftime("%Y%m%d")
+
+
+def _default_metrics(context: PlanContext) -> str:
+    anchor = _since_new_year(context)
+    return "\n".join(
+        f"- {name}：{expr.format(since_new_year=anchor)}" for name, expr in DEFAULT_CARD_METRICS
+    )
+
+
+#: 标的类型的叫法
+_TARGET_LABELS = {
+    "stock": "股票",
     "sw_industry": "申万一级行业",
     "sw_industry_l2": "申万二级行业",
-    "concept": "概念板块",
+    "concept": "通达信概念板块",
 }
 
 

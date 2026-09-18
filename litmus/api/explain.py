@@ -64,7 +64,7 @@ def plan_mentions(spec: Mapping[str, Any], record: PlanRecord | None) -> list[Me
             continue
         path = _COMPARED.get(field, field)
         before = _at(saved, path)
-        if before is None or before == _at(spec, path):
+        if before in (None, []) or before == _at(spec, path):
             kept.append(Mention(phrase, field))
     return kept
 
@@ -103,6 +103,9 @@ def _facts(spec: QuerySpec, ds: DataService, mentions: tuple[Mention, ...]) -> F
         board_range=ds.data_range(target) if target != STOCK else None,
         lookback=max((collect_lookback(parse(text)) for text in all_exprs), default=0),
         uses_rank=any(_RANK.search(text) for text in all_exprs),
+        uses_listing=any(
+            collect_fields(parse(text)) & {"list_days", "is_new"} for text in all_exprs
+        ),
         defaulted=_defaulted(texts, filter_expr, mentions),
         **common,
     )

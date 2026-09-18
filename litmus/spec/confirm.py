@@ -45,9 +45,8 @@ _TARGET = {
     "concept": ("通达信概念板块", "个"),
 }
 
-#: 对照口径的中文
+#: 指数对照的中文。等权平均按算的范围现写，见 _equal_weight
 _BENCHMARK = {
-    "universe_equal_weight": "买入日全A等权平均（剔除 ST、停牌、次新股，持有期内退市的按最后价格算）",
     "index:000300.SH": "沪深300 指数",
     "index:000905.SH": "中证500 指数",
 }
@@ -90,6 +89,8 @@ class Facts:
     defaulted: frozenset[str] = frozenset()
     #: 这个问题用到的几类数据各自截至哪天：(叫法, 日期)
     data_dates: tuple[tuple[str, date], ...] = ()
+    #: 条件、指标里用到了上市时间（$list_days、$is_new）
+    uses_listing: bool = False
 
 
 @dataclass(frozen=True)
@@ -116,7 +117,7 @@ def render_confirm(spec: QuerySpec, facts: Facts | None = None) -> Confirm:
         _what(spec, facts, notes, card)
     if isinstance(spec.output, EventStudyOutput):
         _event(spec.output, facts, notes)
-        _after(spec.output, notes)
+        _after(spec, facts, notes)
     elif isinstance(spec.output, TableOutput):
         _how(spec.output, facts, notes)
     if facts.data_dates:
@@ -228,6 +229,13 @@ def _scope(spec: QuerySpec, facts: Facts, notes: _Notes) -> None:
         notes.add(WHO, "scope.base", "股票池", base)
         dropped = "、".join(_EXCLUDE.get(name, name) for name in scope.exclude)
         notes.add(WHO, "scope.exclude", "剔除", dropped or "不剔除")
+        new_listing = [name for name in scope.exclude if name.startswith("new_listing_")]
+        if facts.uses_listing and new_listing:
+            notes.note(
+                f"条件里用到了上市时间，但{_EXCLUDE.get(new_listing[0], new_listing[0])}的股票已经剔除了："
+                "要看次新股，把这一项去掉",
+                group=WHO,
+            )
 
 
 # ── 看哪天 ──────────────────────────────────────────────────────
@@ -257,7 +265,11 @@ def _what(spec: QuerySpec, facts: Facts, notes: _Notes, card: bool = False) -> N
             continue  # 「市盈率TTM：市盈率TTM」，写了等于没写
         notes.add(WHAT, f"metrics.{metric.name}", metric.name, text)
     if card:
-        return  # 排名怎么排写在指标那一行；算不出来的卡上逐条说了原因，不用再提预热
+        # 排名怎么排写在指标那一行；算不出来的卡上逐条说了原因，不用再提预热
+        benchmark = getattr(spec.output, "benchmark", "industry")
+        if benchmark in _BENCHMARK:
+            notes.add(WHAT, "output.benchmark", "涨跌的同期对照", _BENCHMARK[benchmark])
+        return
     if facts.uses_rank:
         notes.note("排名在上面「算的范围」里排，不是全市场", group=WHAT)
     if facts.lookback:
@@ -291,7 +303,9 @@ def _event(output: EventStudyOutput, facts: Facts, notes: _Notes) -> None:
     notes.note("只算由不满足变为满足的那一天，连续成立不重复计", group=EVENT)
 
 
-def _after(output: EventStudyOutput, notes: _Notes) -> None:
+def _after(spec: QuerySpec, facts: Facts, notes: _Notes) -> None:
+    output = spec.output
+    assert isinstance(output, EventStudyOutput)
     horizons = "、".join(str(n) for n in output.horizons)
     notes.add(AFTER, "output.horizons", "持有天数", f"{horizons} 个交易日，从买入日起算")
     notes.note(
@@ -299,7 +313,8 @@ def _after(output: EventStudyOutput, notes: _Notes) -> None:
         "卖出价是持有期最后一天的收盘价，跌停或停牌就往后顺延",
         group=AFTER,
     )
-    notes.add(AFTER, "output.benchmark", "同期对照", _BENCHMARK[output.benchmark])
+    benchmark = _BENCHMARK.get(output.benchmark) or _equal_weight(spec.scope, facts)
+    notes.add(AFTER, "output.benchmark", "同期对照", benchmark)
     percent = f"{output.cost_bps / 100:.2f}%"
     notes.add(
         AFTER,
@@ -307,6 +322,14 @@ def _after(output: EventStudyOutput, notes: _Notes) -> None:
         "交易成本",
         f"{percent}，买卖双边合计；平均涨跌不扣成本，另外单列扣掉成本后的数",
     )
+
+
+def _equal_weight(scope: Scope, facts: Facts) -> str:
+    """等权平均的口径就是算的范围：「买入日全A等权平均（剔除 ……）」「买入日农林牧渔等权平均（……）」。"""
+    whole = scope.target == "stock" and scope.base == "all_a" and not scope.industry
+    where = "全A" if whole and scope.board is None else _scope_phrase(scope, facts)
+    dropped = "、".join(_EXCLUDE.get(name, name) for name in scope.exclude)
+    return f"买入日{where}等权平均（{f'剔除 {dropped}，' if dropped else ''}持有期内退市的按最后价格算）"
 
 
 # ── 拼文字 ──────────────────────────────────────────────────────

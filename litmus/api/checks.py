@@ -22,7 +22,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from litmus.api.models import Issue
-from litmus.data import CONCEPT, STOCK, SW_INDUSTRY, SW_INDUSTRY_L2, DataService
+from litmus.data import CONCEPT, STOCK, SW_INDUSTRY, SW_INDUSTRY_L2, DataService, MissingDataError
 from litmus.expr import ExprSyntaxError, parse, validate
 from litmus.research import pool_of
 from litmus.research.table import DEFAULT_SORT_EXPR, DEFAULT_SORT_NAME
@@ -331,27 +331,33 @@ def _subject_issues(spec: Spec, ds: DataService) -> list[Issue]:
     """
     if spec.subject.kind == "aggregate":
         return [Issue(path="subject.kind", message="把整个范围算成一个数还不支持")]
-    if spec.subject.kind != "codes" or not spec.subject.codes or spec.when.as_of is None:
+    day, codes = spec.when.as_of, list(spec.subject.codes)
+    if spec.subject.kind != "codes" or not codes or day is None:
         return []
     if spec.scope.target != STOCK:
         known = {board.code for board in ds.list_boards(spec.scope.target)}
-        missing = [code for code in spec.subject.codes if code not in known]
-        message = "没有这个板块代码"
-    elif spec.scope.industry or spec.scope.board is not None or spec.scope.base != "all_a":
-        inside = set(
-            pool_of(spec.scope, spec.when.as_of, ds, exclude=False).get_column("code").to_list()
-        )
-        outside = [code for code in spec.subject.codes if code not in inside]
-        # 当天没有行情的分不出是停牌还是真不属于这个范围，交给卡去说
-        traded = _traded(outside, spec.when.as_of, ds)
-        missing = [code for code in outside if code in traded]
-        message = "不在算的范围里"
-    else:
-        info = ds.stock_info(list(spec.subject.codes), spec.when.as_of)
-        listed = dict(zip(info.get_column("code"), info.get_column("list_date"), strict=True))
-        missing = [code for code in spec.subject.codes if listed.get(code) is None]
-        message = "本地没有这个股票代码，代码要带交易所后缀，如 600519.SH"
-    return [Issue(path="subject.codes", message=f"{code}：{message}") for code in missing]
+        return _each(codes, known.__contains__, "没有这个板块代码")
+    info = ds.stock_info(codes, day)
+    listed = dict(zip(info.get_column("code"), info.get_column("list_date"), strict=True))
+    message = "本地没有这个股票代码，代码要带交易所后缀，如 600519.SH"
+    if issues := _each(codes, lambda code: listed.get(code) is not None, message):
+        return issues
+    scope = spec.scope
+    if not (scope.industry or scope.board is not None or scope.base != "all_a"):
+        return []
+    try:
+        inside = set(pool_of(scope, day, ds, exclude=False).get_column("code").to_list())
+    except MissingDataError as exc:
+        return [Issue(path="scope", message=str(exc))]
+    # 当天没有行情的分不出是停牌还是真不属于这个范围，交给卡去说
+    traded = _traded([code for code in codes if code not in inside], day, ds)
+    return _each(codes, lambda code: code in inside or code not in traded, "不在算的范围里")
+
+
+def _each(codes: list[str], ok, message: str) -> list[Issue]:
+    return [
+        Issue(path="subject.codes", message=f"{code}：{message}") for code in codes if not ok(code)
+    ]
 
 
 def _traded(codes: list[str], day: date, ds: DataService) -> set[str]:

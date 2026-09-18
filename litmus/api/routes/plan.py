@@ -262,14 +262,15 @@ def _chained(before: str | None, query: str, revised: bool) -> str:
 
 
 def _with_names(result: PlanResult) -> tuple[Mention, ...]:
-    """股票、概念板块的原话大模型已经单独给了（stock_mention、board_mention），它没在 mentions 里再记一遍的由代码补上。
+    """点名的标的、限定的板块，原话大模型已经单独给了（subject.mentions、scope.board），
+    它没在 mentions 里再记一遍的由代码补上。
 
     2026-09-15 实测：同一句「平安每次放量之后一周涨跌怎样」，大模型有时一个说法都不给，确认卡就只能写「股票：中国平安」。
     """
     fields = {mention.field for mention in result.mentions}
     extra = []
-    if result.stock is not None and not result.stock.is_code and "subject" not in fields:
-        extra.append(Mention(result.stock.mention, "subject"))
+    if "subject" not in fields:
+        extra += [Mention(name.mention, "subject") for name in result.subjects if not name.is_code]
     if result.board is not None and not result.board.is_code and "scope.board" not in fields:
         extra.append(Mention(result.board.mention, "scope.board"))
     return (*result.mentions, *extra)
@@ -298,30 +299,9 @@ def _respond(
     note = steps.append if steps is not None else (lambda _step: None)
     ds = services.ds
     spec = dict(result.spec or {})
-    if result.stock is not None:
-        stocks = _decisive(_lookup(ds.resolve_stock, result.stock))
-        note(
-            {
-                "step": "resolve_stock",
-                "mention": result.stock.mention,
-                "guess": result.stock.guess,
-                "by_code": result.stock.is_code,
-                "matches": [{"code": m.code, "name": m.name} for m in stocks[:MAX_CANDIDATES]],
-            }
-        )
-        if len(stocks) != 1:
-            return _choose_stock(spec, result.stock, stocks)
-        # 照抄代码进来的（改现有条件）没有原话，和表单改过条件后一样只带代码
-        mentions_field = (
-            []
-            if result.stock.is_code
-            else [{"mention": result.stock.mention, "guess": result.stock.guess}]
-        )
-        spec["subject"] = {
-            "kind": "codes",
-            "codes": [stocks[0].code],
-            "mentions": mentions_field,
-        }
+    if result.subjects:
+        if clarify := _resolve_subjects(spec, result.subjects, ds, note):
+            return clarify
     if result.board is not None:
         picked, candidates = _pick_board(ds, result.board)
         note(
@@ -346,6 +326,10 @@ def _respond(
     if checked is None:
         message = "；".join(issue_text(issue) for issue in issues)
         return PlanResponse(status=CLARIFY, spec=spec, message=f"条件要改一下：{message}")
+    if checked.output.kind == "card":
+        # 卡不走确认卡，由 _card 直接算。交出去的是补默认值之前的条件：那边再检查一遍时
+        # 才认得出哪些栏目用了默认值，卡底下的「怎么算的」照样标「默认」
+        return PlanResponse(status=OK, spec=spec)
     try:
         confirm = explain(checked, ds, mentions)
     except (MissingDataError, ExprDataError) as exc:
@@ -356,6 +340,71 @@ def _respond(
         spec=checked.model_dump(mode="json", by_alias=True),
         summary=confirm.summary,
         assumptions=assumption_items(confirm),
+    )
+
+
+def _resolve_subjects(
+    spec: dict, names: tuple[NameMention, ...], ds: DataService, note
+) -> PlanResponse | None:
+    """点名的标的按算的范围是股票还是板块去查，查准的填进 subject.codes。
+
+    有一个对应多个、或者查不到，就停下来让用户选（一次问一个）；查准了的已经填好，选完不用再查。
+    返回 None 表示都查准了。
+    """
+    target = (spec.get("scope") or {}).get("target") or STOCK
+    if target == STOCK:
+        resolve = ds.resolve_stock
+    else:
+
+        def resolve(text: str) -> list:
+            return ds.resolve_board(text, target)
+
+    codes, said, pending = [], [], None
+    for name in names:
+        matches = _lookup(resolve, name)
+        note(
+            {
+                "step": "resolve_stock" if target == STOCK else "resolve_board",
+                "mention": name.mention,
+                "guess": name.guess,
+                "by_code": name.is_code,
+                "matches": [{"code": m.code, "name": m.name} for m in matches[:MAX_CANDIDATES]],
+            }
+        )
+        picked = _picked(matches, target)
+        if picked is not None:
+            if picked.code in codes:
+                continue  # 「茅台」「贵州茅台」说的是同一只
+            codes.append(picked.code)
+            # 照抄代码进来的（改现有条件）没有原话，和表单改过条件后一样只带代码
+            if not name.is_code:
+                said.append({"mention": name.mention, "guess": name.guess})
+        elif pending is None:
+            pending = (name, matches)
+    spec["subject"] = {"kind": "codes", "mentions": said, **({"codes": codes} if codes else {})}
+    if pending is None:
+        return None
+    name, matches = pending
+    if target == STOCK:
+        return _choose_stock(spec, name, matches)
+    return _choose_subject_board(spec, name, matches, target)
+
+
+def _choose_subject_board(
+    spec: dict, name: NameMention, boards: list[BoardMatch], target: str
+) -> PlanResponse:
+    label = _BOARD_LABELS[target]
+    if not boards:
+        message = f"没找到叫「{name.mention}」的{label}：换个说法，或者打开表单选"
+        return PlanResponse(status=CLARIFY, spec=spec, message=message)
+    if not any(board.exact for board in boards):
+        message = (
+            f"没有叫「{name.mention}」的{label}，名字相近的是下面这些，选一个；都不是就换个说法"
+        )
+    else:
+        message = f"「{name.mention}」对应 {len(boards)} 个{label}，选一个"
+    return PlanResponse(
+        status=CLARIFY, spec=spec, message=message, board_candidates=_board_candidates(boards)
     )
 
 
@@ -407,6 +456,16 @@ def _with_board(scope: dict, board: BoardMatch) -> dict:
     if board.board_type == CONCEPT:
         return {**scope, "board": {"type": "concept", "code": board.code}}
     return {**scope, "industry": board.name}
+
+
+def _picked(matches: list, target: str):
+    """能直接用的那一个，没有就是 None（交给用户选）。
+
+    股票：只有一个候选，或者只有一个代码 / 名称完全一致的。板块：只认完全一致的——
+    「新能源」只包含在「新能源车」里就直接用了，2026-09-18 实测看的其实是另一个板块。
+    """
+    chosen = _decisive(matches) if target == STOCK else [m for m in matches if m.exact]
+    return chosen[0] if len(chosen) == 1 else None
 
 
 def _decisive(matches: list) -> list:

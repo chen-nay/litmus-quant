@@ -33,6 +33,7 @@ from litmus.expr import (
     describe,
     evaluate,
     parse,
+    result_unit,
     validate,
 )
 from litmus.research.compute import Computed, board_notes, compute
@@ -45,6 +46,9 @@ _ADJUSTED = frozenset({"open", "high", "low", "close", "vwap"})
 _FINANCE = frozenset({"roe", "revenue_yoy", "profit_yoy"})
 #: 结果是条件（真假）的算子
 _CONDITIONS = frozenset({"Cross"})
+
+#: 宽基指数的叫法
+_INDEX_LABELS = {"000300.SH": "沪深300 指数", "000905.SH": "中证500 指数"}
 
 #: 还没查过。查出来是 None（没有行情、没有财报）也要记住，别每次重查
 _UNSET = object()
@@ -138,7 +142,7 @@ class _Subject:
     def _facts(self, node: Node, value: object, ranked: pl.DataFrame | None = None) -> MetricFacts:
         if isinstance(node, Call) and node.name == "TsRank":
             return self._percentile(node, value)
-        if isinstance(node, Call) and node.name in ("Pct", "PctSince"):
+        if isinstance(node, Call) and node.name in ("Pct", "PctSince") or _is_daily(node):
             return self._change(node, value)
         if isinstance(node, Call) and node.name == "Rank" and ranked is not None:
             return self._rank(node, value, ranked)
@@ -152,12 +156,13 @@ class _Subject:
         return MetricFacts(
             kind=card.VALUE,
             value=_plain(value),
-            unit=_unit(node),
+            unit=result_unit(node),
             field=field,
             label=describe(node, self._target),
             missing=None if value is not None else self._why(node),
             adjusted=adjusted,
             raw_close=self._today(("close_raw",)).get("close_raw") if field == "close" else None,
+            report=self._report if field in _FINANCE and value is not None else None,
         )
 
     def _percentile(self, node: Call, value: object) -> MetricFacts:
@@ -177,11 +182,13 @@ class _Subject:
             inner=current,
         )
 
-    def _change(self, node: Call, value: object) -> MetricFacts:
+    def _change(self, node: Node, value: object) -> MetricFacts:
+        daily = _is_daily(node)
         return MetricFacts(
             kind=card.CHANGE,
             value=_plain(value),
-            unit=RATIO,
+            unit="%" if daily else RATIO,
+            field="pct_chg" if daily else None,
             label=describe(node, self._target),
             missing=None if value is not None else self._why(node),
             period=self._period(node),
@@ -223,7 +230,7 @@ class _Subject:
         return MetricFacts(
             kind=card.CONDITION,
             value=_plain(value),
-            unit=_unit(node),
+            unit=result_unit(node),
             label=describe(node, self._target),
             missing=None if value is not None else self._why(node),
             sides=sides,
@@ -261,8 +268,11 @@ class _Subject:
             return pl.Series([], dtype=pl.Float64)
         return values.get_column("value").drop_nulls()
 
-    def _period(self, node: Call) -> str:
-        """涨跌算的是哪一段：「今年以来」「近 20 个交易日」「2026-03-31 以来」。"""
+    def _period(self, node: Node) -> str:
+        """涨跌算的是哪一段：「当日」「今年以来」「近 20 个交易日」「2026-03-31 以来」。"""
+        if _is_daily(node):
+            return "当日"
+        assert isinstance(node, Call)
         subject = node.args[0]
         prefix = "" if _key(subject) == ("f", "close") else describe(subject, self._target)
         if node.name == "Pct":
@@ -281,8 +291,13 @@ class _Subject:
         rest = self._ds.get_trading_calendar(anchor + timedelta(days=1), date(anchor.year, 12, 31))
         return not rest
 
-    def _benchmark(self, node: Call) -> tuple[str, float | None] | None:
-        """同期对照：这只股票所属申万一级行业的指数，同一个公式算一遍。"""
+    def _benchmark(self, node: Node) -> tuple[str, float | None] | None:
+        """同期对照：默认是这只股票所属申万一级行业的指数，同一个公式算一遍；也可以换成宽基指数。
+        对照一律是小数（-0.0304）：当日涨跌幅字段本身是百分数，算出来除以 100。"""
+        benchmark = getattr(self._spec.output, "benchmark", "industry")
+        if benchmark.startswith("index:"):
+            code = benchmark.removeprefix("index:")
+            return (_INDEX_LABELS[code], self._index_change(node, code))
         industry = self._industry_name
         if self._target != STOCK or not industry:
             return None
@@ -301,7 +316,36 @@ class _Subject:
         except (ExprDataError, MissingDataError):
             return None
         value = None if values.is_empty() else values.get_column("value").item()
+        if value is not None and _is_daily(node):
+            value = value / 100
         return (f"{industry}行业指数", _plain(value))
+
+    def _index_change(self, node: Node, code: str) -> float | None:
+        """指数同一段的涨跌。只对收盘价的涨跌算：当日涨跌幅、Pct($close, n)、PctSince($close, 日期)。"""
+        if _is_daily(node):
+            node = Call("Pct", (Field("close", 0), Number(1.0, "1", 0)), 0)
+        if not isinstance(node, Call) or _key(node.args[0]) != ("f", "close"):
+            return None
+        if node.name == "Pct":
+            n = int(_window(node))
+            days = self._ds.get_trading_calendar(self._day - timedelta(days=n * 2 + 30), self._day)
+            if len(days) <= n:
+                return None
+            start = days[-1 - n]
+        else:
+            anchor = anchor_date(node.args[1])
+            if anchor is None:
+                return None
+            start = anchor
+        try:
+            rows = self._ds.get_index_daily(code, start - timedelta(days=15), self._day)
+        except (MissingDataError, ValueError):
+            return None
+        before = rows.filter(pl.col("date") <= start)
+        today = rows.filter(pl.col("date") == self._day)
+        if before.is_empty() or today.is_empty():
+            return None
+        return today.get_column("close").item() / before.get_column("close")[-1] - 1
 
     # ── 为什么是空 ──────────────────────────────────────────────
 
@@ -431,7 +475,12 @@ class _Subject:
         if rows.is_empty():
             return None
         row = rows.row(0, named=True)
-        return Report(period=row["period"], roe=row["roe"], profit_yoy=row["profit_yoy"])
+        return Report(
+            period=row["period"],
+            roe=row["roe"],
+            profit_yoy=row["profit_yoy"],
+            announced=row["ann_date"],
+        )
 
     @property
     def _pool_codes(self) -> set[str]:
@@ -462,15 +511,6 @@ def _row_of(table: pl.DataFrame, code: str) -> dict:
     return rows.row(0, named=True) if rows.height else {}
 
 
-def _unit(node: Node) -> str:
-    if isinstance(node, Field):
-        definition = FIELDS.get(node.name)
-        return definition.unit if definition else ""
-    if isinstance(node, Call) and node.name in ("Rank", "TsRank", "Pct", "PctSince"):
-        return RATIO
-    return ""
-
-
 def _window(node: Call) -> float:
     window = node.args[1]
     assert isinstance(window, Number)
@@ -488,6 +528,11 @@ def _anchors(node: Node) -> list[date]:
     if isinstance(node, Binary):
         return _anchors(node.left) + _anchors(node.right)
     return []
+
+
+def _is_daily(node: Node) -> bool:
+    """当日涨跌幅字段 $pct_chg：和 Pct($close, 1) 一样是一段涨跌，只是写成了百分数。"""
+    return isinstance(node, Field) and node.name == "pct_chg"
 
 
 def _is_condition(node: Node) -> bool:

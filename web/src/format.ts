@@ -82,7 +82,7 @@ export function formatCell(name: string, value: Cell | undefined, unit: string):
   if (MONEY_FIELDS.has(name)) return formatYuan(value);
   if (unit === FRACTION_UNIT) return formatFraction(value);
   if (unit === "%") return formatPercentValue(value, 2, SIGNED_FIELDS.has(name));
-  if (unit === "个" || unit === "股") return fixed(value, 0);
+  if (unit === "个" || unit === "股" || unit === "天") return fixed(value, 0);
   return fixed(value, 2);
 }
 

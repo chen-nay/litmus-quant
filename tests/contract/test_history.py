@@ -35,7 +35,7 @@ BREAKOUT = "Cross($close, Mean($close, 250)) & ($amount > Mean(Ref($amount, 1), 
 
 
 def history(
-    code: str, expr: str, start: date, end: date, horizons=(5, 20, 60), **extra
+    code: str, expr: str, start: date, end: date, horizons=(5, 20, 60), scope=None, **extra
 ) -> HistoryResult:
     output = {
         "kind": "event_study",
@@ -45,6 +45,7 @@ def history(
     }
     spec = parse_spec(
         {
+            "scope": scope or {},
             "subject": {"kind": "codes", "codes": [code]},
             "when": {"range": {"from": start.isoformat(), "to": end.isoformat()}},
             "output": output,
@@ -138,6 +139,29 @@ def test_茅台MACD金叉_统计区间_自身涨跌_同期对照_扣成本():
     manual = both.select((pl.col("close") / pl.col("open") - 1).mean()).item()
     assert item.market_returns[20] == pytest.approx(manual)
     assert item.market_excluded[20] == opens.height - both.height
+
+
+def test_同期对照是算的范围的等权平均():
+    """牧原在农林牧渔里：对照是买入日农林牧渔（剔除 ST、停牌、次新）的等权平均，不是全A。"""
+    result = history(
+        "002714.SZ",
+        MACD,
+        D(2024, 1, 1),
+        D(2025, 12, 31),
+        horizons=[20],
+        scope={"industry": "农林牧渔"},
+    )
+    item = next(item for item in result.triggers if item.status[20] in COUNTED)
+    buy, sell = item.entry_date, item.exit_date[20]
+    pool = _ds.get_universe_mask(
+        buy, buy, industry="农林牧渔", exclude=["ST", "suspended", "new_listing_60d"]
+    )
+    codes = pool.get_column("code").to_list()
+    opens = _ds.get_fields(codes, buy, buy, ["open"]).select("code", "open")
+    closes = _ds.get_fields(codes, sell, sell, ["close"]).select("code", "close")
+    manual = opens.join(closes, on="code").select((pl.col("close") / pl.col("open") - 1).mean())
+    assert len(codes) < 200  # 用例成立的前提：确实是行业，不是全A
+    assert item.market_returns[20] == pytest.approx(manual.item())
 
 
 def test_换成沪深300对照():

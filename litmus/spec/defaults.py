@@ -34,3 +34,22 @@ MAX_COST_BPS = 500
 
 #: 个股回看可选的对照口径
 BENCHMARKS: tuple[str, ...] = ("universe_equal_weight", "index:000300.SH", "index:000905.SH")
+
+#: 卡上涨跌的同期对照：industry 是这只股票所属的申万一级行业指数（默认），或者宽基指数
+CARD_BENCHMARKS: tuple[str, ...] = ("industry", "index:000300.SH", "index:000905.SH")
+
+#: 卡的默认指标组：用户问开放问题（「最近走势如何」）、没点名看哪些数时，塞进提示词当建议，
+#: 大模型可以直接用、可以删、可以加（DESIGN.md §1.5）。估值、涨跌、量能、财务各两个，
+#: 估值的两年分位在卡上并进市盈率、市净率的解释行。{since_new_year} 由提示词填成去年最后一个交易日
+DEFAULT_CARD_METRICS: tuple[tuple[str, str], ...] = (
+    ("市盈率TTM", "$pe_ttm"),
+    ("市盈率两年分位", "TsRank($pe_ttm, 500)"),
+    ("市净率", "$pb"),
+    ("市净率两年分位", "TsRank($pb, 500)"),
+    ("近 20 日涨跌", "Pct($close, 20)"),
+    ("今年以来涨跌", "PctSince($close, {since_new_year})"),
+    ("换手率", "$turnover"),
+    ("成交额放大倍数", "$amount / Mean(Ref($amount, 1), 20)"),
+    ("营收同比", "$revenue_yoy"),
+    ("净利同比", "$profit_yoy"),
+)

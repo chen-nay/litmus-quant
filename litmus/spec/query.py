@@ -37,6 +37,7 @@ from pydantic import (
 
 from litmus.spec.defaults import (
     BENCHMARKS,
+    CARD_BENCHMARKS,
     DEFAULTS,
     MAX_COST_BPS,
     MAX_HORIZON,
@@ -200,9 +201,13 @@ class TableOutput(_Strict):
 
 
 class CardOutput(_Strict):
-    """不筛不排，metrics 直接显示。没有 filter / sort / limit——多填的字段由 extra=forbid 拦掉。"""
+    """不筛不排，metrics 直接显示。没有 filter / sort / limit——多填的字段由 extra=forbid 拦掉。
+
+    唯一能选的是涨跌和谁比：默认所属申万一级行业指数，问「跑赢沪深300了吗」时换成指数。
+    """
 
     kind: Literal["card"]
+    benchmark: Literal[CARD_BENCHMARKS] = "industry"  # type: ignore[valid-type]
 
 
 class Event(_Strict):

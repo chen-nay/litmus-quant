@@ -2,8 +2,8 @@
 
 - 触发日：事件表达式包一层「由不满足变为满足」（expr.onset），实际统计起点扣掉预热期
 - 每一笔的买卖、顺延、退市、观察中见 returns.py
-- 同期对照（2026-09-14 定）：全A等权用**买入日**的股票池（剔除 ST、停牌、次新），对照股票不顺延，
-  持有期内退市的按最后价格算进去；或者换成沪深300 / 中证500 指数
+- 同期对照（2026-09-14 定）：算的范围（scope，默认全A、剔除 ST、停牌、次新）在**买入日**的等权平均，
+  对照股票不顺延，持有期内退市的按最后价格算进去；或者换成沪深300 / 中证500 指数
 - 这只股票平时的平均：统计区间里它每个有行情的交易日都当作起点，用同样的规则算，不排除触发日、不扣成本
 - 只有「完成」「退市」计入平均；P0 不做显著性检验、不给「有效」结论（§11）
 """
@@ -19,14 +19,10 @@ from litmus.data import STOCK, DataService, MissingDataError
 from litmus.expr import Evaluation, evaluate, onset, parse
 from litmus.research.results import HistoryResult, HorizonSummary, TriggerRecord
 from litmus.research.returns import COUNTED, PENDING, UNFILLED, Tape, Trade, pool_average
-from litmus.spec import DEFAULTS
-from litmus.spec.query import EventStudyOutput, QuerySpec
+from litmus.spec.query import EventStudyOutput, QuerySpec, Scope
 
 #: 触发次数少于这个数，提示样本偏少
 FEW_TRIGGERS = 20
-
-#: 全A等权对照的股票池剔除项，和股票表的默认值一致
-BENCHMARK_EXCLUDE: tuple[str, ...] = DEFAULTS["exclude"]  # type: ignore[assignment]
 
 _TAPE_FIELDS = ["open", "close", "open_limit_up", "is_limit_down"]
 
@@ -42,7 +38,7 @@ def run_event_study(spec: QuerySpec, ds: DataService) -> HistoryResult:
     trigger_days = evaluation.values.filter(pl.col("value")).get_column("date").to_list()
 
     trades = {day: {h: tape.trade(day, h) for h in output.horizons} for day in trigger_days}
-    market = _market_returns(output.benchmark, trades, coverage_start, latest, ds)
+    market = _market_returns(spec.scope, output.benchmark, trades, coverage_start, latest, ds)
     records = tuple(_record(day, trades[day], market) for day in trigger_days)
 
     samples = [day for day in tape.trade_days() if first <= day <= end]
@@ -126,6 +122,7 @@ def _record(
 
 
 def _market_returns(
+    scope: Scope,
     benchmark: str,
     trades: dict[date, dict[int, Trade]],
     coverage_start: date,
@@ -169,7 +166,12 @@ def _market_returns(
         )
     else:
         pool = ds.get_universe_mask(
-            buy_days[0], buy_days[-1], exclude=list(BENCHMARK_EXCLUDE)
+            buy_days[0],
+            buy_days[-1],
+            base=scope.base,
+            industry=scope.industry,
+            board=None if scope.board is None else scope.board.model_dump(),
+            exclude=list(scope.exclude),
         ).filter(pl.col("date").is_in(buy_days))
         prices = ds.get_fields(None, needed[0], needed[-1], ["open", "close"]).filter(
             pl.col("date").is_in(needed)

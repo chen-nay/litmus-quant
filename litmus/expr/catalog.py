@@ -16,7 +16,7 @@ from litmus.expr.operators import (
     OPERATORS,
     TIMESERIES,
 )
-from litmus.expr.parser import Call, Field, parse
+from litmus.expr.parser import Binary, Call, Field, Node, Number, parse
 
 _KIND_LABELS = {TIMESERIES: "时序", CROSS_SECTION: "横截面", ELEMENTWISE: "逐行"}
 
@@ -70,17 +70,41 @@ _RATIO_CALLS = frozenset({"Rank", "TsRank", "Pct", "PctSince"})
 RATIO = "小数百分比"
 
 
-def result_unit(text: str) -> str:
+def result_unit(text: str | Node) -> str:
     """一个表达式算出来的数该怎么显示。
 
     - 就是一个字段：用那个字段的单位（`$market_cap` → 元，`$pct_chg` → %）
     - 顶上是 Rank / TsRank / Pct / PctSince：算出来是小数，按百分比显示
+    - `x / y - 1`、`1 - x / y`：偏离、回撤这类比例，也按百分比显示（2026-09-18 实测「比最高点跌了多少」
+      写成 `1 - $close / Max($close, 1000)`，卡上显示成 0.28）
+    - 顶上是 Count：天数，按整数显示
     - 其余：没有单位，按普通数字显示
     """
-    node = parse(text)
+    node = parse(text) if isinstance(text, str) else text
     if isinstance(node, Field):
         definition = FIELDS.get(node.name)
         return definition.unit if definition else ""
     if isinstance(node, Call) and node.name in _RATIO_CALLS:
         return RATIO
+    if isinstance(node, Call) and node.name == "Count":
+        return "个"
+    if _relative(node):
+        return RATIO
     return ""
+
+
+def _relative(node: Node) -> bool:
+    """`x / y - 1` 或 `1 - x / y`。"""
+    if not (isinstance(node, Binary) and node.op == "-"):
+        return False
+    return (_divides(node.left) and _is_one(node.right)) or (
+        _is_one(node.left) and _divides(node.right)
+    )
+
+
+def _divides(node: Node) -> bool:
+    return isinstance(node, Binary) and node.op == "/"
+
+
+def _is_one(node: Node) -> bool:
+    return isinstance(node, Number) and node.value == 1

@@ -226,3 +226,18 @@ def with_is_new(
         .with_columns((nth_day <= days).fill_null(False).alias(name))
         .drop("_i", "_listed")
     )
+
+
+def with_list_days(rows: pl.DataFrame, list_dates: pl.DataFrame) -> pl.DataFrame:
+    """上市天数：上市以来的自然日天数，上市当天算第 1 天。股票列表里查不到上市日的为空。
+
+    按自然日数，不按交易日：本地交易日历从 2016 年起，更早上市的数不出交易日。
+    rows：(code, date)。list_dates：(code, list_date)。
+    """
+    listed = list_dates.select("code", "list_date").drop_nulls().unique("code")
+    days = (pl.col("date") - pl.col("list_date")).dt.total_days() + 1
+    return (
+        rows.join(listed, on="code", how="left")
+        .with_columns(days.cast(pl.Float64).alias("list_days"))
+        .drop("list_date")
+    )

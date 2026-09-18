@@ -312,6 +312,7 @@ class DataService:
 | `$is_limit_up` | 收盘涨停 | 布尔 | `daily.close` 与 `stk_limit.up_limit` | 收盘价等于涨停价 |
 | `$is_limit_down` | 收盘跌停 | 布尔 | `daily.close` 与 `stk_limit.down_limit` | 收盘价等于跌停价 |
 | `$is_new` | 次新股 | 布尔 | `stock_basic.list_date` | 上市后的前 60 个交易日，含上市当天（§2.6） |
+| `$list_days` | 上市天数 | 天 | `stock_basic.list_date` | 上市以来的自然日天数，上市当天算第 1 天。按自然日数：本地交易日历从 2016 年起，更早上市的数不出交易日（2026-09-18 加：「上市不满一个月」没有这个字段时，大模型用完 8000 token 也没写出来） |
 
 #### 板块字段
 

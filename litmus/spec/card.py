@@ -54,6 +54,7 @@ class Report:
     period: date  # 报告期
     roe: float | None
     profit_yoy: float | None
+    announced: date | None = None  # 公告日
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,8 @@ class MetricFacts:
     #: 后复权价：当天的实际收盘价，不是收盘价就是 None
     adjusted: bool = False
     raw_close: float | None = None
+    #: 财务字段：值出自哪一期财报
+    report: Report | None = None
     #: 涨跌：算的是哪一段（「今年以来」「近 20 个交易日」），同期对照（名字, 涨跌）
     period: str = ""
     benchmark: tuple[str, float | None] | None = None
@@ -143,7 +146,7 @@ def format_value(value: float | bool | None, unit: str = "", field: str | None =
         return _percent(value * 100, sign=True)
     if unit == "%":
         return _percent(value, sign=field in _SIGNED_FIELDS)
-    if unit in ("个", "股"):
+    if unit in ("个", "股", "天"):
         return _fixed(value, 0)
     return _fixed(value, 2)
 
@@ -185,6 +188,8 @@ def _note(facts: MetricFacts) -> str:
             text += f"，{window_word(facts.percentile.window)}分位也算不出"
         return text
     parts = []
+    if facts.kind == VALUE and facts.report is not None:
+        parts.append(_report_word(facts.report))
     if facts.kind == VALUE and facts.adjusted:
         parts.append(
             "后复权价"
@@ -274,7 +279,7 @@ def _sides(facts: MetricFacts) -> str:
 def missing_text(missing: Missing) -> str:
     reason = missing.reason
     if reason == NOT_LISTED:
-        return f"当天还没上市，{missing.day} 才上市"
+        return f"当天还没上市，{missing.day} 才上市" if missing.day else "当天还没上市"
     if reason == DELISTED:
         return f"{missing.day} 已经退市"
     if reason == SUSPENDED:
@@ -297,6 +302,12 @@ def missing_text(missing: Missing) -> str:
     if reason == GAPS:
         return f"最近 {missing.need} 个交易日里有 {missing.have} 天没有{missing.label}"
     return "算出来不是有限的数（比如除以 0）"
+
+
+def _report_word(report: Report) -> str:
+    """「2026 上半年财报，2026-08-21 公告」。"""
+    announced = f"，{report.announced} 公告" if report.announced else ""
+    return f"{period_word(report.period)}财报{announced}"
 
 
 def _loss(report: Report | None) -> str:

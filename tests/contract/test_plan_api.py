@@ -19,7 +19,7 @@ from litmus.data import (
     MarketStore,
     MissingDataError,
 )
-from litmus.llm import LLMClient, NameMention, PlanResult, StructuredReply
+from litmus.llm import LLMClient, StructuredReply
 from litmus.signals import load_events
 from litmus.store import JsonStore
 
@@ -70,15 +70,17 @@ def ask(client: TestClient, llm: FakeLLM, output: dict, query: str = "问题", *
     return client.post("/api/plan", json={"query": query, **extra}).json()
 
 
-STOCK_LIST = {
+TABLE = {
     "status": "ok",
-    "shape": "stock_list",
-    "as_of": "2026-09-11",
-    "filter_expr": "$amount > Mean(Ref($amount, 1), 5) * 1.4",
-    "filter_label": "放量",
-    "sort_by": "$amount / Mean(Ref($amount, 1), 5)",
-    "sort_label": "放大倍数",
-    "limit": 20,
+    "subject": {"kind": "pool"},
+    "when": {"as_of": "2026-09-11"},
+    "metrics": [{"name": "放大倍数", "expr": "$amount / Mean(Ref($amount, 1), 5)"}],
+    "output": {
+        "kind": "table",
+        "filter": {"expr": "$amount > Mean(Ref($amount, 1), 5) * 1.4", "label": "放量"},
+        "sort": {"by": "放大倍数"},
+        "limit": 20,
+    },
     "mentions": [
         {"phrase": "昨天", "field": "when.as_of"},
         {"phrase": "成交量明显放大", "field": "output.filter"},
@@ -87,16 +89,37 @@ STOCK_LIST = {
 
 HISTORY = {
     "status": "ok",
-    "shape": "stock_history",
-    "stock_mention": "茅台",
-    "stock_guess": "贵州茅台",
-    "event_id": "breakout_ma_volume",
-    "event_params": {"ma": 250},
+    "subject": {"kind": "codes", "mentions": [{"mention": "茅台", "guess": "贵州茅台"}]},
+    "output": {
+        "kind": "event_study",
+        "event": {"preset_id": "breakout_ma_volume", "params": {"ma": 250}},
+    },
     "mentions": [
         {"phrase": "茅台", "field": "subject"},
         {"phrase": "放量突破年线", "field": "output.event"},
     ],
 }
+
+CARD = {
+    "status": "ok",
+    "scope": {"board": {"mention": "农林牧渔", "guess": "农林牧渔"}},
+    "subject": {"kind": "codes", "mentions": [{"mention": "牧原", "guess": "牧原股份"}]},
+    "when": {"as_of": DAY.isoformat()},
+    "metrics": [{"name": "今年以来涨幅排名", "expr": "Rank(PctSince($close, 20251231))"}],
+    "output": {"kind": "card"},
+}
+
+
+def in_board(draft: dict, mention: str | None = None, guess: str | None = None, **board) -> dict:
+    """限定在某个行业、板块里：原话 + 猜的名字，或者照抄的代码。"""
+    named = {"mention": mention, "guess": guess} if mention else {}
+    return {**draft, "scope": {"board": {**named, **board}}}
+
+
+def naming(draft: dict, *names: tuple[str, str]) -> dict:
+    """点名看的标的换成这几个（原话, 猜的全称）。"""
+    mentions = [{"mention": mention, "guess": guess} for mention, guess in names]
+    return {**draft, "subject": {"kind": "codes", "mentions": mentions}}
 
 
 def texts(body: dict) -> dict[str | None, str]:
@@ -104,7 +127,7 @@ def texts(body: dict) -> dict[str | None, str]:
 
 
 def test_股票表_说明文字带上原话的说法(client, llm):
-    body = ask(client, llm, STOCK_LIST, query="昨天哪个股票成交量明显放大")
+    body = ask(client, llm, TABLE, query="昨天哪个股票成交量明显放大")
     assert body["status"] == "ok", body
     assert body["plan_id"].startswith("p")
     assert texts(body)["when.as_of"] == "「昨天」理解为：2026-09-11"
@@ -114,7 +137,7 @@ def test_股票表_说明文字带上原话的说法(client, llm):
 
 
 def test_确认卡上改了参数_改过的栏目不再用原话的说法(client, llm):
-    body = ask(client, llm, STOCK_LIST)
+    body = ask(client, llm, TABLE)
     spec = {**body["spec"], "when": {"as_of": "2026-09-10"}}
     checked = client.post("/api/check", json={"spec": spec, "plan_id": body["plan_id"]}).json()
     assert checked["status"] == "ok", checked
@@ -139,32 +162,23 @@ def test_大模型没记原话的说法_股票和概念板块的原话照样用�
 
     if CONCEPT not in _ds.available_targets():
         return
-    body = ask(client, llm, {**STOCK_LIST, "board_mention": "光模块", "board_guess": "光通信"})
+    body = ask(client, llm, in_board(TABLE, "光模块", "光通信"))
     assert body["status"] == "ok", body
     assert texts(body)["scope.board"].startswith("「光模块」理解为：光通信")
 
 
-def test_卡不走确认卡_提问这一步就算完(monkeypatch, client):
-    """大模型第 6 步才会填卡，这里直接给一份卡的查询条件，验后面这一段路。"""
-    card = {
-        "scope": {"target": "stock", "industry": "农林牧渔"},
-        "subject": {"kind": "codes"},
-        "when": {"as_of": DAY.isoformat()},
-        "metrics": [{"name": "今年以来涨幅排名", "expr": "Rank(PctSince($close, 20251231))"}],
-        "output": {"kind": "card"},
-    }
-    stock = NameMention("牧原", "牧原股份")
-    monkeypatch.setattr(
-        "litmus.api.routes.plan.plan",
-        lambda *args, **kwargs: PlanResult("ok", spec=card, stock=stock),
-    )
-    body = client.post("/api/plan", json={"query": "牧原在农林牧渔里涨幅排第几"}).json()
+def test_卡不走确认卡_提问这一步就算完(client, llm):
+    body = ask(client, llm, CARD, query="牧原在农林牧渔里今年涨幅排第几")
 
     assert body["status"] == "done", body
     assert body["result"]["kind"] == "card"
     assert body["result"]["items"][0]["name"] == "牧原股份"
     assert body["run_id"].startswith("r") and body["plan_id"].startswith("p")
     assert not body["assumptions"]  # 说明跟着结果走，在卡底下
+    footer = {item["field"]: item for item in body["result"]["assumptions"]}
+    assert footer["scope.base"]["default"] and footer["scope.exclude"]["default"]
+    # 原话就是行业名，不写「「农林牧渔」理解为：农林牧渔」
+    assert footer["scope.industry"]["text"].startswith("算的范围：农林牧渔（申万一级行业")
 
     run = client.get(f"/api/run/{body['run_id']}").json()
     assert run["plan_id"] == body["plan_id"] and run["status"] == "done"
@@ -172,15 +186,58 @@ def test_卡不走确认卡_提问这一步就算完(monkeypatch, client):
     assert steps[-2:] == ["run", "respond"]
 
 
+def test_卡_点名两只股票_各出一份(client, llm):
+    draft = naming(CARD, ("牧原", "牧原股份"), ("温氏", "温氏股份"))
+    body = ask(client, llm, {**draft, "scope": {}}, query="牧原跟温氏今年谁涨得多")
+    assert body["status"] == "done", body
+    assert [item["name"] for item in body["result"]["items"]] == ["牧原股份", "温氏股份"]
+
+
+def test_点名的板块只包含对上_不直接用_让用户选(client, llm):
+    """2026-09-18 实测：「新能源」只包含在「新能源车」里就直接用了，看的其实是另一个板块。"""
+    draft = {**naming(CARD, ("银", "银")), "scope": {"target": "sw_industry"}}
+    body = ask(client, llm, draft)
+    assert body["status"] == "needs_clarification", body
+    assert body["message"].startswith("没有叫「银」的申万一级行业，名字相近的是下面这些")
+    assert "银行" in {c["name"] for c in body["board_candidates"]}
+
+
+def test_两种说法指的是同一只_只留一个代码(client, llm):
+    """2026-09-18 实测：「茅台每次放量突破年线之后」大模型把茅台点了两次，统计因此报「只支持点名一只」。"""
+    body = ask(client, llm, naming(HISTORY, ("茅台", "贵州茅台"), ("贵州茅台", "贵州茅台")))
+    assert body["status"] == "ok", body
+    assert body["spec"]["subject"]["codes"] == ["600519.SH"]
+
+
+def test_卡_其中一只对应多只股票_查准的留着_让用户选另一只(client, llm):
+    draft = naming(CARD, ("牧原", "牧原股份"), ("平安", "中国平安"))
+    body = ask(client, llm, {**draft, "scope": {}})
+    assert body["status"] == "needs_clarification", body
+    assert body["message"].startswith("「平安」对应")
+    assert body["spec"]["subject"]["codes"] == ["002714.SZ"]
+
+
+def test_卡_点名的是板块_按那一类板块查(client, llm):
+    draft = {
+        **naming(CARD, ("银行", "银行")),
+        "scope": {"target": "sw_industry"},
+        "metrics": [{"name": "近 20 日涨幅排名", "expr": "Rank(Pct($close, 20))"}],
+    }
+    body = ask(client, llm, draft, query="银行最近 20 天在申万行业里涨幅排第几")
+    assert body["status"] == "done", body
+    item = body["result"]["items"][0]
+    assert item["name"] == "银行" and "个）" in item["rows"][0]["text"]
+
+
 def test_个股回看_平安对应多只股票_让用户选(client, llm):
-    body = ask(client, llm, {**HISTORY, "stock_mention": "平安", "stock_guess": "中国平安"})
+    body = ask(client, llm, naming(HISTORY, ("平安", "中国平安")))
     assert body["status"] == "needs_clarification", body
     assert {"000001.SZ", "601318.SH", "001359.SZ"} <= {c["code"] for c in body["stock_candidates"]}
-    assert "target" not in body["spec"]
+    assert "codes" not in body["spec"]["subject"]  # 还没选
 
 
 def test_没找到的股票_让用户换个说法(client, llm):
-    body = ask(client, llm, {**HISTORY, "stock_mention": "不存在的公司", "stock_guess": "也不存在"})
+    body = ask(client, llm, naming(HISTORY, ("不存在的公司", "也不存在")))
     assert body["status"] == "needs_clarification"
     assert "没找到「不存在的公司」" in body["message"]
 
@@ -188,7 +245,7 @@ def test_没找到的股票_让用户换个说法(client, llm):
 def test_选股限定概念板块_原话查不到用猜的名字(client, llm):
     if CONCEPT not in _ds.available_targets():
         pytest.skip("概念板块不可用")
-    body = ask(client, llm, {**STOCK_LIST, "board_mention": "光模块", "board_guess": "光通信"})
+    body = ask(client, llm, in_board(TABLE, "光模块", "光通信"))
     assert body["status"] == "ok", body
     board = next(b for b in _ds.list_boards(CONCEPT) if b.name == "光通信")
     assert body["spec"]["scope"]["board"]["code"] == board.code
@@ -196,7 +253,7 @@ def test_选股限定概念板块_原话查不到用猜的名字(client, llm):
 
 def test_半导体板块_能对上申万二级就用_只包含对上第三代半导体时让用户选(client, llm):
     """2026-09-15 实测：「半导体板块」只包含对上「第三代半导体」，直接用了它，范围窄得离谱。"""
-    body = ask(client, llm, {**STOCK_LIST, "board_mention": "半导体板块", "board_guess": "芯片"})
+    body = ask(client, llm, in_board(TABLE, "半导体板块", "芯片"))
     if SW_INDUSTRY_L2 in _ds.available_targets():
         assert body["status"] == "ok", body
         assert body["spec"]["scope"]["industry"] == "半导体"
@@ -211,7 +268,7 @@ def test_半导体板块_能对上申万二级就用_只包含对上第三代半
 def test_概念板块猜了几个名字_都对得上就让用户选(client, llm):
     if CONCEPT not in _ds.available_targets():
         pytest.skip("概念板块不可用")
-    output = {**STOCK_LIST, "board_mention": "光模块", "board_guess": "光通信、CPO概念"}
+    output = in_board(TABLE, "光模块", "光通信、CPO概念")
     body = ask(client, llm, output)
     assert body["status"] == "needs_clarification", body
     assert {"光通信", "CPO概念"} <= {c["name"] for c in body["board_candidates"]}
@@ -220,14 +277,14 @@ def test_概念板块猜了几个名字_都对得上就让用户选(client, llm)
 def test_概念板块原话和猜测名都查不到_列出名字相近的让用户选(client, llm):
     if CONCEPT not in _ds.available_targets():
         pytest.skip("概念板块不可用")
-    output = {**STOCK_LIST, "board_mention": "机器人灵巧手", "board_guess": "没有这个板块"}
+    output = in_board(TABLE, "机器人灵巧手", "没有这个板块")
     body = ask(client, llm, output)
     assert body["status"] == "needs_clarification", body
     assert body["message"].startswith("没找到叫「机器人灵巧手」的行业或板块")
     assert "机器人概念" in {c["name"] for c in body["board_candidates"]}
 
     # 连名字相近的都没有：不给接口地址，让用户换个说法或者去表单里选
-    output = {**STOCK_LIST, "board_mention": "光模块", "board_guess": "没有这个板块"}
+    output = in_board(TABLE, "光模块", "没有这个板块")
     body = ask(client, llm, output)
     assert (body["status"], body["board_candidates"]) == ("needs_clarification", [])
     assert "打开表单" in body["message"] and "/api/" not in body["message"]
@@ -291,7 +348,7 @@ def test_确认卡上改条件_把现在的条件交给大模型_选过的概念
     first = ask(
         client,
         llm,
-        {**STOCK_LIST, "board_mention": "光模块", "board_guess": "光通信"},
+        in_board(TABLE, "光模块", "光通信"),
         query="光模块里最近放量的股票",
     )
     assert first["status"] == "ok", first
@@ -300,7 +357,7 @@ def test_确认卡上改条件_把现在的条件交给大模型_选过的概念
     second = ask(
         client,
         llm,
-        {**STOCK_LIST, "limit": 5, "board_code": board.code},
+        in_board({**TABLE, "output": {**TABLE["output"], "limit": 5}}, code=board.code),
         query="改成前 5",
         previous_plan_id=first["plan_id"],
         spec=first["spec"],
@@ -323,11 +380,16 @@ def test_确认卡上改条件_股票照抄代码_确认卡上不写成原话(cl
     assert texts(first)["subject"].startswith("「茅台」理解为")
 
     code = first["spec"]["subject"]["codes"][0]
-    output = {key: value for key, value in HISTORY.items() if not key.startswith("stock_")}
+    output = {**HISTORY["output"], "horizons": [5, 10]}
     second = ask(
         client,
         llm,
-        {**output, "stock_code": code, "horizons": [5, 10], "mentions": []},
+        {
+            **HISTORY,
+            "subject": {"kind": "codes", "codes": [code]},
+            "output": output,
+            "mentions": [],
+        },
         query="看 5 天和 10 天",
         previous_plan_id=first["plan_id"],
         spec=first["spec"],
@@ -353,10 +415,10 @@ def test_澄清之后追问_把原问题和回答一起交给大模型(client, l
     assert first["questions"] == [question]
     output = {
         "status": "ok",
-        "shape": "board_list",
-        "board_type": "sw_industry",
-        "sort_by": "Pct($close, 20)",
-        "sort_label": "20 日涨幅",
+        "scope": {"target": "sw_industry"},
+        "subject": {"kind": "pool"},
+        "metrics": [{"name": "20 日涨幅", "expr": "Pct($close, 20)"}],
+        "output": {"kind": "table", "sort": {"by": "20 日涨幅"}},
     }
     second = ask(client, llm, output, query="20 个交易日", previous_plan_id=first["plan_id"])
     assert second["status"] == "ok", second
@@ -365,7 +427,7 @@ def test_澄清之后追问_把原问题和回答一起交给大模型(client, l
 
 
 def test_大模型给的日期不是交易日_转成澄清(client, llm):
-    body = ask(client, llm, {**STOCK_LIST, "as_of": "2026-09-06"})
+    body = ask(client, llm, {**TABLE, "when": {"as_of": "2026-09-06"}})
     assert body["status"] == "needs_clarification"
     assert "不是交易日" in body["message"]
 

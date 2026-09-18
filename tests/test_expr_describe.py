@@ -27,6 +27,7 @@ from litmus.expr.operators import OPERATORS
         ("Mean($close - $open, 5)", "近 5 日（收盘价 - 开盘价）均值"),
         ("Ref($close, 1)", "前一交易日的收盘价"),
         ("Ref($close, 5)", "5 个交易日前的收盘价"),
+        ("Mean(Ref($amount, 5), 20)", "5 个交易日前往前数 20 日的成交额均值"),
         ("EMA($close, 12) - EMA($close, 26)", "收盘价的 12 日指数均线 - 收盘价的 26 日指数均线"),
         ("Count($is_limit_up, 3) == 3", "近 3 日里收盘涨停的天数 = 3"),
         ("Std($pct_chg, 20)", "近 20 日当日涨跌幅标准差"),
@@ -84,3 +85,17 @@ def test_全部算子都有说法_不会原样吐出算子名():
     assert set(samples) == set(OPERATORS)
     for name, expr in samples.items():
         assert f"{name}（" not in describe(expr), expr
+
+
+# ── 算出来的数怎么显示 ──────────────────────────────────────────
+
+
+def test_偏离和回撤按百分比显示_天数按整数():
+    """2026-09-18 实测「比最高点跌了多少」写成 1 - $close / Max($close, 1000)，卡上显示成 0.28。"""
+    from litmus.expr import RATIO, result_unit
+
+    assert result_unit("1 - $close / Max($close, 1000)") == RATIO
+    assert result_unit("$close / Mean($close, 250) - 1") == RATIO
+    assert result_unit("Count($is_limit_up, 10)") == "个"
+    assert result_unit("$close / Mean($close, 250)") == ""  # 倍数不是涨跌
+    assert result_unit("$market_cap") == "元"

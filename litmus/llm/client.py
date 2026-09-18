@@ -40,6 +40,14 @@ class LLMError(RuntimeError):
     """调用大模型失败：没配、连不上、超时、认证失败、没按格式返回。"""
 
 
+class LLMFormatError(LLMError):
+    """调通了，但没有调用 output 工具：直接用文字答了，或者思考太长把输出额度用完了。
+
+    2026-09-18 实测：同一个问题连问三次，一次 stop_reason=end_turn 没有工具调用，另两次正常。
+    偶发的，planner 会再试一次；超时、连不上不再试，那会让用户干等两倍时间。
+    """
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     provider: Provider
@@ -149,7 +157,7 @@ class AnthropicClient(LLMClient):
         seconds = time.perf_counter() - started
         block = next((b for b in response.content if getattr(b, "type", None) == "tool_use"), None)
         if block is None:
-            raise LLMError(f"大模型没有按格式返回（stop_reason={response.stop_reason}）")
+            raise LLMFormatError(f"大模型没有按格式返回（stop_reason={response.stop_reason}）")
         usage = getattr(response, "usage", None)
         return StructuredReply(
             data=dict(block.input),

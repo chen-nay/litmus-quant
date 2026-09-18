@@ -4,7 +4,14 @@ LLM 不碰数字，也不写确认卡上的说明文字——那些由 spec 用�
 其他模块只从这里 import（§1.2 第 3 条）；大模型厂商的 SDK 只能出现在这个模块里。
 """
 
-from litmus.llm.client import AnthropicClient, LLMClient, LLMConfig, LLMError, StructuredReply
+from litmus.llm.client import (
+    AnthropicClient,
+    LLMClient,
+    LLMConfig,
+    LLMError,
+    LLMFormatError,
+    StructuredReply,
+)
 from litmus.llm.models import (
     CLARIFY,
     FAILED,
@@ -33,6 +40,7 @@ __all__ = [
     "LLMClient",
     "LLMConfig",
     "LLMError",
+    "LLMFormatError",
     "NameMention",
     "PlanContext",
     "PROVIDERS",

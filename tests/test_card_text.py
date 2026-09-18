@@ -195,6 +195,12 @@ def test_后复权价写出当天的实际成交价():
     assert render_row(facts)[1] == "后复权价，当天实际收盘价 41.08 元"
 
 
+def test_财务数写出是哪一期财报():
+    report = Report(date(2026, 6, 30), -15.4, -157.7172, announced=date(2026, 8, 21))
+    facts = MetricFacts(kind=VALUE, value=-157.7172, unit="%", field="profit_yoy", report=report)
+    assert render_row(facts) == ("-157.72%", "2026 上半年财报，2026-08-21 公告")
+
+
 # ── 空值的原因 ──────────────────────────────────────────────────
 
 

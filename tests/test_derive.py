@@ -15,6 +15,7 @@ from litmus.data.derive import (
     with_ex_div,
     with_finance,
     with_is_new,
+    with_list_days,
 )
 
 D = date
@@ -279,3 +280,15 @@ def test_上市早于交易日历起点的不算次新():
 
 def test_查不到上市日的不算次新():
     assert is_new(rows("A", D(2026, 1, 5)), None) == [False]
+
+
+def test_上市天数_上市当天算第1天_按自然日数_查不到上市日的为空():
+    rows = pl.DataFrame(
+        {"code": ["A", "A", "B"], "date": [D(2026, 1, 6), D(2026, 2, 5), D(2026, 1, 6)]}
+    )
+    listing = pl.DataFrame(
+        {"code": ["A", "B"], "list_date": [D(2026, 1, 6), None]},
+        schema={"code": pl.String, "list_date": pl.Date},
+    )
+    out = with_list_days(rows, listing).sort("code", "date")
+    assert out.get_column("list_days").to_list() == [1.0, 31.0, None]

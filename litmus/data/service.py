@@ -25,6 +25,7 @@ from litmus.data.derive import (
     with_ex_div,
     with_finance,
     with_is_new,
+    with_list_days,
 )
 from litmus.data.fields import (
     CONCEPT,
@@ -69,7 +70,7 @@ from litmus.data.universe import BASES, industry_members, industry_of, universe_
 
 #: 读的时候现算、不在日频面板里的股票字段（规则见 derive.py）
 DERIVED_FIELDS = frozenset(
-    {*FINANCE_FIELDS, "is_report_date", "is_forecast_date", "is_ex_div", "is_new"}
+    {*FINANCE_FIELDS, "is_report_date", "is_forecast_date", "is_ex_div", "is_new", "list_days"}
 )
 
 #: 要和每只股票的上一条行情比才算得出来的字段
@@ -433,6 +434,8 @@ class DataService:
                 )
         if "is_new" in wanted:
             rows = with_is_new(rows, list_dates, self.get_trading_calendar(date.min, date.max))
+        if "list_days" in wanted:
+            rows = with_list_days(rows, list_dates)
         if wanted & FINANCE_FIELDS.keys():
             fina = self._scan_table(FINA_INDICATOR_TABLE)
             if codes is not None:

@@ -157,10 +157,75 @@ def test_A201_解释行写涨了多少_并和同期行业比():
     assert note == f"今年以来 {mine * 100:.2f}%，同期农林牧渔行业指数 {industry * 100:.2f}%"
 
 
+def test_跑赢沪深300了吗_涨跌和指数比():
+    raw = {
+        "subject": {"kind": "codes", "codes": [MUYUAN]},
+        "when": {"as_of": DAY.isoformat()},
+        "metrics": [{"name": "今年以来涨幅", "expr": "PctSince($close, 20251231)"}],
+        "output": {"kind": "card", "benchmark": "index:000300.SH"},
+    }
+    spec, issues = check_spec(raw, _ds, _events)
+    assert spec is not None, [issue_text(issue) for issue in issues]
+    _, note = rows(run_card(spec, _ds))["今年以来涨幅"]
+    index = _ds.get_index_daily("000300.SH", date(2025, 12, 1), DAY)
+    base = index.filter(pl.col("date") <= date(2025, 12, 31)).get_column("close")[-1]
+    now = index.filter(pl.col("date") == DAY).get_column("close").item()
+    assert note == f"同期沪深300 指数 {(now / base - 1) * 100:+.2f}%"
+
+
+def test_当日涨跌幅也和同期对照比():
+    """2026-09-18 实测：「跑赢沪深 300 了吗」写成 $pct_chg，卡上只剩一个数，没有对照。"""
+    raw = {
+        "subject": {"kind": "codes", "codes": [MUYUAN]},
+        "when": {"as_of": DAY.isoformat()},
+        "metrics": [{"name": "当日涨跌", "expr": "$pct_chg"}],
+        "output": {"kind": "card", "benchmark": "index:000300.SH"},
+    }
+    spec, _ = check_spec(raw, _ds, _events)
+    text, note = rows(run_card(spec, _ds))["当日涨跌"]
+    closes = _ds.get_index_daily("000300.SH", date(2026, 9, 1), DAY).get_column("close")
+    assert text == f"{value('$pct_chg'):+.2f}%"
+    assert note == f"同期沪深300 指数 {(closes[-1] / closes[-2] - 1) * 100:+.2f}%"
+
+    industry = card([{"name": "当日涨跌", "expr": "$pct_chg"}])
+    daily = value("$pct_chg", code="801010.SI", target="sw_industry")
+    assert rows(industry)["当日涨跌"][1] == f"同期农林牧渔行业指数 {daily:+.2f}%"
+
+
 def test_ST股照样出卡_写明被算的范围剔除了():
     result = card(A201, codes=[ST_STOCK], industry="农林牧渔")
     text, note = rows(result)["今年以来涨幅排名"]
     assert (text, note) == ("无", "当天是 ST 股，算的范围把它剔除了，不参与排名")
+
+
+def test_查不到的代码_限定了行业也照样报出来():
+    raw = {
+        "scope": {"target": "stock", "industry": "农林牧渔"},
+        "subject": {"kind": "codes", "codes": ["999999.SZ"]},
+        "when": {"as_of": DAY.isoformat()},
+        "metrics": A201,
+        "output": {"kind": "card"},
+    }
+    spec, issues = check_spec(raw, _ds, _events)
+    assert spec is None
+    assert [issue_text(issue) for issue in issues] == [
+        "subject.codes：999999.SZ：本地没有这个股票代码，代码要带交易所后缀，如 600519.SH"
+    ]
+
+
+def test_不在这个行业里的股票_报出来():
+    spec, issues = check_spec(
+        {
+            "scope": {"target": "stock", "industry": "银行"},
+            "subject": {"kind": "codes", "codes": [MUYUAN]},
+            "when": {"as_of": DAY.isoformat()},
+            "metrics": A201,
+            "output": {"kind": "card"},
+        },
+        _ds,
+        _events,
+    )
+    assert spec is None and "不在算的范围里" in issue_text(issues[0])
 
 
 def test_停牌的照样出卡_写明停牌前最后一个交易日():

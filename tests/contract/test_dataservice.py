@@ -372,6 +372,11 @@ def test_最新一期财报_按公告日截到当天(ds):
     assert before["period"] == D(2026, 3, 31)
 
 
+def test_上市天数(ds):
+    rows = ds.get_fields(["002714.SZ"], D(2026, 9, 11), D(2026, 9, 11), ["list_days"])
+    assert rows.get_column("list_days").item() == (D(2026, 9, 11) - D(2014, 1, 28)).days + 1
+
+
 def test_整段停牌的股票_往前带的行照样给(ds):
     """603159.SH 2026-09-11 停牌。卡要说出停牌前最后一个交易日，所以这一行不能被滤掉。"""
     rows = ds.get_fields(["603159.SH"], D(2026, 9, 11), D(2026, 9, 11), ["close"], lookback=1)

@@ -23,6 +23,8 @@ from litmus.spec.confirm import (
 )
 from litmus.spec.defaults import (
     BENCHMARKS,
+    CARD_BENCHMARKS,
+    DEFAULT_CARD_METRICS,
     DEFAULTS,
     MAX_COST_BPS,
     MAX_HORIZON,
@@ -50,7 +52,9 @@ from litmus.spec.query import (
 __all__ = [
     "AFTER",
     "BENCHMARKS",
+    "CARD_BENCHMARKS",
     "DEFAULTS",
+    "DEFAULT_CARD_METRICS",
     "EVENT",
     "HOW",
     "MAX_COST_BPS",

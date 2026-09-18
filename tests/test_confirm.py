@@ -174,6 +174,12 @@ def test_点名看谁时_算的范围仍然写出来_排名在这里面排():
     assert grouped[WHO][1] == "算的范围：农林牧渔（申万一级行业，116 只）"
 
 
+def test_统计的同期对照是算的范围的等权平均():
+    raw = {**STUDY, "scope": {"target": "stock", "industry": "农林牧渔", "exclude": ["ST"]}}
+    after = lines(raw, STUDY_FACTS)[AFTER]
+    assert "同期对照：买入日农林牧渔等权平均（剔除 ST / *ST，持有期内退市的按最后价格算）" in after
+
+
 # ── 卡底下的「怎么算的」 ────────────────────────────────────────
 
 CARD = {
@@ -221,10 +227,34 @@ def test_卡不排名时不写算的范围_池子影响不到卡上的数():
     assert WHO not in lines(raw, facts)
 
 
+def test_卡的涨跌换成和指数比时写出来():
+    raw = {**CARD, "output": {"kind": "card", "benchmark": "index:000300.SH"}}
+    assert "涨跌的同期对照：沪深300 指数" in lines(raw, CARD_FACTS)[WHAT]
+    assert not any("同期对照" in text for text in lines(CARD, CARD_FACTS)[WHAT])
+
+
 def test_卡上指标的中文和名字一样时不重复写():
     raw = {**CARD, "metrics": [{"name": "市净率", "expr": "$pb"}]}
     facts = Facts(metric_texts={"市净率": "市净率"})
     assert WHAT not in lines(raw, facts)
+
+
+def test_条件用到上市时间_又默认剔除了次新股_说出来():
+    raw = {
+        **TABLE,
+        "output": {
+            "kind": "table",
+            "filter": {"expr": "$list_days <= 30"},
+            "sort": {"by": "今年以来涨幅"},
+        },
+    }
+    facts = Facts(pool_size=5000, uses_listing=True)
+    assert (
+        "条件里用到了上市时间，但上市不满 60 个交易日的股票已经剔除了：要看次新股，把这一项去掉"
+        in lines(raw, facts)[WHO]
+    )
+    kept = {**raw, "scope": {"target": "stock", "exclude": ["ST", "suspended"]}}
+    assert not any("上市时间" in text for text in lines(kept, facts)[WHO])
 
 
 def test_看哪天_回看区间写出实际起点():
@@ -305,7 +335,9 @@ def test_怎么算这一组_四条都在且默认值标对():
     after = lines(STUDY, STUDY_FACTS)[AFTER]
     assert after[0] == "持有天数：5、20、60 个交易日，从买入日起算"
     assert "买入价是触发日下一个交易日的开盘价" in after[1]
-    assert after[2].startswith("同期对照：买入日全A等权平均")
+    assert after[2] == (
+        "同期对照：买入日全A等权平均（剔除 ST / *ST、停牌、上市不满 60 个交易日，持有期内退市的按最后价格算）"
+    )
     assert after[3].startswith("交易成本：0.30%，买卖双边合计")
     assert all(text in defaults(STUDY, STUDY_FACTS) for text in (after[0], after[2], after[3]))
 

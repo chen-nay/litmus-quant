@@ -86,13 +86,11 @@ class _Describer:
         name, args = node.name, node.args
         if len(args) == 2 and name in _WINDOW_WORDS:
             subject, word, n = args[0], _WINDOW_WORDS[name], self.text(args[1])
-            if (
-                isinstance(subject, Call)
-                and subject.name == "Ref"
-                and len(subject.args) == 2
-                and self.text(subject.args[1]) == "1"
-            ):
-                return f"前 {n} 日{self._arg(subject.args[0])}{word}（不含当天）"
+            if isinstance(subject, Call) and subject.name == "Ref" and len(subject.args) == 2:
+                inner, shift = self._arg(subject.args[0]), self.text(subject.args[1])
+                if shift == "1":
+                    return f"前 {n} 日{inner}{word}（不含当天）"
+                return f"{shift} 个交易日前往前数 {n} 日的{inner}{word}"
             return f"近 {n} 日{self._arg(subject)}{word}"
         if len(args) == 2:
             x, y = self._arg(args[0]), self.text(args[1])

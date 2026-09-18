@@ -1,8 +1,9 @@
-"""第 7d 步：真实大模型 + 本地真实数据，按 ARCHITECTURE §9 第 7 步的验收标准逐条问一遍。
+"""真实大模型 + 本地真实数据，把代表性的问题逐条问一遍（DESIGN.md §7 第 6 步）。
 
-- 大模型的输出每次不完全一样：只核对验收要的结构（形状、股票代码、事件、状态、候选、默认值），不核对措辞
+- 大模型的输出每次不完全一样：只核对验收要的结构（形态、代码、事件、状态、候选、默认值），不核对措辞
 - 同一个问句只问一次（模块内缓存）。一次十几到几十秒，整个文件十来次调用、几分钟。平时不跑（Makefile 的 OFFLINE）
-- 只调大模型和 /api/check，不计算结果、不同步。提问记录写临时目录
+- 表和统计只到确认卡（/api/plan、/api/check），不计算；卡提问时就算完，数据量是一只到几只股票。
+  不同步，提问、运行记录写临时目录
 - 没配好大模型、本地没有数据就整个跳过
 
 跑法：uv run pytest tests/test_plan_live.py -v -s   （-s 打出每个问句的耗时、状态、说明文字）
@@ -61,6 +62,13 @@ class Asker:
             print(f"    {body['message']}")
         for item in body["assumptions"]:
             print(f"    {'［默认］' if item['default'] else '      '}{item['text']}")
+        for card in (body.get("result") or {}).get("items", []):
+            print(f"    卡：{card['name']}（{card['code']}）")
+            for row in card["rows"]:
+                print(
+                    f"      {row['name']}：{row['text']}"
+                    + (f" └ {row['note']}" if row["note"] else "")
+                )
         for candidate in body["stock_candidates"] + body["board_candidates"]:
             print(f"    候选：{candidate['name']}（{candidate['code']}，{candidate['note']}）")
         for question in body["questions"]:
@@ -98,41 +106,59 @@ def texts(body: dict) -> dict[str | None, str]:
     return {field: item["text"] for field, item in items(body).items()}
 
 
-# ── 三种形状 ────────────────────────────────────────────────────
+def metric(spec: dict, name: str) -> str:
+    """某个指标的公式，去掉空格。"""
+    return next(m["expr"] for m in spec["metrics"] if m["name"] == name).replace(" ", "")
+
+
+def run_spec(client: TestClient, body: dict) -> dict:
+    """卡提问时就算完了，查询条件在运行记录里。"""
+    return client.get(f"/api/run/{body['run_id']}").json()["spec"]
+
+
+def since_new_year() -> str:
+    year = date.today().year
+    return f"{_ds.get_trading_calendar(date(year - 1, 12, 1), date(year - 1, 12, 31))[-1]:%Y%m%d}"
+
+
+# ── 表 ──────────────────────────────────────────────────────────
 
 
 def test_股票表(ask):
     body = ask("最近一个交易日哪些股票成交额比前一周平均高 40% 以上？按放大倍数排前 20")
     assert body["status"] == "ok", body
     spec = body["spec"]
-    assert (spec["shape"], spec["as_of"], spec["limit"]) == ("stock_list", _last.isoformat(), 20)
-    assert "$amount" in spec["filter"]["expr"] and "1.4" in spec["filter"]["expr"]
-    assert "$amount" in spec["sort"]["by"]
+    assert (spec["output"]["kind"], spec["when"]["as_of"]) == ("table", _last.isoformat())
+    assert spec["output"]["limit"] == 20
+    assert (
+        "$amount" in spec["output"]["filter"]["expr"] and "1.4" in spec["output"]["filter"]["expr"]
+    )
+    assert "$amount" in metric(spec, spec["output"]["sort"]["by"])
 
 
 def test_板块表(ask):
     body = ask("最近 5 个交易日涨得最多的申万一级行业，前 5 名")
     assert body["status"] == "ok", body
     spec = body["spec"]
-    assert (spec["shape"], spec["board_type"], spec["limit"]) == ("board_list", "sw_industry", 5)
+    assert (spec["scope"]["target"], spec["output"]["limit"]) == ("sw_industry", 5)
     # Pct($close, 5) 或 Sum($pct_chg, 5)；2026-09-15 实测写成过 Pct($close, 4)
-    assert spec["sort"]["order"] == "desc" and ",5)" in spec["sort"]["by"].replace(" ", "")
+    assert spec["output"]["sort"]["order"] == "desc"
+    assert ",5)" in metric(spec, spec["output"]["sort"]["by"])
 
 
 def test_今年以来_交易日数用代码算好的(ask):
     """2026-09-15 实测：不给日期换算表时，大模型自己数交易日，8000 个 token 用完也没给出结果。"""
     body = ask("今年以来涨幅最大的 50 只股票")
     assert body["status"] == "ok", body
-    year = date.today().year
-    anchor = _ds.get_trading_calendar(date(year - 1, 12, 1), date(year - 1, 12, 31))[-1]
-    assert body["spec"]["sort"]["by"].replace(" ", "") == f"PctSince($close,{anchor:%Y%m%d})"
+    spec = body["spec"]
+    assert metric(spec, spec["output"]["sort"]["by"]) == f"PctSince($close,{since_new_year()})"
 
 
 def test_小市值_没给数字按默认30亿_标成默认值(ask):
     """2026-09-15 实测：没有默认值时大模型自己编门槛，名字写 30 亿、表达式写成了 300 亿。"""
     body = ask("小市值股票里昨天涨停的有哪些")
     assert body["status"] == "ok", body
-    row = items(body)["filter"]
+    row = items(body)["output.filter"]
     assert "总市值 < 30 亿" in row["text"] and row["default"], row
 
 
@@ -140,21 +166,68 @@ def test_外号对不上的概念板块_能用上或者从候选里选(ask):
     """2026-09-15 实测：「光模块」查不到时只回一句接口地址，本地其实有「光通信」「CPO概念」。"""
     body = ask("光模块概念里最近 20 个交易日涨幅最大的股票")
     if body["status"] == "ok":
-        assert body["spec"]["universe"]["board"]["code"], body
+        assert body["spec"]["scope"]["board"]["code"], body
     else:
         assert body["status"] == "needs_clarification", body
         assert body["board_candidates"] or "打开表单" in body["message"], body
 
 
-def test_个股回看_没说的栏目用默认值并标出来(ask):
+# ── 卡：提问时就算完 ────────────────────────────────────────────
+
+
+def test_卡_A101_市盈率和两年分位_要一句总结(ask, client):
+    body = ask("牧原股份现在市盈率是多少？在最近 2 年的历史上，市盈率当前属于高，还是属于低")
+    assert body["status"] == "done", body
+    item = body["result"]["items"][0]
+    assert (item["code"], item["name"]) == ("002714.SZ", "牧原股份")
+    spec = run_spec(client, body)
+    exprs = [m["expr"].replace(" ", "") for m in spec["metrics"]]
+    assert "$pe_ttm" in exprs and "TsRank($pe_ttm,500)" in exprs
+    assert spec["narrate"] is True
+
+
+def test_卡_只问一个数_不要总结(ask, client):
+    body = ask("牧原股份现在市盈率多少？")
+    assert body["status"] == "done", body
+    assert run_spec(client, body)["narrate"] is False
+
+
+def test_卡_A201_算的范围和看的对象不是一回事(ask, client):
+    body = ask("牧原股份今年以来的涨幅在农林牧渔里排第几？")
+    assert body["status"] == "done", body
+    spec = run_spec(client, body)
+    assert spec["scope"]["industry"] == "农林牧渔" and spec["subject"]["codes"] == ["002714.SZ"]
+    assert "Rank(" in spec["metrics"][0]["expr"]
+    assert "名（共" in body["result"]["items"][0]["rows"][0]["text"]
+
+
+def test_卡_两只股票对比(ask):
+    body = ask("牧原股份跟温氏股份，今年谁涨得多？")
+    assert body["status"] == "done", body
+    assert [item["code"] for item in body["result"]["items"]] == ["002714.SZ", "300498.SZ"]
+
+
+def test_卡_开放问题用默认指标组_要一句总结(ask, client):
+    body = ask("牧原股份最近走势如何？")
+    assert body["status"] == "done", body
+    spec = run_spec(client, body)
+    assert len(spec["metrics"]) >= 4 and spec["narrate"] is True
+
+
+# ── 统计 ────────────────────────────────────────────────────────
+
+
+def test_统计_没说的栏目用默认值并标出来(ask):
     body = ask(HISTORY)
     assert body["status"] == "ok", body
     spec = body["spec"]
-    assert (spec["shape"], spec["target"]["code"]) == ("stock_history", "600519.SH")
-    event = spec["event"]
+    assert (spec["output"]["kind"], spec["subject"]["codes"]) == ("event_study", ["600519.SH"])
+    event = spec["output"]["event"]
     assert (event["preset_id"], event["params"]["ma"]) == ("breakout_ma_volume", 250)
-    assert texts(body)["target"] == "「茅台」理解为：贵州茅台（600519.SH）"
-    assert {"time_range", "horizons", "benchmark", "cost_bps"} <= set(spec["defaults_used"])
+    assert texts(body)["subject"] == "「茅台」理解为：贵州茅台（600519.SH）"
+    assert {"when", "output.horizons", "output.benchmark", "output.cost_bps"} <= set(
+        spec["defaults_used"]
+    )
 
 
 # ── 拦截、候选、追问、改写建议 ──────────────────────────────────
@@ -176,13 +249,13 @@ def test_平安_对应多只股票_选一只之后出确认卡(ask, client):
     assert body["status"] == "needs_clarification", body
     assert {"000001.SZ", "601318.SH"} <= {c["code"] for c in body["stock_candidates"]}
 
-    # 页面上点候选：只填代码（web/src/planFlow.ts 的 withStock）
-    spec = {**body["spec"], "target": {**body["spec"].get("target", {}), "code": "601318.SH"}}
+    # 页面上点候选：只填代码
+    spec = {**body["spec"], "subject": {"kind": "codes", "codes": ["601318.SH"]}}
     checked = client.post("/api/check", json={"spec": spec, "plan_id": body["plan_id"]}).json()
     assert checked["status"] == "ok", checked
-    assert checked["spec"]["event"]["preset_id"] == "volume_surge"
-    assert checked["spec"]["horizons"] == [5]
-    assert texts(checked)["target"] == "「平安」理解为：中国平安（601318.SH）"
+    assert checked["spec"]["output"]["event"]["preset_id"] == "volume_surge"
+    assert checked["spec"]["output"]["horizons"] == [5]
+    assert texts(checked)["subject"] == "「平安」理解为：中国平安（601318.SH）"
 
 
 def test_最近哪个板块最强_先追问_回答之后出板块表(ask):
@@ -195,7 +268,8 @@ def test_最近哪个板块最强_先追问_回答之后出板块表(ask):
     answer = "；".join(f"{q['question']}{q['options'][0]}" for q in first["questions"])
     second = ask(answer, first["plan_id"])
     assert second["status"] == "ok", second
-    assert second["spec"]["shape"] == "board_list"
+    assert second["spec"]["output"]["kind"] == "table"
+    assert second["spec"]["scope"]["target"] != "stock"
 
 
 def test_现在能买茅台吗_给改写建议_建议本身能回答(ask):
@@ -203,7 +277,7 @@ def test_现在能买茅台吗_给改写建议_建议本身能回答(ask):
     assert body["status"] == "unsupported", body
     assert body["alternatives"]
     follow = ask(body["alternatives"][0])
-    assert follow["status"] in ("ok", "needs_clarification"), follow
+    assert follow["status"] in ("ok", "done", "needs_clarification"), follow
 
 
 def test_条件不是事件_说明原因并给改写建议(ask):
@@ -219,13 +293,13 @@ def test_确认卡上改了参数_说明文字跟着变_没改的照旧(ask, cli
     body = ask(HISTORY)
     assert body["status"] == "ok", body
     spec = body["spec"]
-    event = {**spec["event"], "params": {**spec["event"]["params"], "ma": 60}}
-    edited = {**spec, "event": event, "cost_bps": 50}
+    event = {**spec["output"]["event"], "params": {**spec["output"]["event"]["params"], "ma": 60}}
+    edited = {**spec, "output": {**spec["output"], "event": event, "cost_bps": 50}}
     checked = client.post("/api/check", json={"spec": edited, "plan_id": body["plan_id"]}).json()
     assert checked["status"] == "ok", checked
 
     before, after = texts(body), texts(checked)
-    assert "250 日" in before["event"] and "60 日" in after["event"]
-    assert "放量突破年线" not in after["event"]  # 改过的栏目不再说「「放量突破年线」理解为」
-    assert after["target"] == before["target"]
-    assert "0.50%" in after["cost_bps"] and not items(checked)["cost_bps"]["default"]
+    assert "250 日" in before["output.event"] and "60 日" in after["output.event"]
+    assert "放量突破年线" not in after["output.event"]  # 改过的栏目不再说「「放量突破年线」理解为」
+    assert after["subject"] == before["subject"]
+    assert "0.50%" in after["output.cost_bps"] and not items(checked)["output.cost_bps"]["default"]
