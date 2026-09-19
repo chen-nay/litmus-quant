@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 import pytest
@@ -216,6 +218,41 @@ def test_卡先出_小结再单独取_写了数字重试一次_写过就不重�
 
     assert client.post(url).json() == first and len(llm.calls) == 3  # 写过就给存下的那段
     assert client.get(f"/api/run/{body['run_id']}").json()["narrative"] == first["text"]
+
+    # 运行的过程记录：原话，算卡的几步，后面接着写小结的两次调用（第一次写了数字被拦下）
+    trace = client.get(f"/api/traces/{body['run_id']}").json()
+    assert trace["query"] == query
+    steps = [step["step"] for step in trace["steps"]]
+    assert steps == [
+        "check_spec",
+        "explain",
+        "research.run",
+        "respond",
+        "llm.narrate",
+        "llm.narrate",
+    ]
+    first_try = trace["steps"][4]
+    assert first_try["raw_reply"] and first_try["problems"]
+
+
+def test_同一张卡的小结同时要两次_只写一次(client, llm, monkeypatch):
+    llm.outputs.append({**CARD, "narrate": True})
+    body = client.post("/api/plan", json={"query": "牧原最近怎么样"}).json()
+    llm.outputs.append({"text": "今年以来在跌。"})
+    structured = llm.structured
+
+    def slow(*args):  # 第一次还在写，第二次就来了
+        time.sleep(0.3)
+        return structured(*args)
+
+    monkeypatch.setattr(llm, "structured", slow)
+    url = f"/api/run/{body['run_id']}/narrative"
+    with ThreadPoolExecutor(2) as pool:
+        answers = list(pool.map(lambda _: client.post(url).json(), range(2)))
+    assert answers == [{"text": "今年以来在跌。", "error": None}] * 2
+    assert len(llm.calls) == 2  # 提问一次、小结一次
+    steps = [step["step"] for step in client.get(f"/api/traces/{body['run_id']}").json()["steps"]]
+    assert steps.count("llm.narrate") == 1
 
 
 def test_卡不要小结时_取小结报错(client, llm):

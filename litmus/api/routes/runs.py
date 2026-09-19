@@ -7,16 +7,19 @@
 - 其他错误是 failed：把记录编号返回给用户，错误栈打在服务日志里
 - 运行记录成功、失败都存，带上数据截至哪天、事件库版本和耗时；spec 里的默认值标记和说明文字是代码生成的那份
 - 每一步也记进过程记录（store 的 `traces/tr<run_id>.json`，2026-09-16 加）：检查、生成说明、计算各花了多久，
-  结果多大，出错是哪一步出的。**记录失败不影响回答**。检查没过（needs_revision）不记——那些问题本来就原样
-  显示给用户了，不是黑箱
+  结果多大，出错是哪一步出的。这几步是纯代码，同样的条件和数据算出来一样，所以只记耗时和规模；条件和结果在运行记录里。
+  卡的小结是大模型写的，写的时候把每次调用接在这条过程记录后面（`llm.narrate`）。
+  **记录失败不影响回答**。检查没过（needs_revision）不记——那些问题本来就原样显示给用户了，不是黑箱
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
-from dataclasses import asdict
+from collections import defaultdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -110,7 +113,7 @@ def execute(raw_spec: object, plan_id: str | None, services: Services) -> RunRes
         )
         logger.exception("计算出错，运行记录 %s", run_id)
         steps.append({"step": "respond", "status": "failed", "error": error})
-        _save_trace(services, run_id, spec, steps)
+        _save_trace(services, run_id, plan_id, steps)
         message = f"计算时出错了，运行记录编号 {run_id}，详情见服务日志"
         return RunResponse(status="failed", run_id=run_id, message=message)
 
@@ -125,7 +128,7 @@ def execute(raw_spec: object, plan_id: str | None, services: Services) -> RunRes
         _record(spec, plan_id, status.data_through, started, status="done", result=payload)
     )
     steps.append({"step": "respond", "status": "done", **_size(payload), "ms": _ms(started)})
-    _save_trace(services, run_id, spec, steps)
+    _save_trace(services, run_id, plan_id, steps)
     return RunResponse(status="done", run_id=run_id, result=payload)
 
 
@@ -147,6 +150,7 @@ def call_step(call: LLMCall, step: str) -> dict[str, object]:
         "user_message": call.user_message,
         "raw_reply": call.raw_reply,
         "input_tokens": call.input_tokens,
+        "cached_tokens": call.cached_tokens,
         "output_tokens": call.output_tokens,
         "seconds": call.seconds,
         "problems": list(call.problems),
@@ -168,15 +172,26 @@ def _size(payload: dict[str, Any]) -> dict[str, object]:
 
 
 def _save_trace(
-    services: Services, run_id: str, spec: Spec, steps: list[dict[str, object]]
+    services: Services, run_id: str, plan_id: str | None, steps: list[dict[str, object]]
 ) -> None:
-    """记录失败不能影响回答：结果已经算好存好了，过程记录只是给开发看的。"""
+    """记录失败不能影响回答：结果已经算好存好了，过程记录只是给开发看的。
+
+    query 记用户原话，和提问那条过程记录一样；不经过提问直接调接口的没有原话，是空串。
+    """
     try:
-        services.store.save_trace(
-            TraceRecord(record_id=run_id, query=spec.output.kind, steps=steps)
-        )
+        question = _question(services, plan_id) or ""
+        services.store.save_trace(TraceRecord(record_id=run_id, query=question, steps=steps))
     except Exception:  # noqa: BLE001 —— 存不下就算了，只记一条日志
         logger.warning("运行 %s 的过程记录没能存下来", run_id, exc_info=True)
+
+
+def _append_trace(services: Services, run_id: str, steps: list[dict[str, object]]) -> None:
+    """小结写完后，把写它的每次大模型调用接在这次运行的过程记录后面。失败只记日志。"""
+    try:
+        trace = services.store.get_trace(run_id) or TraceRecord(record_id=run_id, query="")
+        services.store.save_trace(replace(trace, steps=[*trace.steps, *steps]))
+    except Exception:  # noqa: BLE001
+        logger.warning("运行 %s 的小结没能记进过程记录", run_id, exc_info=True)
 
 
 @router.get("/api/run/{run_id}")
@@ -199,7 +214,17 @@ async def post_narrative(run_id: str, request: Request) -> NarrativeResponse:
     return await run_in_threadpool(write_narrative, run_id, services_of(request))
 
 
+#: 同一次运行的小结一次只写一个：页面同时发来两次（开发时 React 的严格模式会把取小结做两遍，
+#: 两个人同时打开同一个分享链接也会），后到的等先到的写完，拿存下的那段，不再调一次大模型
+_narrating: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
+
+
 def write_narrative(run_id: str, services: Services) -> NarrativeResponse:
+    with _narrating[run_id]:
+        return _write_narrative(run_id, services)
+
+
+def _write_narrative(run_id: str, services: Services) -> NarrativeResponse:
     record = services.store.get_run(run_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"没有编号为 {run_id} 的运行记录")
@@ -211,14 +236,10 @@ def write_narrative(run_id: str, services: Services) -> NarrativeResponse:
     if services.llm is None:
         return NarrativeResponse(error="大模型没有配置好")
     narration = narrate(result, _question(services, record.plan_id), services.llm)
+    _append_trace(services, run_id, [call_step(call, "llm.narrate") for call in narration.calls])
     try:
         services.store.save_narrative(
-            NarrativeRecord(
-                run_id=run_id,
-                text=narration.text,
-                error=narration.error,
-                calls=[call_step(call, "llm.narrate") for call in narration.calls],
-            )
+            NarrativeRecord(run_id=run_id, text=narration.text, error=narration.error)
         )
     except Exception:  # noqa: BLE001 —— 存不下来也把这次写好的给用户，下次再要会重写
         logger.warning("运行 %s 的小结没能存下来", run_id, exc_info=True)

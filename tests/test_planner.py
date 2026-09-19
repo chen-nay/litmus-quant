@@ -320,6 +320,19 @@ def test_猜的名字填成代码_重试():
         assert result.status == OK and "guess 要填你猜的全称，不要填代码" in client.calls[1][1]
 
 
+def test_原话和猜测名写进了_codes_按点名的名字读_不重试():
+    names = [
+        {"mention": "牧原股份", "guess": "牧原股份"},
+        {"mention": "温氏股份", "guess": "温氏股份"},
+    ]
+    result, client = ask({**CARD, "subject": {"kind": "codes", "codes": names}})
+    assert result.status == OK and len(client.calls) == 1
+    assert result.subjects == (
+        NameMention("牧原股份", "牧原股份"),
+        NameMention("温氏股份", "温氏股份"),
+    )
+
+
 def test_点名看谁却没说是谁_重试():
     bad = {**CARD, "subject": {"kind": "codes"}}
     result, client = ask(bad, CARD)
@@ -365,11 +378,19 @@ def test_按板块排行时不能再限定板块():
     assert result.status == OK and "不要再填 scope.board" in client.calls[1][1]
 
 
-def test_没调用工具_原样再问一次():
-    result, client = ask(LLMFormatError("大模型没有按格式返回（stop_reason=end_turn）"), TABLE)
+def test_没调用工具_原样再问一次_实际回的文字记下来():
+    said = StructuredReply(
+        {"stop_reason": "end_turn", "text": "好的", "thinking_chars": 0}, 22.5, 39, 12, 8644
+    )
+    result, client = ask(
+        LLMFormatError("大模型没有按格式返回（stop_reason=end_turn）", said), TABLE
+    )
     assert (result.status, result.attempts) == (OK, 2)
     assert client.calls[0][1] == client.calls[1][1] == "问题"  # 没有输出可改，原样再问
-    assert result.calls[0].error and result.calls[1].error is None
+    first = result.calls[0]
+    assert first.error and first.raw_reply == said.data
+    assert (first.seconds, first.input_tokens, first.cached_tokens) == (22.5, 39, 8644)
+    assert result.calls[1].error is None
 
 
 def test_两次都没调用工具_返回failed():

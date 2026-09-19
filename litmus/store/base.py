@@ -59,13 +59,12 @@ class NarrativeRecord:
     """卡下面的小结：大模型拿卡上的内容写的一段话（DESIGN.md §1.6）。
 
     卡先出、小结后到，所以不写进运行记录，单独存一条。**不另编号**：编号就是那次运行的 run_id。
-    calls 是这次写小结的每次大模型调用（重试就有两条），形状由写入方定。
+    写它的每次大模型调用记在这次运行的过程记录里（`traces/tr<run_id>.json`），不在这里。
     """
 
     run_id: str
     text: str  # 空串：没什么可说，或者两次都没写对
     error: str | None = None  # 没写出来的原因
-    calls: list[dict[str, object]] = field(default_factory=list)
     created_at: str = ""  # 保存时由 store 填
 
 

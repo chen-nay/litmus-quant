@@ -112,12 +112,11 @@ def test_过程记录的编号必须是合法的提问或运行编号(store):
 
 def test_小结_编号就是那次运行的_只能挂在运行上(store):
     run_id = store.save_run(RUN)
-    calls = [{"step": "llm.narrate", "attempt": 1, "raw_reply": {"text": "在跌"}}]
     assert store.get_narrative(run_id) is None  # 还没写
-    assert store.save_narrative(NarrativeRecord(run_id=run_id, text="在跌", calls=calls)) == run_id
+    assert store.save_narrative(NarrativeRecord(run_id=run_id, text="在跌")) == run_id
     narrative = store.get_narrative(run_id)
     assert narrative is not None and narrative.created_at
-    assert (narrative.text, narrative.error, narrative.calls) == ("在跌", None, calls)
+    assert (narrative.text, narrative.error) == ("在跌", None)
 
     plan_id = store.save_plan(PlanRecord(query="问题", status="ok"))
     with pytest.raises(ValueError, match="run_id"):

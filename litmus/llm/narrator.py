@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from litmus.llm.client import LLMClient, LLMError, LLMFormatError
+from litmus.llm.client import LLMClient, LLMError, LLMFormatError, reply_fields
 from litmus.llm.models import LLMCall
 from litmus.llm.prompts import load_prompt
 
@@ -75,7 +75,9 @@ def narrate(card: Mapping[str, Any], question: str | None, client: LLMClient) ->
             reply = client.structured(system, message, OUTPUT_SCHEMA)
         except LLMFormatError as exc:
             # 没调用工具就没有话可改，原样再问一次
-            calls.append(_call(prompt, rendered, attempt, message, error=str(exc)))
+            calls.append(
+                _call(prompt, rendered, attempt, message, error=str(exc), **reply_fields(exc.reply))
+            )
             problems = []
             if attempt == 1:
                 continue
@@ -93,11 +95,7 @@ def narrate(card: Mapping[str, Any], question: str | None, client: LLMClient) ->
                 rendered,
                 attempt,
                 message,
-                model=reply.model,
-                raw_reply=dict(reply.data),
-                input_tokens=reply.input_tokens,
-                output_tokens=reply.output_tokens,
-                seconds=round(reply.seconds, 3),
+                **reply_fields(reply),
                 problems=tuple(problems),
             )
         )

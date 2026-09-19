@@ -85,10 +85,12 @@ class LLMCall:
     raw_reply: dict[str, Any] | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    #: 读缓存的输入 token（StructuredReply.cached_tokens）
+    cached_tokens: int | None = None
     seconds: float | None = None
     #: 防线②发现的问题，非空说明这次输出没通过检查，会带着问题重试
     problems: tuple[str, ...] = ()
-    #: 调用本身失败（超时、认证、连不上），此时 raw_reply 为空
+    #: 调用失败的原因。超时、认证、连不上时 raw_reply 为空；没按格式返回时 raw_reply 是实际回的文字
     error: str | None = None
 
 

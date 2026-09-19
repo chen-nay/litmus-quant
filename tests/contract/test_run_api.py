@@ -169,7 +169,7 @@ def test_过程记录_运行链每一步的耗时和结果规模(client):
     assert body["status"] == "done", body
 
     trace = client.get(f"/api/traces/{body['run_id']}").json()
-    assert trace["record_id"] == body["run_id"] and trace["query"] == "table"
+    assert trace["record_id"] == body["run_id"] and trace["query"] == ""  # 直接调接口，没有原话
     steps = {step["step"]: step for step in trace["steps"]}
     assert list(steps) == ["check_spec", "explain", "research.run", "respond"]
 

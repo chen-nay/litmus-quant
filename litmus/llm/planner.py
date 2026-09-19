@@ -26,7 +26,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from litmus.expr import ExprSyntaxError, field_catalog, operator_catalog, parse, validate
-from litmus.llm.client import LLMClient, LLMError, LLMFormatError
+from litmus.llm.client import LLMClient, LLMError, LLMFormatError, reply_fields, token_text
 from litmus.llm.models import (
     CLARIFY,
     FAILED,
@@ -297,7 +297,7 @@ def plan(
         except LLMFormatError as exc:
             # 没调用工具就没有输出可改，原样再问一次
             logger.warning("planner.system@%s 第 %d 次没按格式返回：%s", version, attempt, exc)
-            record(error=str(exc))
+            record(error=str(exc), **reply_fields(exc.reply))
             problems = []
             if attempt == 1:
                 continue
@@ -315,23 +315,15 @@ def plan(
                 calls=tuple(calls),
             )
         logger.info(
-            "planner.system@%s 第 %d 次：%.1f 秒，token %s / %s",
+            "planner.system@%s 第 %d 次：%.1f 秒，token %s",
             version,
             attempt,
             reply.seconds,
-            reply.input_tokens,
-            reply.output_tokens,
+            token_text(reply),
         )
         draft = reply.data
         result, problems = read_output(draft, context, events)
-        record(
-            model=reply.model,
-            raw_reply=dict(draft),
-            input_tokens=reply.input_tokens,
-            output_tokens=reply.output_tokens,
-            seconds=round(reply.seconds, 3),
-            problems=tuple(problems),
-        )
+        record(**reply_fields(reply), problems=tuple(problems))
         if not problems:
             return replace(result, attempts=attempt, prompt_version=version, calls=tuple(calls))
         logger.info("planner.system@%s 第 %d 次输出没通过检查：%s", version, attempt, problems)
@@ -519,13 +511,19 @@ _LOOKS_LIKE_CODE = re.compile(r"^\d{6}(\.[A-Za-z]{2})?$")
 
 
 def _subjects(raw: Mapping[str, Any]) -> tuple[tuple[NameMention, ...], list[str]]:
-    """点名看的标的：改现有条件时照抄的代码在前，新说的在后。"""
+    """点名看的标的：改现有条件时照抄的代码在前，新说的在后。
+
+    codes 里出现 {"mention", "guess"} 这样的对象，按 mentions 读：2026-09-18 实测「牧原股份跟温氏股份，
+    今年谁涨得多？」大模型把两个名字写进了 codes，重试一次多等了 72 秒。对象只可能是原话和猜测名，不会是代码。
+    """
     found: list[NameMention] = []
     problems: list[str] = []
-    for code in raw.get("codes") if isinstance(raw.get("codes"), list) else []:
+    codes = raw.get("codes") if isinstance(raw.get("codes"), list) else []
+    mentions = raw.get("mentions") if isinstance(raw.get("mentions"), list) else []
+    for code in codes:
         if text := _text(code):
             found.append(NameMention(text, is_code=True))
-    for item in raw.get("mentions") if isinstance(raw.get("mentions"), list) else []:
+    for item in [*[code for code in codes if isinstance(code, Mapping)], *mentions]:
         entry = _object(item)
         mention, guess = _text(entry.get("mention")), _text(entry.get("guess"))
         if not mention:

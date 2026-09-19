@@ -45,7 +45,14 @@ class LLMFormatError(LLMError):
 
     2026-09-18 实测：同一个问题连问三次，一次 stop_reason=end_turn 没有工具调用，另两次正常。
     偶发的，planner 会再试一次；超时、连不上不再试，那会让用户干等两倍时间。
+
+    reply 带着这次实际回了什么（data 是 stop_reason、文字、思考了多少字）和耗时、token，
+    过程记录照样存下——为什么没按格式返回，只能从这里看。
     """
+
+    def __init__(self, message: str, reply: StructuredReply | None = None) -> None:
+        super().__init__(message)
+        self.reply = reply
 
 
 @dataclass(frozen=True)
@@ -92,8 +99,12 @@ class LLMConfig:
 class StructuredReply:
     data: dict[str, Any]
     seconds: float
+    #: 没命中缓存的输入。火山引擎会自动缓存提示词：同一段系统提示词第二次发，这里只剩几十，
+    #: 其余算在 cached_tokens 里（2026-09-19 实测：第一次 20013 / 0，第二次 45 / 19968）
     input_tokens: int | None = None
     output_tokens: int | None = None
+    #: 读缓存的输入（usage.cache_read_input_tokens）
+    cached_tokens: int | None = None
     #: 哪个模型答的。换过模型之后翻旧的过程记录要能分辨
     model: str = ""
 
@@ -155,14 +166,54 @@ class AnthropicClient(LLMClient):
         except anthropic.APIStatusError as exc:
             raise LLMError(f"大模型接口返回 HTTP {exc.status_code}：{exc.message}") from exc
         seconds = time.perf_counter() - started
-        block = next((b for b in response.content if getattr(b, "type", None) == "tool_use"), None)
-        if block is None:
-            raise LLMFormatError(f"大模型没有按格式返回（stop_reason={response.stop_reason}）")
         usage = getattr(response, "usage", None)
-        return StructuredReply(
-            data=dict(block.input),
+        block = next((b for b in response.content if getattr(b, "type", None) == "tool_use"), None)
+        data = dict(block.input) if block is not None else _plain_reply(response)
+        reply = StructuredReply(
+            data=data,
             seconds=seconds,
             input_tokens=getattr(usage, "input_tokens", None),
             output_tokens=getattr(usage, "output_tokens", None),
+            cached_tokens=getattr(usage, "cache_read_input_tokens", None),
             model=config.model,
         )
+        if block is None:
+            message = f"大模型没有按格式返回（stop_reason={response.stop_reason}）"
+            raise LLMFormatError(message, reply)
+        return reply
+
+
+def reply_fields(reply: StructuredReply | None) -> dict[str, Any]:
+    """一次回答里要记进过程记录的几项（LLMCall 的同名字段）。没回答（超时、连不上）是空的。"""
+    if reply is None:
+        return {}
+    return {
+        "model": reply.model,
+        "raw_reply": dict(reply.data),
+        "input_tokens": reply.input_tokens,
+        "cached_tokens": reply.cached_tokens,
+        "output_tokens": reply.output_tokens,
+        "seconds": round(reply.seconds, 3),
+    }
+
+
+def token_text(reply: StructuredReply) -> str:
+    """日志里的 token：「输入 39 + 缓存 8644 / 输出 632」，没有缓存就不写那一截。"""
+    cached = f" + 缓存 {reply.cached_tokens}" if reply.cached_tokens else ""
+    return f"输入 {reply.input_tokens}{cached} / 输出 {reply.output_tokens}"
+
+
+def _plain_reply(response: Any) -> dict[str, Any]:
+    """没调用工具时实际回了什么：文字整段留下，思考只记多少字（可能好几千字）。"""
+    blocks = list(getattr(response, "content", None) or [])
+    text = "".join(getattr(b, "text", "") for b in blocks if getattr(b, "type", None) == "text")
+    thinking = sum(
+        len(getattr(b, "thinking", "") or "")
+        for b in blocks
+        if getattr(b, "type", None) == "thinking"
+    )
+    return {
+        "stop_reason": getattr(response, "stop_reason", None),
+        "text": text,
+        "thinking_chars": thinking,
+    }

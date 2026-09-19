@@ -8,7 +8,7 @@ import anthropic
 import httpx
 import pytest
 
-from litmus.llm.client import AnthropicClient, LLMConfig, LLMError
+from litmus.llm.client import AnthropicClient, LLMConfig, LLMError, LLMFormatError
 from litmus.llm.prompts import PromptError, load_prompt
 from litmus.llm.providers import PROVIDERS, detect, missing_message
 
@@ -30,17 +30,16 @@ def config(provider=ARK, **changes) -> LLMConfig:
     return LLMConfig(provider=provider, **values)
 
 
-def reply(data=None, blocks=("thinking", "tool_use")):
-    content = [
-        SimpleNamespace(type=kind, input=data or {"status": "ok"})
-        if kind == "tool_use"
-        else SimpleNamespace(type=kind)
-        for kind in blocks
-    ]
+def reply(data=None, blocks=("thinking", "tool_use"), stop_reason="tool_use"):
+    made = {
+        "tool_use": lambda: SimpleNamespace(type="tool_use", input=data or {"status": "ok"}),
+        "thinking": lambda: SimpleNamespace(type="thinking", thinking="先想一想"),
+        "text": lambda: SimpleNamespace(type="text", text="这个问题我直接回答："),
+    }
     return SimpleNamespace(
-        content=content,
-        stop_reason="tool_use",
-        usage=SimpleNamespace(input_tokens=3, output_tokens=5),
+        content=[made[kind]() for kind in blocks],
+        stop_reason=stop_reason,
+        usage=SimpleNamespace(input_tokens=3, output_tokens=5, cache_read_input_tokens=8000),
     )
 
 
@@ -139,7 +138,7 @@ def test_强制调用工具_跳过思考块取结构化结果_温度放进请求
     sdk = FakeSDK(reply({"status": "ok", "shape": "stock_list"}))
     result = AnthropicClient(config(), factory=sdk).structured("系统", "问题", SCHEMA)
     assert result.data == {"status": "ok", "shape": "stock_list"}
-    assert (result.input_tokens, result.output_tokens) == (3, 5)
+    assert (result.input_tokens, result.cached_tokens, result.output_tokens) == (3, 8000, 5)
     call = sdk.calls[0]
     assert call["tool_choice"] == {"type": "tool", "name": "output"}
     assert call["tools"][0]["input_schema"] == SCHEMA
@@ -149,10 +148,18 @@ def test_强制调用工具_跳过思考块取结构化结果_温度放进请求
     assert sdk.clients[0]["max_retries"] == 0  # SDK 自己不重试，超时了马上告诉用户
 
 
-def test_没有返回工具调用就报错():
-    sdk = FakeSDK(reply(blocks=("thinking", "text")))
-    with pytest.raises(LLMError, match="没有按格式返回"):
+def test_没有返回工具调用就报错_实际回的文字和token带在错误里():
+    sdk = FakeSDK(reply(blocks=("thinking", "text"), stop_reason="end_turn"))
+    with pytest.raises(LLMFormatError, match="没有按格式返回") as caught:
         AnthropicClient(config(), factory=sdk).structured("s", "u", SCHEMA)
+    got = caught.value.reply
+    assert got is not None
+    assert got.data == {
+        "stop_reason": "end_turn",
+        "text": "这个问题我直接回答：",
+        "thinking_chars": 4,
+    }
+    assert (got.input_tokens, got.cached_tokens, got.output_tokens) == (3, 8000, 5)
 
 
 def test_Anthropic官方不传base_url_用SDK自带的地址():
