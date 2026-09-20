@@ -650,21 +650,27 @@ class DataService:
         return self._scan_table(TDX_CONCEPT_TABLE).select(pl.col("date").max()).collect().item()
 
     def board_members(self, board_code: str, as_of: date | None = None) -> list[str]:
-        """板块的成分股代码，从小到大，不含北交所。
+        """板块的成分股代码，从小到大，不含北交所，**只算 as_of 那天还在上市的**。
 
         申万行业按 as_of 当天的归属，默认本地最新一天。概念板块只有快照日的当前成分（§2.7），
         as_of 早于快照日直接报错——拿今天的成分回答过去，是幸存者偏差。
+
+        退市的不算成分，和按行业筛股票那条路（get_universe_mask）口径一致：退市股的行业归属
+        经常没关闭，2006 年退市的 000406.SZ、000817.SZ、000956.SZ 同一天挂在两个行业下，
+        算进来会让传媒、石油石化、数字媒体、油气开采Ⅱ 这 4 个行业直接报错（industry_of）。
         """
         levels = dict(
             self._scan_table(SW_INDUSTRY_TABLE).select("code", "level").collect().iter_rows()
         )
+        day = as_of or self.latest_trading_day()
+        listed = self._listed(day)
         if board_code in levels:
-            day = as_of or self.latest_trading_day()
             sw_member = self._sw_member(levels[board_code])
             pool = (
                 sw_member.filter(pl.col("industry_code") == board_code)
                 .select("code")
                 .unique()
+                .join(listed, on="code", how="semi")
                 .with_columns(pl.lit(day).alias("date"))
             )
             codes = industry_members(pool, sw_member, board_code).get_column("code").to_list()
@@ -678,8 +684,24 @@ class DataService:
                     f"概念板块只有 {snapshot} 的当前成分，查不了 {as_of} 当时的成分"
                 )
             members = self._scan_table(TDX_MEMBER_TABLE).filter(pl.col("board_code") == board_code)
-            codes = members.select("code").collect().get_column("code").to_list()
+            codes = (
+                (members.select("code").collect().join(listed, on="code", how="semi"))
+                .get_column("code")
+                .to_list()
+            )
         return sorted({code for code in codes if not code.endswith(".BJ")})
+
+    def _listed(self, day: date) -> pl.DataFrame:
+        """那天还在上市的股票代码：还没上市的、已经退市的都不算。"""
+        return (
+            self._scan_table(STOCK_BASIC_TABLE)
+            .filter(
+                (pl.col("list_date") <= day)
+                & (pl.col("delist_date").is_null() | (pl.col("delist_date") >= day))
+            )
+            .select("code")
+            .collect()
+        )
 
     # ── 内部 ────────────────────────────────────────────────────
 

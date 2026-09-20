@@ -238,6 +238,13 @@ def test_申万行业清单与成分(ds):
     assert "000001.SZ" in ds.board_members("801780.SI")  # 银行
 
 
+def test_板块成分只算当天还在上市的_退市股的乱归属不影响(ds):
+    # 000406.SZ 2006 年退市，同一天挂在传媒和石油石化下，算进来这两个行业就分不出归属
+    for code, name in (("801760.SI", "传媒"), ("801960.SI", "石油石化")):
+        members = ds.board_members(code)
+        assert members and "000406.SZ" not in members, name
+
+
 @needs_concept
 def test_概念板块字段路由到通达信日线(ds):
     table = ds.get_fields(
