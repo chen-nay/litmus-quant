@@ -21,7 +21,7 @@ from litmus.data import (
     MarketStore,
     MissingDataError,
 )
-from litmus.llm import LLMClient, StructuredReply
+from litmus.llm import LLMClient, LLMError, StructuredReply
 from litmus.signals import load_events
 from litmus.store import JsonStore
 
@@ -43,7 +43,10 @@ class FakeLLM(LLMClient):
 
     def structured(self, system, user, schema):
         self.calls.append(user)
-        return StructuredReply(self.outputs.pop(0), 0.1)
+        output = self.outputs.pop(0)
+        if isinstance(output, Exception):
+            raise output
+        return StructuredReply(output, 0.1)
 
 
 @pytest.fixture
@@ -468,6 +471,19 @@ def test_确认卡上改条件_把现在的条件交给大模型_选过的概念
     assert "现在的条件：" in message and board.code in message
     assert "用户要改的地方：\n改成前 5" in message
     assert "光模块里最近放量的股票" not in message
+
+
+def test_确认卡上改条件_大模型没回应_说没改成(client, llm):
+    first = ask(client, llm, HISTORY, query="茅台放量突破年线之后怎样")
+    llm.outputs.append(LLMError("大模型 180 秒没有回应"))
+    body = {
+        "query": "只看半导体里 AI 相关的",
+        "previous_plan_id": first["plan_id"],
+        "spec": first["spec"],
+    }
+    second = client.post("/api/plan", json=body).json()
+    assert second["status"] == "failed"
+    assert second["message"] == "没能按这句话改条件：大模型 180 秒没有回应"
 
 
 def test_确认卡上改条件_股票照抄代码_确认卡上不写成原话(client, llm):

@@ -29,6 +29,7 @@ interface Problem {
 export function ConfirmCard({
   confirm,
   revisingSince,
+  revisionError,
   onRevise,
   onEdit,
   onClose,
@@ -36,6 +37,8 @@ export function ConfirmCard({
   confirm: Confirm;
   /** 正在让大模型改条件：从什么时候开始等，没在改就是 null */
   revisingSince: number | null;
+  /** 上一次用一句话改条件没改成的原因；条件还是这份 */
+  revisionError: string | null;
   onRevise: (change: string) => void;
   onEdit: () => void;
   onClose: () => void;
@@ -106,6 +109,15 @@ export function ConfirmCard({
           showIcon
           title={problem.title}
           description={problem.lines.length ? problem.lines.map((line) => <div key={line}>{line}</div>) : undefined}
+        />
+      )}
+      {revisionError && !revising && (
+        <Alert
+          style={{ marginBottom: 12 }}
+          type="warning"
+          showIcon
+          title={revisionError}
+          description="上面的条件没有变，可以换个说法再改，或者直接运行。"
         />
       )}
       <Space.Compact style={{ width: "100%", marginBottom: 12 }}>

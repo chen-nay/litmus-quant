@@ -52,6 +52,7 @@ export function QueryPage() {
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [card, setCard] = useState<Answered | null>(null);
   const [revisingSince, setRevisingSince] = useState<number | null>(null);
+  const [revisionError, setRevisionError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Editing | null>(null);
   const top = useRef<HTMLDivElement>(null);
   const forms = useRef<HTMLDivElement>(null);
@@ -62,6 +63,7 @@ export function QueryPage() {
     setConfirm(null);
     setCard(null);
     setEditing(null);
+    setRevisionError(null);
   }
 
   /** 提问、改条件得到的回答：卡直接显示，要确认的出确认卡，其余交给 PlanOutcome */
@@ -99,19 +101,26 @@ export function QueryPage() {
    * 确认卡上用一句话改条件。和提问不同的是把现在的条件一起发过去，大模型在这份条件上改：
    * 之前从候选里选的、表单上改过的栏目都不会丢（后端 routes/plan.py 第 7 条）。
    * 发之前去掉这次没碰过的默认值，后端重新补一遍，确认卡上照样标「默认」。
+   *
+   * 没改成（大模型没回应、改不了、本地数据不够）时确认卡留着，条件还是原来那份，原因写在输入框上面；
+   * 要追问、要选候选的照常出在下面。
    */
   async function revise(change: string) {
     if (!confirm) return;
     setRevisingSince(Date.now());
+    setRevisionError(null);
     setPlan(null);
     try {
       const spec = dropUntouchedDefaults(confirm.spec, confirm.spec);
       const response = await api.revise(spec, change, confirm.planId);
-      setConfirm(null);
-      show(response);
+      if (["ok", "done", "needs_clarification"].includes(response.status)) {
+        setConfirm(null);
+        show(response);
+      } else {
+        setRevisionError(response.message ?? "没能按这句话改条件");
+      }
     } catch (reason) {
-      setConfirm(null);
-      setPlan(failure(errorText(reason)));
+      setRevisionError(errorText(reason));
     } finally {
       setRevisingSince(null);
     }
@@ -234,6 +243,7 @@ export function QueryPage() {
           key={`${confirm.planId}-${confirm.assumptions.map((item) => item.text).join("|")}`}
           confirm={confirm}
           revisingSince={revisingSince}
+          revisionError={revisionError}
           onRevise={revise}
           onEdit={() => startEdit(confirm.spec, confirm.planId)}
           onClose={() => setConfirm(null)}

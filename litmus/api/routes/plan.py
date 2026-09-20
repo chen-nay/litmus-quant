@@ -155,7 +155,7 @@ def make_plan(
     result = plan(query, context, services.llm, services.events, previous, revise)
     mentions = _with_names(result)
     steps: list[dict[str, object]] = [call_step(call, "llm.plan") for call in result.calls]
-    response = _respond(result, mentions, services, steps)
+    response = _respond(result, mentions, services, steps, revised=spec is not None)
 
     detail = {
         # 多轮追问、多次修改时把这次说的话接在后面，下一轮追问用它
@@ -262,11 +262,11 @@ def _respond(
     mentions: tuple[Mention, ...],
     services: Services,
     steps: list[dict[str, object]] | None = None,
+    revised: bool = False,
 ) -> PlanResponse:
     if result.status == FAILED:
-        return PlanResponse(
-            status="failed", message=f"没能把这个问题翻译成查询条件：{result.error}"
-        )
+        what = "没能按这句话改条件" if revised else "没能把这个问题翻译成查询条件"
+        return PlanResponse(status="failed", message=f"{what}：{result.error}")
     if result.status == CLARIFY:
         questions = [
             PlanQuestion(question=q.question, options=list(q.options)) for q in result.questions
