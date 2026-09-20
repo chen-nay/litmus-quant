@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 from litmus.spec.confirm import (
@@ -89,6 +90,11 @@ def test_总结_表_有筛选时把筛选的说法带上():
         },
     }
     assert "市盈率低于 40 倍的" in summarize(parse_spec(raw), TABLE_FACTS)
+
+    # 没有中文说法就直接用公式，数字和「的」之间空一格
+    no_label = {**raw, "output": {**raw["output"], "filter": {"expr": "$pct_chg > 9"}}}
+    facts = replace(TABLE_FACTS, filter_text="当日涨跌幅 > 9")
+    assert "当日涨跌幅 > 9 的，按" in summarize(parse_spec(no_label), facts)
 
 
 def test_总结_表_从低到高():

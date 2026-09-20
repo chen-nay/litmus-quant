@@ -59,7 +59,7 @@
 | **spec** | QuerySpec 的数据结构定义、格式校验、默认值表 | 无 |
 | **expr** | 解析、校验、计算表达式；回答"哪只股票（或哪个板块）哪天满足条件" | data |
 | **signals** | 预置事件库（加载时用 expr 校验每条表达式） | expr |
-| **research** | 三种回答的计算：股票表、板块表、个股回看 | expr、data、spec |
+| **research** | 三种回答的计算：表、卡、统计 | expr、data、spec |
 | **llm** | 只有一个函数：`llm.plan()`（提问 → QuerySpec） | expr、signals、spec |
 | **store** | 保存 plan 记录与 run 记录（JSON 文件） | 无 |
 | **api** | HTTP 接口；编排调用顺序；LLM 输出的确定性兜底核对 | 以上全部 |
@@ -119,11 +119,11 @@ layers = [
 | 模块 | 对外暴露 |
 |---|---|
 | data | `DataService`：`ds.get_fields()` / `ds.get_trading_calendar()` / `ds.latest_trading_day()` / `ds.data_range()` / `ds.available_targets()` / `ds.stock_info()` / `ds.get_index_daily()` / `ds.get_universe()` / `ds.get_universe_mask()` / `ds.list_boards()` / `ds.board_members()` / `ds.concept_snapshot_date()` / `ds.get_kline()` / `ds.resolve_stock()` / `ds.resolve_board()`（第 7 步）；`DataSync`：`open()`（按环境变量连上 Tushare，拿到数据目录的同步锁）/ `sync_all()` / `status()`（本地数据状态、能否提问）；字段目录 `data.FIELDS` |
-| spec | `spec.QuerySpec`（三种形状）、`spec.DEFAULTS`（默认值表）、`spec.render_assumptions()`（由 spec 生成确认卡说明） |
+| spec | `spec.QuerySpec`（五个维度）、`spec.DEFAULTS`（默认值表）、`spec.parse_spec()`、`spec.summarize()` / `spec.render_confirm()`（由 spec 生成确认卡的总结和说明）、`spec.card`（卡上每行的值和解释行） |
 | expr | `expr.parse()` / `expr.validate()` / `expr.collect_fields()` / `expr.collect_lookback()` / `expr.evaluate()`（返回结果与实际统计起点）/ `expr.describe()`（表达式 → 中文说明）；`expr.field_catalog()` / `expr.operator_catalog()`（供 llm 组装提示词） |
 | signals | `signals.load_events()` / `signals.render_event()` / `signals.event_catalog()`（事件库） |
-| research | `research.run(spec, ds)` / `research.statistics_range(spec, ds)`（个股回看实际统计的区间，确认卡用） |
-| llm | `llm.plan()` |
+| research | `research.run(spec, ds)` / `research.statistics_range(spec, ds)`（统计实际覆盖的区间，确认卡用） |
+| llm | `llm.plan()`（提问 → QuerySpec）、`llm.narrate()`（卡 → 小结） |
 | store | 见 §7 |
 | api | `create_app()`：HTTP 接口，见 §6 |
 
@@ -160,10 +160,10 @@ api ──→ DataSync.status()：最小可用区间未覆盖 → data_not_ready
 api ──→ 确定性检查：spec 校验 + expr.validate() + 事件参数范围 + 数值范围   不通过 → needs_revision
         （用户改过参数走的是同一套检查，不再调 LLM；assumptions 由 spec 重新生成，见 §5.4）
 api ──→ research.run(spec, ds)
-        research 内部按 spec.shape 分派：
-        ├─ stock_list  → expr.evaluate(筛选表达式) → 排序 → 取前 N
-        ├─ board_list  → 同上，标的换成板块
-        └─ stock_history → 找出这只股票的全部触发日 → 逐笔算之后 N 天涨跌
+        research 内部按 spec.output.kind 分派：
+        ├─ table       → 取 scope 的标的、算 metrics → 筛选 → 排序 → 取前 N
+        ├─ card        → 只算点名的那几个标的，每个指标配一行解释
+        └─ event_study → 找出这只股票的全部触发日 → 逐笔算之后 N 天涨跌
                            → 对照（同期市场平均、这只股票平时的平均）
 api ──→ store.save_run(spec, result) → 返回 {run_id, result}
 ```
@@ -254,7 +254,7 @@ class DataService:
         名称规则见 §2.6 曾用名；查不到的字段为空值"""
 
     def get_index_daily(self, code: str, start: date, end: date) -> pl.DataFrame:
-        """沪深300 / 中证500 日线 (date, code, open, close)，个股回看换成指数对照时用"""
+        """沪深300 / 中证500 日线 (date, code, open, close)，统计换成指数对照时用"""
 
     def resolve_stock(self, text: str) -> list[StockMatch]:
         """股票提及 → 候选股票列表。规则见 §2.3"""
@@ -689,17 +689,16 @@ data/                                  # 默认在仓库根目录（已 gitignor
 expr 解析和计算的是**表达式字符串**（如 `Cross($close, Mean($close,250))`），像计算器解析公式一样，
 纯代码，没有 LLM 参与。把用户的中文翻译成表达式字符串是 `llm.plan()` 的事。
 
-### 3.1 为什么用表达式 DSL 而不是生成 Python 代码
+### 3.1 表达式 DSL
 
-| | 生成 Python | 表达式 DSL |
-|---|---|---|
-| 需要沙箱 | ✅ 必须 | ❌ 不执行代码，只求值 AST |
-| 可静态检查未来函数 | ❌ 难 | ✅ 语法层面杜绝 |
-| LLM 生成成功率 | 低 | 高（词表受限） |
-| 可复现 | 差 | 完全确定 |
+条件写成表达式字符串，由本模块解析成 AST 再求值，不执行任何代码：
 
-**所谓"预置事件"只是给常用表达式起了个名字**，作用是：①UI 标签 ②`llm.plan()` 的 few-shot 示例
-③个股回看的白名单（§4.3）。它**不限制**股票表和板块表能用什么条件。
+- 词表受限（字段 + 算子白名单），越界的写法在校验阶段就被挡下
+- 未来函数在语法层面杜绝：`Ref` 的偏移必须为正（§3.4）
+- 同一串表达式配同一份数据，结果每次都一样
+
+**「预置事件」只是给常用表达式起了个名字**，作用是：①页面上的标签 ②`llm.plan()` 的示例
+③统计的白名单（§4.3）。它**不限制**表能用什么条件。
 
 ### 3.2 语法与标的类型
 
@@ -807,7 +806,7 @@ def validate(ast: Node, target: str, purpose: str) -> ValidationResult:
 
 **未来函数检查是整个系统最重要的一行约束。** 它保证了从语言层面无法写出引用未来数据的表达式。
 
-另有 P0 限制：`Rank` 不能放进时序算子里；事件表达式不能用 `Rank`（个股回看只有一只股票，没有股票池可排）。
+另有 P0 限制：`Rank` 不能放进时序算子里；事件表达式不能用 `Rank`（统计只看一只股票，没有股票池可排）。
 校验一次列出所有问题，每条带字符位置和改写提示，给大模型按报错修改用。
 
 ### 3.5 自动推导
@@ -877,93 +876,43 @@ def evaluate(expr: str, purpose: str, universe: pl.DataFrame, start: date, end: 
 
 ## 4. research 模块
 
-三种回答，一个入口 `research.run(spec, ds)`，按 `spec.shape` 分派。
+三种回答，一个入口 `research.run(spec, ds)`，按 `spec.output.kind` 分派。
 
 | 文件 | 职责 |
 |---|---|
-| `screener.py` | 股票表、板块表：筛选 → 排序 → 取前 N |
-| `history.py` | 个股回看：找出触发日 → 算之后 N 天涨跌 → 对照 |
+| `compute.py` | 取 scope 的标的、算 metrics，三种回答共用这一段 |
+| `table.py` | 表：筛选 → 排序 → 取前 N，空排序值说清为什么 |
+| `card.py` | 卡：点名的标的一个指标一行，解释行按指标类型生成 |
+| `history.py` | 统计：找出触发日 → 算之后 N 天涨跌 → 对照 |
 | `returns.py` | 收益计算的纯函数：起止价格、顺延、扣成本（小表格可测） |
+| `results.py` | 三种结果的数据结构（§4.4） |
 
 ### 4.1 QuerySpec —— 系统的中心数据结构
 
-定义在 **spec 模块**。它是 `llm.plan()` 的输出、确认卡的数据源、`research.run()` 的输入。
+定义在 **spec 模块**（`spec/query.py`）。它是 `llm.plan()` 的输出、确认卡的数据源、`research.run()` 的输入。
 
-**形状一：股票表**
+五个维度 `scope` / `subject` / `when` / `metrics` / `output`，加一个 `narrate`，每个维度填什么、
+哪些组合非法、三种回答分别长什么样，都写在 **DESIGN.md §1~§3**，那份是定义，这里不重复。
 
-```json
-{
-  "version": 1,
-  "shape": "stock_list",
-  "as_of": "2026-09-11",
-  "filter": {
-    "expr": "$amount > Mean(Ref($amount,1), 5) * 1.4",
-    "label": "成交额比前一周均值高 40%"
-  },
-  "universe": { "base": "all_a", "industry": null, "board": null,
-                "exclude": ["ST", "suspended", "new_listing_60d"] },
-  "sort": { "by": "$amount / Mean(Ref($amount,1), 5)", "order": "desc" },
-  "limit": 50,
-  "defaults_used": ["limit"],
-  "assumptions": ["「成交量」理解为成交额（元）", "「前一周」按 5 个交易日计算，不含当天"]
-}
-```
-
-**形状二：板块表**
-
-```json
-{
-  "version": 1,
-  "shape": "board_list",
-  "board_type": "concept",
-  "as_of": "2026-09-11",
-  "filter": null,
-  "sort": { "by": "Sum($amount, 5)", "order": "desc" },
-  "limit": 10,
-  "assumptions": ["「最近一周」按 5 个交易日计算", "板块口径为通达信概念板块"]
-}
-```
-
-**形状三：个股回看**
-
-```json
-{
-  "version": 1,
-  "shape": "stock_history",
-  "target": { "mention": "茅台", "guess": "贵州茅台", "code": "600519.SH" },
-  "event": {
-    "preset_id": "breakout_ma_volume",
-    "params": { "ma": 250, "volume_ratio": 2 },
-    "expr": "Cross($close, Mean($close,250)) & ($amount > Mean(Ref($amount,1),20)*2)",
-    "label": "放量突破年线"
-  },
-  "time_range": { "from": "2016-01-01", "to": "2026-09-11" },
-  "horizons": [5, 20, 60],
-  "benchmark": "universe_equal_weight",
-  "cost_bps": 30,
-  "assumptions": ["「放量」理解为成交额 > 前 20 日均额的 2 倍", "「1周/1月/3月」= 5/20/60 个交易日"]
-}
-```
-
-- `assumptions` **由代码从 spec 生成**（§5.4），LLM 不写。它是确认卡最有价值的部分：把模糊描述翻译成明确定义
-- `defaults_used` 列出哪些字段用的是默认值，确认卡据此标出"默认值，可修改"
-- `target.code` 由 api 调 `ds.resolve_stock()` 填写，LLM 不填代码
-- `event.preset_id` 必须在事件库（§4.3）之内，`event.expr` 由代码从模板渲染，LLM 只填 `preset_id` 和 `params`；
-  `event.label`、`event.library_version` 同样由代码填。第 5 步的接口按「编号 + 参数」重新生成表达式，忽略请求里带的表达式
-- `benchmark` 默认 `universe_equal_weight`（当日股票池等权平均），可选 `index:000300.SH`，显示在确认卡上
-- `universe.base = all_a` 指沪深 A 股（不含北交所）；`universe.industry` 为申万行业名，按每个交易日当时的归属取成分；
-  `universe.board` 形如 `{"type": "concept", "code": "880728.TDX"}`，P0 用当前成分，必须写进 assumptions
+- `assumptions`、`summary` **由代码从 spec 生成**（§5.4），LLM 不写。它是确认卡最有价值的部分：把模糊描述翻译成明确定义
+- `defaults_used` 列出哪些栏目用的是默认值，确认卡据此标「默认」
+- 股票代码、板块代码由 api 调 `ds.resolve_stock()` / `ds.resolve_board()` 填，LLM 只给原话和猜的名字
+- `output.event.preset_id` 必须在事件库（§4.3）之内，表达式由代码从模板渲染；`label`、`library_version` 同样由代码填。
+  接口按「编号 + 参数」重新生成表达式，忽略请求里带的表达式
+- `output.benchmark`：统计默认 `universe_equal_weight`（买入日股票池等权平均），可选 `index:000300.SH`、`index:000905.SH`；
+  卡默认和所属申万一级行业指数比，可换成沪深300 / 中证500
+- `scope.base = all_a` 指沪深 A 股（不含北交所）；`scope.industry` 为申万一级或二级行业名，按每个交易日当时的归属取成分；
+  `scope.board` 形如 `{"type": "concept", "code": "880728.TDX"}`，P0 用当前成分，必须写进说明
 
 **结构校验**（spec 模块用 Pydantic，2026-09-14 定）：多写了不认识的字段直接报错（大模型把 `limit` 写成 `top_n` 不能悄悄用默认值顶上）；
 前 N 名 1~500，默认 50；持有天数 1~250 个交易日、最多 10 档，自动去重升序，默认 5/20/60；成本 0~500 个基点，默认 30；
-对照口径只能是 `universe_equal_weight`、`index:000300.SH`、`index:000905.SH`；回看区间起点不能晚于终点。
+回看区间起点不能晚于终点。
 **类型只收明确的写法**（2026-09-14 定）：pydantic 默认会把整数当时间戳转成日期、`true` 当成 1、`"5"` 当成 5，
 写错的值会悄悄变成另一个意思。所以日期只收 `YYYY-MM-DD`；整数不收布尔值、字符串和带小数的数（`50.0` 照收，和事件参数一致）；
 成本不收布尔值、字符串、NaN、无穷大。前端要把输入框里的文字转成数值、日期格式化成 `YYYY-MM-DD` 再发。
-`sort.label` 可选，是排序值那一列在结果页上的名称（如「放大倍数」），第 6 步的表单里填、第 7 步由大模型填。
-spec 只查结构，表达式对不对由 `expr.validate()` 管。`target.code` 可以为空（大模型的输出），研究计算时必须有
+spec 只查结构，表达式对不对由 `expr.validate()` 管；点名看谁时代码可以为空（大模型的输出），研究计算时必须有。
 
-### 4.2 股票表与板块表
+### 4.2 表（股票表与板块表）
 
 ```
 筛选：expr.evaluate(filter.expr, 按日股票池, as_of, as_of) → 当日满足条件的标的
@@ -980,9 +929,10 @@ spec 只查结构，表达式对不对由 `expr.validate()` 管。`target.code` 
 - 名称和行业都按 `as_of` 当天（`ds.stock_info`）；截止日不是交易日直接报错
 - 用概念板块限定股票池、查询日早于成分快照日时，结果提示写明按哪天的成分、几只：概念板块只有快照日的成分（§2.7），
   之后才调入的股票算在内，当时在、后来调出的不出现，用户从结果表上看不出来（2026-09-14 定）
-- 板块表的"股票池"就是该口径下的全部板块
+- 板块表的「股票池」就是该口径下的全部板块
+- 排序值为空的不进结果，表上方按字段说清为什么空（亏损股没有市盈率、行情不够长、算出来不是有限数）
 
-### 4.3 个股回看
+### 4.3 统计（个股事件回看）
 
 **事件库（15 个，参数可调）**，定义在 `signals/builtin.toml`，加载时全部参数组合逐一过 `expr.validate()`：
 
@@ -1029,7 +979,7 @@ spec 只查结构，表达式对不对由 `expr.validate()` 管。`target.code` 
 **样本偏少很常见**：2026-09-14 实测十年里，放量突破均线每只股票只有 5~9 次；大盘股涨停 0~13 次、两连板 0 次；
 银行股基本不发业绩预告（平安银行 0 次）。这是事件本身的性质，不是代码的问题，确认卡上可以提前说明（第 7 步）。
 
-**为什么个股回看要用白名单**：回看要回答"每次发生之后怎样"，前提是这个条件确实"在某一天发生"。
+**统计为什么要用白名单**：回看要回答"每次发生之后怎样"，前提是这个条件确实"在某一天发生"。
 像"市值低于 200 亿"这种会连续成立几百天的状态条件，没有"发生的那一天"。用户用这类条件要求回看时，
 返回 `not_an_event` 并说明原因。用户自定义事件放 P1（§11）。
 
@@ -1048,7 +998,7 @@ spec 只查结构，表达式对不对由 `expr.validate()` 管。`target.code` 
 对照窗口也用同一段"买入日 → 卖出日"。
 
 `cost_bps` 默认 30，即 **0.3%，买卖双边合计**（佣金、印花税、滑点），用户可在确认卡上修改。
-成本单列而不是直接扣进每一笔，是为了让用户看清原始涨跌和成本各占多少。
+成本单列：用户能看清原始涨跌和成本各占多少。
 
 **必须处理的细节**
 
@@ -1074,8 +1024,8 @@ spec 只查结构，表达式对不对由 `expr.validate()` 管。`target.code` 
 
 **跑赢比例**只统计自身涨跌和同期对照都算得出来的触发。
 
-**为什么默认等权而不是沪深300**：等权池平均和触发股票同池、同算法，回答的正是"随便买一只是不是也这样"。
-沪深300 是大盘股市值加权，拿它对照一只小盘股的触发，差异大半来自风格而不是信号。
+**默认等权**：等权池平均和触发股票同池、同算法，回答的正是"随便买一只是不是也这样"。
+沪深300 是大盘股市值加权，拿它对照一只小盘股的触发，差异大半来自风格（用户可以在确认卡上换成它）。
 用户可以在确认卡上把对照改成沪深300（`benchmark: "index:000300.SH"`）。
 
 ### 4.4 输出结构
@@ -1105,7 +1055,7 @@ class CardResult:              # 卡：点名几个就几份，每份的行是�
     notes: tuple[str, ...]
 
 @dataclass
-class HistoryResult:           # 个股回看
+class HistoryResult:           # 统计
     code: str
     name: str
     event_label: str
@@ -1237,11 +1187,11 @@ LLM_TEMPERATURE=0                             # 通用，换哪家都一样
 |---|---|
 | 最近一个交易日哪些股票成交额比前一周平均高 40% 以上？按放大倍数排前 20 | 股票表：`$amount > Mean(Ref($amount, 1), 5) * 1.4`，排前 20 |
 | 最近 5 个交易日涨得最多的申万一级行业，前 5 名 | 板块表。第一次写成 `Pct($close, 4)`，差一天；提示词写明「最近 N 个交易日涨了多少」就是 `Pct($close, N)` 之后正确 |
-| 茅台每次放量突破年线之后表现怎么样？ | 个股回看：600519.SH、`breakout_ma_volume` 250 日；区间、持有天数、对照、成本都没填，标成默认值 |
+| 茅台每次放量突破年线之后表现怎么样？ | 统计：600519.SH、`breakout_ma_volume` 250 日；区间、持有天数、对照、成本都没填，标成默认值 |
 | 昨天北向资金净买入最多的 20 只股票 / 昨天主力净流入超过 1 亿的股票 | 回答不了（数据里没有资金流向），没有编字段，改写建议是成交额、涨幅、换手率排行 |
 | 平安每次放量之后一周涨跌怎样 | 平安银行、平安电工、中国平安三个候选；选中国平安后确认卡写「「平安」理解为：中国平安（601318.SH）」 |
 | 最近哪个板块最强 | 先问三个问题（多长时间、哪种板块、怎么算最强）；每个选第一项回答后出板块表 |
-| 现在能买茅台吗 | 回答不了，给 3 条个股回看的问法；第一条拿去问能直接出确认卡 |
+| 现在能买茅台吗 | 回答不了，给 3 条能做统计的问法；第一条拿去问能直接出确认卡 |
 | 茅台市值低于 2000 亿之后的表现 | 不是事件，改写建议是跌破年线、放量突破 60 日均线、创 250 日新低 |
 | 确认卡上把均线改成 60、成本改成 50 | 事件说明变成 60 日、不再说「「放量突破年线」理解为」，股票那条照旧 |
 
@@ -1273,16 +1223,15 @@ LLM_TEMPERATURE=0                             # 通用，换哪家都一样
 | `not_an_event` | 想回看，但条件不是事件 | message、alternatives |
 | `failed` | 重试后仍拿不到合法输出 | — |
 
-**大模型填的是扁平格式，由代码转成 QuerySpec**（2026-09-15 定）：QuerySpec 本身的格式定义有 6000 字符、10 个子定义、
-按形状分支（oneOf），火山引擎没实测过；扁平格式（`llm/planner.py` 的 `OUTPUT_SCHEMA`：shape、as_of、filter_expr、
-sort_by、stock_mention / stock_guess、event_id / event_params、mentions、questions、alternatives……）实测能用。
-转换时只留大模型填了的栏目；股票、概念板块只带原话和猜测名；默认值由 api 补上并标出，说明文字由模板生成。
+**大模型填的格式和 QuerySpec 同一个样子**（`llm/planner.py` 的 `OUTPUT_SCHEMA`，嵌套结构 2026-09-17 实测可用），
+只有两处不同：点名看的标的只填 `subject.mentions`（原话 + 猜的全称），限定的行业、板块只填 `scope.board.mention` / `guess`，
+代码都由 api 查（DESIGN.md §4）。转换时只留大模型填了的栏目；默认值由 api 补上并标出，说明文字由模板生成。
 表达式、事件参数、结构不对时，把问题清单交给 `planner.repair` 重试一次，还不对返回 failed。
 
 **确认卡上用一句话改条件**（2026-09-16 加）：确认卡下面有个输入框（底纹词「修改条件」），用户写一句
 「改成前 5」「持有期改成 20 天」，前端把**现在的条件**连同这句话一起发给 `/api/plan`，大模型在这份条件上改，
-没说到的栏目照抄——不是从原话重新生成。为什么不复用追问那条路：选候选（`/api/check`）和表单修改都不新建提问记录，
-提问记录里存的还是最早那句原话，从它重新生成会把用户选过的、改过的全丢掉。2026-09-16 实测「平安」对应 3 只股票，
+没说到的栏目照抄。**改条件走的是现在这份条件，不是原话**：选候选（`/api/check`）和表单修改都不新建提问记录，
+提问记录里存的还是最早那句原话，拿它重新生成会把用户选过的、改过的全丢掉。2026-09-16 实测「平安」对应 3 只股票，
 选完中国平安再改一次条件，就要重新再选一次。
 
 交给大模型的那份条件先去掉三样东西：①这次没碰过的默认值（前端 `specForm.dropUntouchedDefaults`），
@@ -1306,7 +1255,7 @@ LLM 调用本身失败时，前端展示事件库里的固定示例，完全不�
 
 **防线③ 的三类检查**（任一不过 → 转成 needs_clarification，绝不执行）：
 
-1. **必填项**：股票表必须有 `as_of`；板块表必须有 `board_type`（不指定排序就按成交额，§4.2）；个股回看必须有 `target.code` 和 `event.preset_id`
+1. **必填项**：表和卡必须有 `when.as_of`，统计必须有 `when.range`；卡和统计必须点名看谁（`subject.codes`），统计还必须有 `output.event.preset_id`
 2. **白名单核对**：股票过 `ds.resolve_stock()`；板块过 `ds.resolve_board()`；事件过 `signals.load_events()`
 3. **参数范围**：事件参数必须落在 `builtin.toml` 定义的取值范围内（均线天数、放量倍数、连板数等）；
    `signals.render_event()` 越界时报错并带上参数名、传入的值、可选范围，据此让用户改参数。
@@ -1338,14 +1287,14 @@ DEFAULTS = {
     "top_n": 50,                    # "前N名"没说 N 时取多少
     "volume_means": "amount",       # "成交量"默认理解为成交额
     "cost_bps": 30,                 # 交易成本，买卖双边合计
-    "horizons": (5, 20, 60),        # 个股回看默认看之后几个交易日
+    "horizons": (5, 20, 60),        # 统计默认看之后几个交易日
     "exclude": ("ST", "suspended", "new_listing_60d"),  # 股票池默认剔除
-    "benchmark": "universe_equal_weight",  # 个股回看默认对照：买入日全A等权
+    "benchmark": "universe_equal_weight",  # 统计默认对照：买入日全A等权
     "small_cap": 3_000_000_000,     # 「小市值」没给数字时：总市值低于 30 亿（2026-09-15 定）
 }
 ```
 
-默认值放在代码里而不是写死在提示词文字中：改一次到处生效、可以写测试、确认卡上能标出"这是默认值"。
+默认值放在代码里（`spec/defaults.py`）：改一次到处生效、可以写测试、确认卡上能标出"这是默认值"。
 生成提示词时把这张表渲染进去，保证 LLM 看到的默认值和代码里的永远是同一份。
 
 ### 5.4 assumptions 由代码生成，不经过 LLM
@@ -1373,7 +1322,7 @@ LLM 既不写也不审查。
 **实现**（第 7a 步，2026-09-15）：
 
 - `spec.render_assumptions(spec, facts)` 按栏目逐条生成，每条带栏目名和是否默认值。spec 模块不依赖别的模块，
-  表达式的中文、股票名、概念板块名和成分快照日、板块数据区间、个股回看实际统计起点，由 api 查好放进 `Facts`（`api/explain.py`）
+  表达式的中文、股票名、概念板块名和成分快照日、板块数据区间、统计的实际起点，由 api 查好放进 `Facts`（`api/explain.py`）
 - 股票表、板块表的条件和排序是任意表达式，模板写不出来，由 `expr.describe()` 翻成中文：全部算子都有说法，
   `$amount > Mean(Ref($amount, 1), 20) * 2` 翻成「成交额 > 前 20 日成交额均值（不含当天） × 2」
 - 说明要用到用户原话（「「放量」理解为……」），而模板只认栏目：由 LLM 给出「原话里的词 → 栏目」（`Mention`，只有词、不含数字），
@@ -1381,7 +1330,7 @@ LLM 既不写也不审查。
   它没在说法里再记一遍的由 api 补上：2026-09-15 实测同一句「平安每次放量之后一周涨跌怎样」有时一个说法都不给
 - `defaults_used` 由代码按请求里缺了哪些栏目填（事件参数看 `render_event` 用了哪些默认值），请求里带来的
   `defaults_used`、`assumptions` 不作数；运行记录里存的是代码生成的那份
-- 个股回看的实际统计起点由 `research.statistics_range()` 算，和算结果用的是同一段代码，确认卡上的区间和结果页对得上
+- 统计的实际起点由 `research.statistics_range()` 算，和算结果用的是同一段代码，确认卡上的区间和结果页对得上
 - 确认卡上改了参数，调 `POST /api/check`（只检查、不计算）刷新说明
 - **页面**：表和统计先出确认卡、确认后才运行；卡提问时就算完，直接出在问题下面（DESIGN.md §1.7）。
   确认卡上点「打开表单」把条件填回表单，改完再调 `/api/check`，说明跟着变；带着 plan_id，没改过的栏目继续用原话的说法。
@@ -1400,7 +1349,7 @@ LLM 既不写也不审查。
   分位（`Rank`、`TsRank`）也是小数，列的单位标「分位」，显示成「0.66%」，不带正负号、不上色（`expr.result_unit`）
 - **本地数据截至**（2026-09-15 定）：确认卡最后一条列出这个问题用到的几类数据各自截至哪天，如「本地数据截至：股票行情 2026-09-14，财务公告 2026-09-10」。
   股票表列股票行情，用到财务字段加财务公告，股票池是沪深300 / 中证500 加指数成分；板块表列对应板块的行情；
-  个股回看列股票行情，对照选指数加指数行情。概念板块成分另有一条说明，不重复列（`api/explain.py`）
+  统计列股票行情，对照选指数加指数行情。概念板块成分另有一条说明，不重复列（`api/explain.py`）
 
 ### 5.5 prompt 管理
 
@@ -1518,7 +1467,7 @@ GET  /api/fields
 GET  /api/stocks/{code}/kline?from=YYYY-MM-DD&to=YYYY-MM-DD
   resp: { "code", "name", "adjust": "前复权", "base_date", "range", "rows": [{ date, open, high, low, close,
           open_raw, high_raw, low_raw, close_raw, amount, pct_chg }] }
-  说明：个股回看页的 K 线。超出本地数据的部分自动裁掉；参数写错 400，没有这只股票 404
+  说明：统计结果页的 K 线。超出本地数据的部分自动裁掉；参数写错 400，没有这只股票 404
 
 POST /api/data/sync
   resp: { "started": true|false, "sync": 同步进度 }
@@ -1539,7 +1488,7 @@ GET  /api/data/status
 - **请求体自己解析**：写错了也返回 `needs_revision` 和中文说明，不用 FastAPI 默认的 422。每条问题带栏目路径
   （如 `filter.expr`、`event.params.ma`）、说明、可选范围、表达式里出错的位置
 - **按顺序查，前一类有问题就不往下**：
-  1. 事件：个股回看只能用事件库里的事件，按「编号 + 参数」重新生成表达式和标签，请求里带的不作数；缺编号、编号不存在、参数越界都在这一步
+  1. 事件：统计只能用事件库里的事件，按「编号 + 参数」重新生成表达式和标签，请求里带的不作数；缺编号、编号不存在、参数越界都在这一步
   2. 结构：spec 的栏目、类型、数值范围，pydantic 的英文错误翻成中文
   3. 表达式：写法和字段、算子白名单，标的类型当前可用
   4. 数据：日期是交易日、在本地数据范围里；股票代码、申万行业名、概念板块代码本地查得到
@@ -1550,7 +1499,7 @@ GET  /api/data/status
 
 **K 线的价格口径：前复权**（2026-09-15 定）。前复权 = 后复权价 ÷ 这只股票本地最后一个交易日的复权因子：
 - 最新价就是真实价格，和行情软件默认一致；后复权的茅台是 11049 元，用户会以为数据错了
-- 整段价格只差一个固定倍数，任何一段的涨跌幅都和后复权一样——个股回看的收益是后复权算的，图和表对得上。
+- 整段价格只差一个固定倍数，任何一段的涨跌幅都和后复权一样——统计的收益是后复权算的，图和表对得上。
   不复权会在除权日画出假暴跌（000034.SZ 2026-05-19 送转：真实收盘 41.57 → 30.96，当天实际涨 4.45%）
 - 本地存了复权因子，前复权和真实价都能精确算出（实测「后复权 ÷ 当天复权因子」和真实收盘价误差在 1e-13 以内），不用重新同步
 - 代价：同步了新数据、期间又除权的话，整张图的价格数字整体变一点，形状和涨跌幅不变
@@ -1567,17 +1516,21 @@ uv run python -m litmus serve        # 另开一个终端
 
 curl -s http://127.0.0.1:8000/api/data/status
 
-# 股票表：2026-09-11 涨幅超过 9% 的，按成交额取前 3
+# 表：当天涨幅超过 9% 的股票，按成交额取前 3
 curl -s http://127.0.0.1:8000/api/run -H 'content-type: application/json' \
-  -d '{"spec":{"shape":"stock_list","as_of":"2026-09-11","filter":{"expr":"$pct_chg > 9"},"sort":{"by":"$amount"},"limit":3}}'
+  -d '{"spec":{"version":2,"scope":{"target":"stock"},"when":{"as_of":"2026-09-16"},"metrics":[{"name":"当日涨跌","expr":"$pct_chg"},{"name":"成交额","expr":"$amount"}],"output":{"kind":"table","filter":{"expr":"$pct_chg > 9"},"sort":{"by":"成交额","order":"desc"},"limit":3}}}'
 
-# 板块表：申万行业当天涨跌幅前 3
+# 表（板块）：申万一级行业当天涨跌幅前 3
 curl -s http://127.0.0.1:8000/api/run -H 'content-type: application/json' \
-  -d '{"spec":{"shape":"board_list","board_type":"sw_industry","as_of":"2026-09-11","sort":{"by":"$pct_chg"},"limit":3}}'
+  -d '{"spec":{"version":2,"scope":{"target":"sw_industry"},"when":{"as_of":"2026-09-16"},"metrics":[{"name":"当日涨跌","expr":"$pct_chg"}],"output":{"kind":"table","sort":{"by":"当日涨跌","order":"desc"},"limit":3}}}'
 
-# 个股回看：平安银行 2025 年放量 3 倍之后 5 天、20 天
+# 卡：平安银行的市盈率和今年以来涨跌
 curl -s http://127.0.0.1:8000/api/run -H 'content-type: application/json' \
-  -d '{"spec":{"shape":"stock_history","target":{"code":"000001.SZ"},"event":{"preset_id":"volume_surge","params":{"volume_ratio":3}},"time_range":{"from":"2025-01-01","to":"2025-12-31"},"horizons":[5,20]}}'
+  -d '{"spec":{"version":2,"subject":{"kind":"codes","codes":["000001.SZ"]},"when":{"as_of":"2026-09-16"},"metrics":[{"name":"市盈率TTM","expr":"$pe_ttm"},{"name":"今年以来涨跌","expr":"PctSince($close, 20251231)"}],"output":{"kind":"card"}}}'
+
+# 统计：平安银行 2025 年放量 3 倍之后 5 天、20 天
+curl -s http://127.0.0.1:8000/api/run -H 'content-type: application/json' \
+  -d '{"spec":{"version":2,"subject":{"kind":"codes","codes":["000001.SZ"]},"when":{"range":{"from":"2025-01-01","to":"2025-12-31"}},"output":{"kind":"event_study","event":{"preset_id":"volume_surge","params":{"volume_ratio":3}},"horizons":[5,20]}}}'
 
 curl -s http://127.0.0.1:8000/api/run/<run_id>
 
@@ -1591,11 +1544,11 @@ curl -s -X POST http://127.0.0.1:8000/api/data/sync/stop
 | 场景 | 数据量 | 耗时 |
 |---|---|---|
 | 股票表 / 板块表（单日） | 5000 只 × 1 天 + 预热期 | < 1 秒 |
-| 个股回看（单只股票 10 年） | 2600 天 | < 1 秒 |
-| 个股回看的"同期市场平均" | 5000 只 × 触发日数 | 1~5 秒 |
+| 统计（单只股票 10 年） | 2600 天 | < 1 秒 |
+| 统计的"同期市场平均" | 5000 只 × 触发日数 | 1~5 秒 |
 
 **P0 全部同步返回**，前端显示加载中。"超过 3 秒走异步"事前无法判断——请求还没跑完，不知道它要多久。
-等实测个股回看确实超过 10 秒，再改成按形状决定（个股回看异步、两张表同步）。
+等实测统计确实超过 10 秒，再改成按形状决定（统计异步，表和卡同步）。
 
 ---
 
@@ -1674,9 +1627,10 @@ class Store(Protocol):
 ```
 litmus/
 ├── spec/                   # 零内部依赖
-│   ├── query_spec.py       # QuerySpec（Pydantic），三种形状
+│   ├── query.py            # QuerySpec（Pydantic），五个维度 + 非法组合
 │   ├── defaults.py         # 默认值表
-│   └── assumptions.py      # 由 spec 生成确认卡说明文字的模板
+│   ├── confirm.py          # 由 spec 生成确认卡的一句话总结和分组说明
+│   └── card.py             # 卡上每一行的值和解释行怎么写
 ├── data/                   # 零内部依赖
 │   ├── service.py          # DataService：读本地 Parquet
 │   ├── derive.py           # 读取时现算的字段：财务按公告日对齐、公告日事件、除权除息日、次新股
@@ -1700,17 +1654,22 @@ litmus/
 │   ├── library.py          # load_events() / render_event() / event_catalog()，加载时校验全部参数组合
 │   └── builtin.toml        # 事件库（15 条）
 ├── research/               # 依赖 expr、data、spec
-│   ├── screener.py         # 股票表、板块表
-│   ├── history.py          # 个股回看
-│   └── returns.py          # 收益计算纯函数（起止价格、顺延、扣成本）
+│   ├── compute.py          # 取 scope 的标的、算 metrics，三种回答共用
+│   ├── table.py            # 表：筛选、排序、取前 N
+│   ├── card.py             # 卡：点名的标的，每个指标一行加解释行
+│   ├── history.py          # 统计：触发日、之后 N 天涨跌、对照
+│   ├── returns.py          # 收益计算纯函数（起止价格、顺延、扣成本）
+│   └── results.py          # 三种结果的数据结构
 ├── llm/                    # 依赖 expr、signals、spec
 │   ├── client.py           # LLMClient
-│   ├── planner.py          # plan()
+│   ├── planner.py          # plan()：提问、追问、改条件
+│   ├── narrator.py         # narrate()：卡下面的小结
+│   ├── providers.py        # 各厂商的环境变量与认证方式
 │   ├── models.py           # PlanResult 等 llm 自有的数据结构
 │   ├── prompts.py          # prompt 加载与渲染
 │   └── prompts/            # 见 §5.5
 ├── store/                  # 零内部依赖
-│   ├── base.py             # Store 接口 + PlanRecord / RunRecord
+│   ├── base.py             # Store 接口 + PlanRecord / RunRecord / TraceRecord / NarrativeRecord
 │   └── json_store.py       # JSON 文件实现
 ├── api/                    # 依赖以上全部
 │   ├── main.py             # create_app()
@@ -1725,11 +1684,11 @@ litmus/
 ├── __main__.py             # python -m litmus
 └── cli.py                  # litmus serve；同步的开发调试入口是 python -m litmus.data
 
-web/                        # React 前端（第 6 步）
+web/                        # React 前端
 ├── vite.config.ts          # 开发时把 /api 转给后端
 └── src/
     ├── api.ts / types.ts   # 调接口、接口类型
-    ├── format.ts           # 数字怎么显示：三种单位（百分数、小数、基点）、亿 / 万、红涨绿跌
+    ├── format.ts           # 数字怎么显示：单位（百分数、涨跌小数、分位、基点）、亿 / 万、红涨绿跌
     ├── specForm.ts         # 表单 ↔ 查询条件（确认卡上点「打开表单」时预填）；接口返回的问题 → 对应输入框
     ├── planFlow.ts         # 提问流程：拼追问的回答、把各组选中的候选填进条件、示例问句
     ├── kline.ts            # K 线图配置
@@ -1757,13 +1716,16 @@ Makefile
 | 1a | data：`FIELDS` + Tushare loader（归一、分页、返回校验）+ DataSync（全量/增量同步、断点续传、能力探测、manifest） | 能把指定日期范围同步到本地；中断可续传；再次同步只补缺口；完成 §12 的接口实测项 |
 | 1b | data：DataService（含按日股票池、板块）+ 小表格测试 + 契约测试 | 小表格测试离线通过；契约测试在本地真实数据上通过（合成数据集推迟，见 §11） |
 | 2 | expr：parser / validator / collector / evaluator + 全部算子，支持股票与板块两类标的 | 小表格测试：`Cross`、`Mean`、`Rank` 等逐个验证 |
-| 3 | spec（三种形状 + 默认值表）+ research：股票表、板块表、个股回看 | 手工核对若干笔"之后 N 天涨跌"，含顺延与扣成本 |
+| 3 | spec（三种形状 + 默认值表）+ research：股票表、板块表、个股回看（第一版的三种形状，v2 改成表、卡、统计，见 DESIGN.md §7） | 手工核对若干笔"之后 N 天涨跌"，含顺延与扣成本 |
 | 4 | signals：事件库 15 条 | TOML 加载，全部参数组合校验通过，都能跑出回看结果 |
 | 5 | store（JSON）+ FastAPI：`/api/run`（先不接 LLM，直接传 QuerySpec）、`/api/run/{run_id}`、`/api/events`、`/api/boards` + `/api/data/sync`、`/api/data/sync/stop`、`/api/data/status` | curl 能跑出三种结果（§6，`tests/contract/test_run_api.py` 用同样的请求）；能触发同步、查看进度、停止（离线用假同步器测；2026-09-14 经接口真实同步一次，从 09-11 补到 09-14，6 分 5 秒） |
-| 6 | 前端：同步页 + 查询表单（第 7 步之前直接填条件）+ 三种结果页（个股回看带前复权 K 线） | 页面上能完成同步，并看到三种结果。浏览器里用本地真实数据跑三种结果，数据量小；页面上真实同步一次之前先确认 |
+| 6 | 前端：同步页 + 查询表单（第 7 步之前直接填条件）+ 三种结果页（统计带前复权 K 线） | 页面上能完成同步，并看到三种结果。浏览器里用本地真实数据跑三种结果，数据量小；页面上真实同步一次之前先确认 |
 | 7（末步） | `llm.plan()` + prompt 管理 + `ds.resolve_stock()` / `ds.resolve_board()` + 确认卡 / 澄清卡（说明文字由模板生成）。拆成四小步：7a 名称解析、表达式翻中文、说明文字、检查接口；7b 大模型模块与 `/api/plan`；7c 前端提问框、确认卡、澄清卡；7d 用真实问题验收 | 自然语言能正确生成三种形状；编造字段被拦截；"平安"返回多个候选；"最近哪个板块最强"先澄清；"现在能买茅台吗"给改写建议；改完参数说明文字跟着变。第 7d 步用真实大模型逐条问过（`tests/test_plan_live.py`，平时不跑），结果见 §5.1 |
 
 Docker 打包原本是第 8 步，2026-09-16 挪到 P1（见 §11）：P0 到第 7 步为止，本地两条命令就能跑起来。
+
+**这 7 步 2026-09-16 走完**。之后查询结构换成五个维度、加了卡和小结、前端按维度重做，
+那一轮的开发顺序和验收记在 DESIGN.md §7（8 步，2026-09-18 全部完成）。
 
 ---
 
@@ -1828,11 +1790,11 @@ def test_mean():
 | 结果缓存与数据版本号 | 每次重算 3~8 秒可接受，先不引入一致性问题 |
 | 回归测试（固定数据结果逐位相同） | 没有缓存和统计量后优先级下降；小表格测试已覆盖计算正确性 |
 | `llm.explain()`（LLM 写解读文字） | 页面上都是朴素数字，解读价值不大 |
-| 用户自定义事件（个股回看） | 需要一套"这个条件算不算事件"的判定规则 |
+| 用户自定义事件（统计） | 需要一套"这个条件算不算事件"的判定规则 |
 | 概念板块历史成分 | 回溯范围已实测：`tdx_member` 从 2025-03-28 起按日快照，和板块日线同一起点。卡在数据量：全部概念板块的成分现在每天约 4.7 万行，一年半的日快照约 1700 万行，比整个股票面板（1115 万行）还多；而且只能按板块拉。以后做时把日快照压成纳入 / 剔除区间，形状和申万的 `index_member_all` 一样 |
 | 龙虎榜、游资、人气榜、机构目标价、涨停原因 | 数据有（6000~10000 积分），但不是三种回答的必需品 |
 | 资金门槛、容量估算 | 需要不复权价格字段，见 §12 |
-| 个股回看的"同行业对照" | 数据已具备，UI 成本待评估 |
+| 统计的"同行业对照" | 数据已具备，UI 成本待评估 |
 | 免费数据源（BaoStock / AKShare） | 一次安装只用一种数据源，需要各自的 loader |
 | 无 LLM key 的降级路径 | P0 必须配 key |
 | `llm.review()`（LLM 审查用户改动） | 已取消，不是推迟：说明文字改由模板生成、参数范围由代码校验后，它的两个目标都有确定性替代，而它本身会带来死锁 |

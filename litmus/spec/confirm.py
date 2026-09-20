@@ -149,7 +149,15 @@ def summarize(spec: QuerySpec, facts: Facts | None = None) -> str:
         if spec.scope.target == "stock"
         else f"{spec.output.limit} {unit}"
     )
-    return f"{where}里{f'{narrowed}的' if narrowed else ''}，按{by}{order}取前 {what}"
+    return f"{where}里{_de(narrowed)}，按{by}{order}取前 {what}"
+
+
+def _de(text: str) -> str:
+    """接「的」。筛选条件没有中文说法时直接用公式，数字后面要空一格：「当日涨跌幅 > 9 的」。"""
+    if not text:
+        return ""
+    space = " " if text[-1].isascii() else ""
+    return f"{text}{space}的"
 
 
 def _filter_phrase(output: TableOutput, facts: Facts) -> str:
