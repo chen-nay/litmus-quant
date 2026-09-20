@@ -3,19 +3,33 @@
 表达式的字段白名单、给 LLM 的字段清单，都从这里出，保证"LLM 以为有的"和"校验器认的"
 永远是同一份。字段含义、单位、来源与换算方式见 ARCHITECTURE.md §2.2。
 
-单位约定：金额一律为元，股数一律为股，比率保持百分数（换手率 5 表示 5%），估值为倍数。
+单位约定：金额一律为元，股数一律为股，比率保持百分数（换手率 5 表示 5%），估值为倍数，天数为天。
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-#: 标的类型
+if TYPE_CHECKING:
+    from litmus.data.manifest import Manifest
+
+#: 标的类型。申万一级、二级行业分成两类：板块表按哪一级排行、字段对哪一级可用，都按标的类型分
 STOCK = "stock"
 SW_INDUSTRY = "sw_industry"
+SW_INDUSTRY_L2 = "sw_industry_l2"
 CONCEPT = "concept"
-BOARD_TARGETS = (SW_INDUSTRY, CONCEPT)
+BOARD_TARGETS = (SW_INDUSTRY, SW_INDUSTRY_L2, CONCEPT)
+
+#: 要在 manifest 里记为可用才能用的标的 → 能力名。不在表里的（股票、申万一级行业）只要基础积分，总是可用。
+#: 概念板块要探测权限；申万二级行业 2026-09-15 才加，重新同步过一次申万行业才有，老数据目录里没有
+CONCEPT_CAPABILITY = "concept"
+SW_INDUSTRY_L2_CAPABILITY = "sw_industry_l2"
+TARGET_CAPABILITIES: dict[str, str] = {
+    SW_INDUSTRY_L2: SW_INDUSTRY_L2_CAPABILITY,
+    CONCEPT: CONCEPT_CAPABILITY,
+}
 
 
 @dataclass(frozen=True)
@@ -73,21 +87,57 @@ _FIELD_LIST: tuple[Field, ...] = (
     _f("pb", "市净率", "倍", "float", (STOCK, *_ALL_BOARDS)),
     _f("ps_ttm", "市销率TTM", "倍", "float", _STOCK_ONLY),
     _f("dv_ttm", "股息率TTM", "%", "float", _STOCK_ONLY),
-    _f("market_cap", "总市值", "元", "float", (STOCK, SW_INDUSTRY), "概念板块口径不同，不提供"),
+    _f(
+        "market_cap",
+        "总市值",
+        "元",
+        "float",
+        (STOCK, SW_INDUSTRY, SW_INDUSTRY_L2),
+        "概念板块口径不同，不提供",
+    ),
     _f("circ_mv", "流通市值", "元", "float", (STOCK, *_ALL_BOARDS)),
     # ── 财务（按披露日对齐）────────────────────────────────────
     _f("roe", "净资产收益率（年化）", "%", "float", _STOCK_ONLY),
     _f("revenue_yoy", "营业收入同比", "%", "float", _STOCK_ONLY, "最新一期累计同比，披露日会跳变"),
     _f("profit_yoy", "归母净利润同比", "%", "float", _STOCK_ONLY, "最新一期累计同比，披露日会跳变"),
     # ── 事件 ──────────────────────────────────────────────────
-    _f("is_report_date", "财报实际披露日", "布尔", "bool", _STOCK_ONLY),
-    _f("is_forecast_date", "业绩预告公告日", "布尔", "bool", _STOCK_ONLY),
-    _f("is_ex_div", "除权除息日", "布尔", "bool", _STOCK_ONLY, "复权因子较前一交易日发生变化"),
+    _f(
+        "is_report_date",
+        "财报实际披露日",
+        "布尔",
+        "bool",
+        _STOCK_ONLY,
+        "披露日不是交易日或当天停牌的，标在它下一个有行情的交易日",
+    ),
+    _f(
+        "is_forecast_date",
+        "业绩预告公告日",
+        "布尔",
+        "bool",
+        _STOCK_ONLY,
+        "公告日不是交易日或当天停牌的，标在它下一个有行情的交易日",
+    ),
+    _f(
+        "is_ex_div",
+        "除权除息日",
+        "布尔",
+        "bool",
+        _STOCK_ONLY,
+        "复权因子比上一个交易日涨了 0.05% 以上；停牌期间除权的标在复牌那天",
+    ),
     # ── 状态 ──────────────────────────────────────────────────
     _f("is_st", "ST / *ST", "布尔", "bool", _STOCK_ONLY),
     _f("is_limit_up", "收盘涨停", "布尔", "bool", _STOCK_ONLY),
     _f("is_limit_down", "收盘跌停", "布尔", "bool", _STOCK_ONLY),
-    _f("is_new", "次新股", "布尔", "bool", _STOCK_ONLY),
+    _f("is_new", "次新股", "布尔", "bool", _STOCK_ONLY, "上市后的前 60 个交易日，含上市当天"),
+    _f(
+        "list_days",
+        "上市天数",
+        "天",
+        "float",
+        _STOCK_ONLY,
+        "上市以来的自然日天数（不是交易日），上市当天算第 1 天；「上市不满一个月」写 $list_days <= 30",
+    ),
     # ── 板块特有 ──────────────────────────────────────────────
     _f("up_num", "上涨家数", "个", "float", (CONCEPT,)),
     _f("limit_up_num", "涨停家数", "个", "float", (CONCEPT,)),
@@ -116,6 +166,20 @@ def get(name: str) -> Field:
 def names_for(target: str = STOCK) -> tuple[str, ...]:
     """某类标的可用的字段名，按定义顺序。"""
     return tuple(f.name for f in _FIELD_LIST if f.available_for(target))
+
+
+def available_targets(manifest: Manifest) -> tuple[str, ...]:
+    """按能力探测结果，当前可用的标的类型。
+
+    表达式校验、给 LLM 的字段清单、取数都从这里判断，三处才会一致——漏掉一处，
+    就会出现清单里没有、校验器却放行，然后去读一张没同步过的表、结果静默为空。
+    没探测过的能力按不可用算（见 Manifest.is_available）。
+    """
+    return tuple(
+        target
+        for target in (STOCK, *BOARD_TARGETS)
+        if target not in TARGET_CAPABILITIES or manifest.is_available(TARGET_CAPABILITIES[target])
+    )
 
 
 def check_available(names: Iterable[str], target: str = STOCK) -> None:

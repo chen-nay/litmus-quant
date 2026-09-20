@@ -1,4 +1,4 @@
-"""申万行业归一的测试：单位换算、时间区间归属、只留一级行业。小表格，不联网。"""
+"""申万行业归一的测试：单位换算、时间区间归属、一级和二级行业。小表格，不联网。"""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ def classify_row(**overrides) -> dict:
         "index_code": "801010.SI",
         "industry_name": "农林牧渔",
         "level": "L1",
+        "industry_code": "110000",
         "parent_code": "0",
         "src": "SW2021",
     }
@@ -30,6 +31,8 @@ def member_row(**overrides) -> dict:
     row = {
         "l1_code": "801050.SI",
         "l1_name": "有色金属",
+        "l2_code": "801053.SI",
+        "l2_name": "贵金属",
         "ts_code": "600547.SH",
         "in_date": "20030826",
         "out_date": None,
@@ -64,16 +67,36 @@ def test_行业代码和名称改名():
     assert row["name"] == "农林牧渔"
 
 
-def test_只保留一级行业():
-    """接口一次会返回 L1/L2/L3，P0 只用一级。"""
+def test_保留一级和二级行业_上级换成指数代码():
+    """接口会返回 L1/L2/L3，用一级、二级。parent_code 给的是上级的行业代码（110000），换成上级的指数代码；
+    2026-09-15 第一次同步二级时没换，二级全都找不到上级。"""
     table = normalize_index_classify(
         [
             classify_row(index_code="801010.SI", level="L1"),
-            classify_row(index_code="801011.SI", level="L2", industry_name="种植业"),
-            classify_row(index_code="850111.SI", level="L3", industry_name="粮食种植"),
+            classify_row(
+                index_code="801016.SI",
+                level="L2",
+                industry_name="种植业",
+                industry_code="110100",
+                parent_code="110000",
+            ),
+            classify_row(
+                index_code="850111.SI",
+                level="L3",
+                industry_name="粮食种植",
+                industry_code="110101",
+                parent_code="110100",
+            ),
+            classify_row(
+                index_code="801999.SI", level="L2", industry_code="990100", parent_code="990000"
+            ),
         ]
     )
-    assert table.get_column("code").to_list() == ["801010.SI"]
+    assert table.select("code", "level", "parent_code").rows() == [
+        ("801010.SI", "L1", None),
+        ("801016.SI", "L2", "801010.SI"),
+        ("801999.SI", "L2", None),  # 上级不在清单里：留空，由同步检查报错
+    ]
 
 
 def test_行业清单按代码排序():
@@ -119,14 +142,24 @@ def test_同一只股票的多段归属都保留():
             member_row(l1_code="801080.SI", l1_name="电子", in_date="20220729", out_date=None),
         ]
     )
-    assert table.height == 2
-    assert table.get_column("industry_name").to_list() == ["有色金属", "电子"]
+    l1 = table.filter(pl.col("level") == "L1")
+    assert l1.height == 2
+    assert l1.get_column("industry_name").to_list() == ["有色金属", "电子"]
 
 
-def test_一级相同三级不同的行会塌成一行():
-    """只取一级行业的列之后，三级行业变动但一级没变的记录就是同一行。"""
+def test_一级和二级各一行():
+    """两级分开存：「某天属于哪个行业」要在同一级里判断。"""
+    table = normalize_industry_member([member_row()])
+    assert table.select("level", "industry_code", "industry_name").rows() == [
+        ("L1", "801050.SI", "有色金属"),
+        ("L2", "801053.SI", "贵金属"),
+    ]
+
+
+def test_一级二级相同三级不同的行会塌成每级一行():
+    """只取一级、二级的列之后，三级行业变动但这两级没变的记录就是同一行。"""
     table = normalize_industry_member([member_row(), member_row()])
-    assert table.height == 1
+    assert table.get_column("level").to_list() == ["L1", "L2"]
 
 
 def test_归属按代码和纳入日排序():
@@ -137,8 +170,9 @@ def test_归属按代码和纳入日排序():
             member_row(ts_code="600547.SH", in_date="19990101"),
         ]
     )
-    assert table.get_column("code").to_list() == ["000001.SZ", "600547.SH", "600547.SH"]
-    assert table.get_column("in_date").to_list()[1:] == [date(1999, 1, 1), date(2003, 8, 26)]
+    l1 = table.filter(pl.col("level") == "L1")
+    assert l1.get_column("code").to_list() == ["000001.SZ", "600547.SH", "600547.SH"]
+    assert l1.get_column("in_date").to_list()[1:] == [date(1999, 1, 1), date(2003, 8, 26)]
 
 
 def test_归属缺字段直接报错():

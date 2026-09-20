@@ -30,14 +30,42 @@ class NormalizeError(ValueError):
 def frame_from_rows(
     rows: Sequence[Mapping], columns: Mapping[str, pl.DataType], source: str
 ) -> pl.DataFrame:
-    """取出需要的列并转成预期类型。缺列直接报错，不静默补空。"""
+    """取出需要的列并转成预期类型。缺列、转不了类型都直接报错，不静默补空。
+
+    字符串转成别的类型前，先去掉首尾空白、把空串当空值——这两种都是数据源的正常写法。
+    除此之外转不了的值一律报错：宽松转换会把它们变成空值，而且一声不吭。
+    2026-09-13 踩过：`tdx_daily.pb` 从 2026 年起带了 10 个前导空格（'          0.82'），
+    宽松转换把半年多的市净率全变成了空值，同步照样「成功」。
+    """
     if not rows:
         return pl.DataFrame(schema=dict(columns))
     df = pl.DataFrame(list(rows), infer_schema_length=None)
     missing = [c for c in columns if c not in df.columns]
     if missing:
         raise NormalizeError(f"{source} 返回缺少字段：{missing}")
-    return df.select(pl.col(name).cast(dtype, strict=False) for name, dtype in columns.items())
+
+    tidied = df.select(_tidy(name, df.schema[name], dtype) for name, dtype in columns.items())
+    converted = tidied.select(
+        pl.col(name).cast(dtype, strict=False) for name, dtype in columns.items()
+    )
+    failures = []
+    for name in columns:
+        lost = converted.get_column(name).is_null() & tidied.get_column(name).is_not_null()
+        if lost.any():
+            samples = tidied.get_column(name).filter(lost).unique().head(3).to_list()
+            failures.append(f"{name} 有 {lost.sum()} 个，如 {samples}")
+    if failures:
+        raise NormalizeError(f"{source} 有值转不成预期类型：{'；'.join(failures)}")
+    return converted
+
+
+def _tidy(name: str, actual: pl.DataType, expected: pl.DataType) -> pl.Expr:
+    """字符串要转成别的类型时，先去首尾空白、空串当空值。字符串列本身原样保留。"""
+    column = pl.col(name)
+    if actual != pl.String or expected == pl.String:
+        return column
+    stripped = column.str.strip_chars()
+    return pl.when(stripped == "").then(None).otherwise(stripped).alias(name)
 
 
 def _with_code_and_date(df: pl.DataFrame) -> pl.DataFrame:

@@ -1,0 +1,234 @@
+# 预置事件库（ARCHITECTURE §4.3）。个股回看只收这里的事件：LLM 只填 id 和 params，表达式由代码按模板生成，
+# 「参数和表达式对不上」从根上不可能发生。
+#
+# 改了任何事件的模板或参数，就把 version 加一：生成的表达式会带上版本号，保存的研究记录重跑时能发现模板变过。
+#
+# 每个事件：
+#   id         英文编号，研究请求里的 event.preset_id
+#   name       中文名；category 类别
+#   template   表达式模板，{参数名} 处代入参数值。只写「条件成立」，「由不满足变为满足」由研究计算统一包
+#   label      标签模板，结果和确认卡上显示
+#   example    示例问句和它对应的参数：给 LLM 当示例，LLM 调用失败时前端也展示它
+#   less_than  参数之间的约束：[小的, 大的]
+#   params     参数。kind = "choice"（只能取 choices 里的整数）/ "int"（min~max 的整数）/ "float"（min~max 的小数）
+#
+# 默认值和 spec.DEFAULTS 一致（放量 2 倍、缩量 0.5 倍、年线 250、短长均线 5/20、放量对比前 20 日），由测试保证。
+# 加载时每个事件的所有合法参数组合都会生成一遍、过表达式校验，写错了启动就报错。
+
+version = 1
+
+# ── 均线 ────────────────────────────────────────────────────────
+
+[[events]]
+id = "breakout_ma"
+name = "突破均线"
+category = "均线"
+template = "Cross($close, Mean($close, {ma}))"
+label = "突破 {ma} 日均线"
+example = { question = "贵州茅台突破年线之后一般怎么走？", params = { ma = 250 } }
+
+[events.params.ma]
+label = "均线天数"
+unit = "天"
+kind = "choice"
+choices = [5, 10, 20, 60, 120, 250]
+default = 250
+
+[[events]]
+id = "breakdown_ma"
+name = "跌破均线"
+category = "均线"
+template = "Cross(Mean($close, {ma}), $close)"
+label = "跌破 {ma} 日均线"
+example = { question = "比亚迪跌破 60 日均线之后会继续跌吗？", params = { ma = 60 } }
+
+[events.params.ma]
+label = "均线天数"
+unit = "天"
+kind = "choice"
+choices = [5, 10, 20, 60, 120, 250]
+default = 250
+
+[[events]]
+id = "ma_golden_cross"
+name = "均线金叉"
+category = "均线"
+template = "Cross(Mean($close, {fast}), Mean($close, {slow}))"
+label = "{fast} 日均线上穿 {slow} 日均线"
+example = { question = "宁德时代 5 日线上穿 20 日线之后表现怎么样？", params = { fast = 5, slow = 20 } }
+less_than = [["fast", "slow"]]
+
+[events.params.fast]
+label = "短均线天数"
+unit = "天"
+kind = "choice"
+choices = [5, 10, 20, 60]
+default = 5
+
+[events.params.slow]
+label = "长均线天数"
+unit = "天"
+kind = "choice"
+choices = [10, 20, 60, 120, 250]
+default = 20
+
+[[events]]
+id = "macd_golden_cross"
+name = "MACD 金叉"
+category = "均线"
+# 参数固定 12/26/9：通用标准，放开之后 LLM 容易乱填
+template = "Cross(EMA($close, 12) - EMA($close, 26), EMA(EMA($close, 12) - EMA($close, 26), 9))"
+label = "MACD 金叉（12, 26, 9）"
+example = { question = "平安银行 MACD 金叉之后一个月涨跌如何？", params = {} }
+
+# ── 量能 ────────────────────────────────────────────────────────
+
+[[events]]
+id = "volume_surge"
+name = "单日放量"
+category = "量能"
+# 对比窗口固定为前 20 日（不含当天），只开放倍数
+template = "$amount > Mean(Ref($amount, 1), 20) * {volume_ratio}"
+label = "放量：成交额超过前 20 日均额的 {volume_ratio} 倍"
+example = { question = "中国平安放量 3 倍之后一周涨跌怎样？", params = { volume_ratio = 3.0 } }
+
+[events.params.volume_ratio]
+label = "放量倍数"
+unit = "倍"
+kind = "float"
+min = 1.2
+max = 10.0
+default = 2.0
+
+[[events]]
+id = "breakout_ma_volume"
+name = "放量突破均线"
+category = "量能"
+# 就是「突破均线」和「单日放量」同时成立，由测试保证两边写法一致
+template = "(Cross($close, Mean($close, {ma}))) & ($amount > Mean(Ref($amount, 1), 20) * {volume_ratio})"
+label = "放量突破 {ma} 日均线（成交额超过前 20 日均额的 {volume_ratio} 倍）"
+example = { question = "茅台放量突破年线之后表现怎么样？", params = { ma = 250, volume_ratio = 2.0 } }
+
+[events.params.ma]
+label = "均线天数"
+unit = "天"
+kind = "choice"
+choices = [5, 10, 20, 60, 120, 250]
+default = 250
+
+[events.params.volume_ratio]
+label = "放量倍数"
+unit = "倍"
+kind = "float"
+min = 1.2
+max = 10.0
+default = 2.0
+
+[[events]]
+id = "shrink_pullback"
+name = "缩量回调"
+category = "量能"
+template = "($close < Ref($close, 1)) & ($amount < Mean(Ref($amount, 1), 20) * {shrink_ratio})"
+label = "缩量回调：收盘下跌，成交额不到前 20 日均额的 {shrink_ratio} 倍"
+example = { question = "招商银行缩量回调之后能反弹吗？", params = { shrink_ratio = 0.5 } }
+
+[events.params.shrink_ratio]
+label = "缩量倍数"
+unit = "倍"
+kind = "float"
+min = 0.1
+max = 0.9
+default = 0.5
+
+# ── 价格 ────────────────────────────────────────────────────────
+
+[[events]]
+id = "new_high"
+name = "创 N 日新高"
+category = "价格"
+template = "$close >= Max($close, {days})"
+label = "创 {days} 日新高"
+example = { question = "五粮液创一年新高之后还会涨吗？", params = { days = 250 } }
+
+[events.params.days]
+label = "天数"
+unit = "天"
+kind = "choice"
+choices = [20, 60, 120, 250]
+default = 250
+
+[[events]]
+id = "new_low"
+name = "创 N 日新低"
+category = "价格"
+template = "$close <= Min($close, {days})"
+label = "创 {days} 日新低"
+example = { question = "万科创 60 日新低之后会反弹吗？", params = { days = 60 } }
+
+[events.params.days]
+label = "天数"
+unit = "天"
+kind = "choice"
+choices = [20, 60, 120, 250]
+default = 250
+
+# ── 涨跌停 ──────────────────────────────────────────────────────
+
+[[events]]
+id = "limit_up"
+name = "涨停"
+category = "涨跌停"
+template = "$is_limit_up"
+label = "涨停"
+example = { question = "鼎信通讯涨停之后第二天买进去划算吗？", params = {} }
+
+[[events]]
+id = "consecutive_limit_up"
+name = "连板"
+category = "涨跌停"
+# 加上「由不满足变为满足」后，三连板只在第 3 天触发一次，连涨 4 天也不会再触发
+template = "Count($is_limit_up, {boards}) == {boards}"
+label = "{boards} 连板"
+example = { question = "三连板之后还能追吗？比如中国中免", params = { boards = 3 } }
+
+[events.params.boards]
+label = "连板数"
+unit = "板"
+kind = "int"
+min = 2
+max = 10
+default = 2
+
+[[events]]
+id = "limit_down"
+name = "跌停"
+category = "涨跌停"
+template = "$is_limit_down"
+label = "跌停"
+example = { question = "比亚迪跌停之后抄底怎么样？", params = {} }
+
+# ── 日历 ────────────────────────────────────────────────────────
+
+[[events]]
+id = "report_date"
+name = "财报披露日"
+category = "日历"
+template = "$is_report_date"
+label = "财报披露日"
+example = { question = "茅台每次发财报之后股价怎么走？", params = {} }
+
+[[events]]
+id = "forecast_date"
+name = "业绩预告日"
+category = "日历"
+template = "$is_forecast_date"
+label = "业绩预告公告日"
+example = { question = "比亚迪发业绩预告之后涨跌如何？", params = {} }
+
+[[events]]
+id = "ex_dividend"
+name = "除权除息日"
+category = "日历"
+template = "$is_ex_div"
+label = "除权除息日"
+example = { question = "工商银行除权除息之后能填权吗？", params = {} }

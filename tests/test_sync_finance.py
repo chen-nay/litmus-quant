@@ -19,6 +19,7 @@ from litmus.data.sync import (
     FORECAST_TABLE,
     DataSync,
     SyncError,
+    next_report_period,
     report_periods,
 )
 
@@ -35,6 +36,7 @@ def fina_rows(period: str) -> list[dict]:
             "roe_yearly": 50.0,
             "or_yoy": 18.3,
             "netprofit_yoy": 22.1,
+            "update_flag": "1",
         }
     ]
 
@@ -146,6 +148,12 @@ def test_区间太窄时没有报告期():
     assert report_periods("20240401", "20240629") == []
 
 
+def test_下一个报告期():
+    assert next_report_period("20250913") == "20250930"
+    assert next_report_period("20250930") == "20251231"  # 当天就是报告期末，它已经在区间里了
+    assert next_report_period("20251231") == "20260331"
+
+
 # ── 拉取方式 ────────────────────────────────────────────────────
 
 
@@ -156,7 +164,22 @@ def test_财务和预告按报告期各拉一次(store):
     assert [p["period"] for p in client.params_for("fina_indicator_vip")] == report_periods(
         START, END
     )
-    assert [p["period"] for p in client.params_for("forecast_vip")] == report_periods(START, END)
+    # 预告多一个 END 之后的报告期，理由见下一条
+    assert [p["period"] for p in client.params_for("forecast_vip")] == [
+        *report_periods(START, END),
+        "20250930",
+    ]
+
+
+def test_业绩预告多拉下一个报告期(store):
+    """预告在报告期结束前就发：实测 8/1~9/13 公告的预告里有 30 条属于 9/30 的三季报，
+    只拉「报告期 <= 今天」会全部漏掉。财务指标和披露计划没有这个问题，不多拉。"""
+    client = FakeClient()
+    run(store, client)
+
+    assert "20250930" in [p["period"] for p in client.params_for("forecast_vip")]
+    assert "20250930" not in [p["period"] for p in client.params_for("fina_indicator_vip")]
+    assert "20250930" not in [p["end_date"] for p in client.params_for("disclosure_date")]
 
 
 def test_披露计划用报告期作为end_date(store):
@@ -176,24 +199,16 @@ def test_解禁接口P0不拉(store):
     assert client.params_for("share_float") == []
 
 
-def test_扛不住并发的接口串行拉(store):
-    """实测 disclosure_date 在 8 路并发下返回「您请求速度过快」，串行则完全正常。"""
-    client = FakeClient()
-    run(store, client)
-
-    assert client.peak["disclosure_date"] == 1
-
-
-def test_扛得住并发的接口照常并发(store):
-    """fina_indicator_vip 单次要十几秒，串行四十多个报告期要八分半，必须并发。"""
+def test_财务接口并发拉(store):
+    """fina_indicator_vip 单次要十几秒，串行四十多个报告期要八分半，必须并发。
+    哪个接口扛不住（实测 disclosure_date）由 client 的自适应并发自己降下来，这里不点名串行。"""
     client = FakeClient()
     run(store, client)
 
     assert client.peak["fina_indicator_vip"] > 1
 
 
-def test_串行的接口一次都不少(store):
-    """串行只是改了拉取方式，不该漏掉任何一个请求。"""
+def test_披露计划一个报告期都不少(store):
     client = FakeClient()
     run(store, client)
 
@@ -208,6 +223,7 @@ def test_财务指标只请求需要的字段(store):
     requested = client.fields_for("fina_indicator_vip")
     assert "netprofit_yoy" in requested
     assert "roe_yearly" in requested
+    assert "update_flag" in requested  # 不在默认输出里，不点名就拿不到
     assert "eps" not in requested
 
 

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import polars as pl
 import pytest
 
 from litmus.data.loaders.normalize import (
     NormalizeError,
     build_daily_panel,
+    frame_from_rows,
     normalize_adj_factor,
     normalize_daily,
     normalize_daily_basic,
@@ -215,3 +217,29 @@ def test_北交所照常落盘_不在这一层过滤():
         [{**limit_rows()[0], "ts_code": "920992.BJ"}],
     )
     assert panel.row(0, named=True)["code"] == "920992.BJ"
+
+
+# ── 类型转换（所有接口共用 frame_from_rows）─────────────────────
+
+
+def test_数字字符串带首尾空白也能转():
+    """实测 tdx_daily.pb 从 2026 年起带 10 个前导空格，宽松转换曾把它们全变成空值。"""
+    table = frame_from_rows([{"x": "          0.82"}, {"x": "1.5 "}], {"x": pl.Float64}, "测试")
+    assert table.get_column("x").to_list() == [0.82, 1.5]
+
+
+def test_空串和纯空白当空值():
+    table = frame_from_rows([{"x": ""}, {"x": "   "}, {"x": None}], {"x": pl.Float64}, "测试")
+    assert table.get_column("x").null_count() == 3
+
+
+def test_转不了的值直接报错而不是变成空值():
+    """宽松转换会把它悄悄变成空值，同步照样成功，只有用数据时才发现少了一截。"""
+    with pytest.raises(NormalizeError, match="x 有 1 个"):
+        frame_from_rows([{"x": "1.5"}, {"x": "--"}], {"x": pl.Float64}, "测试")
+
+
+def test_字符串列原样保留():
+    """只有要转成别的类型时才去空白，名称这类字符串列不动（通达信的股票名里就带空格）。"""
+    table = frame_from_rows([{"name": "盐 田 港 "}], {"name": pl.String}, "测试")
+    assert table.get_column("name").to_list() == ["盐 田 港 "]

@@ -32,7 +32,6 @@ def panel(month: str = "2026-09", days: tuple[int, ...] = (1, 2), codes: int = 3
 
 def test_没同步过时得到一个空账本(store):
     manifest = Manifest.load(store)
-    assert manifest.first_sync_done is False
     assert manifest.recorded_months("daily") == ()
     assert manifest.data_through("daily") is None
 
@@ -42,14 +41,12 @@ def test_存盘再读回内容不变(store):
     manifest.record_month("daily", "2026-09", panel(), complete=False)
     manifest.record_table("meta/stock_basic", panel(), note="含退市")
     manifest.record_capability("tdx_daily", available=False, reason="需要 6000 积分")
-    manifest.first_sync_done = True
     manifest.save(store)
 
     again = Manifest.load(store)
     assert again.month("daily", "2026-09") == manifest.month("daily", "2026-09")
     assert again.tables["meta/stock_basic"].note == "含退市"
     assert again.unavailable_reason("tdx_daily") == "需要 6000 积分"
-    assert again.first_sync_done is True
 
 
 def test_账本写在数据目录的固定位置(store):
@@ -62,6 +59,24 @@ def test_存盘时间会更新(store):
     assert manifest.updated_at == ""
     manifest.save(store)
     assert manifest.updated_at.startswith("20")
+
+
+def test_老账本里多出的first_sync_done照样读得进来(store):
+    """这个标记删了，改从日频月份推导；老数据目录不用重新同步。"""
+    write_json(
+        {
+            "source": "tushare",
+            "first_sync_done": True,
+            "updated_at": "",
+            "version": MANIFEST_VERSION,
+            "months": {},
+            "tables": {},
+            "capabilities": {},
+        },
+        store.manifest_path,
+    )
+
+    assert Manifest.load(store).recorded_months("daily") == ()
 
 
 def test_版本对不上要求重新同步(store):
