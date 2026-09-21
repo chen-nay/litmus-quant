@@ -562,16 +562,16 @@ def test_页面开关_环境变量怎么解读(monkeypatch):
     assert _flag("LITMUS_SHOW_TRACE", default=True) is True
 
 
-def test_过程记录_接口能按提问编号取回_不存在返回404(tmp_path):
-    from litmus.store import PlanRecord, TraceRecord
+def test_过程_接口能按提问编号取回_不存在返回404(tmp_path):
+    from litmus.store import PlanRecord
 
     store = JsonStore(tmp_path)
-    plan_id = store.save_plan(PlanRecord(query="x", status="ok"))
-    store.save_trace(TraceRecord(record_id=plan_id, query="x", steps=[{"step": "llm.plan"}]))
+    plan_id = store.save_plan(PlanRecord(query="x", status="ok", steps=[{"step": "llm.plan"}]))
 
     client = make_client(tmp_path, ds=NoData(), llm=NoLLM())
     body = client.get(f"/api/traces/{plan_id}").json()
     assert body["record_id"] == plan_id and body["steps"] == [{"step": "llm.plan"}]
+    assert body["query"] == "x" and body["created_at"]
     assert client.get("/api/traces/p20260916-21-37-20aaaaaa").status_code == 404
     assert client.get("/api/traces/..%2Fsecret").status_code == 404
 

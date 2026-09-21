@@ -30,6 +30,9 @@ class Services:
     #: 结果页上显示「技术细节」（过程记录）。关掉只是页面不显示，照样记录、照样能用
     #: GET /api/traces/<编号> 取——想排查的那一次往往已经发生了，不能等打开开关才开始记
     show_trace: bool = True
+    #: `.env` 里 LITMUS_DEBUG=true：过程里连渲染后的系统提示词全文一起记（一次调用约 1.3 万字）。
+    #: 平时只记模板哈希和渲染后哈希，模板在 git 里、变量能从当天数据重建
+    debug: bool = False
 
     @classmethod
     def from_env(cls) -> Services:
@@ -43,6 +46,7 @@ class Services:
             data_status=DataSync(None, market).status,
             llm=_llm_from_env(),
             show_trace=_flag("LITMUS_SHOW_TRACE", default=True),
+            debug=_flag("LITMUS_DEBUG", default=False),
         )
 
 

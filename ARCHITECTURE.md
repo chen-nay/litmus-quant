@@ -1450,7 +1450,8 @@ GET  /api/settings
 
 GET  /api/traces/{plan_id 或 run_id}
   resp: { "record_id", "query", "steps": [{ "step", ... }], "created_at" }
-  说明：过程记录，每一步调了什么、返回了什么、花了多久（§7）。给开发排查用。没有这条记录返回 404
+  说明：一次提问 / 一次运行的过程，每一步调了什么、返回了什么、花了多久（§7）。
+        过程就存在那条记录的 steps 里，这里只是按编号取。给开发排查用。没有这条记录返回 404
 
 GET  /api/events
   resp: { "library_version": 1, "events": [...] }
@@ -1556,16 +1557,16 @@ curl -s -X POST http://127.0.0.1:8000/api/data/sync/stop
 
 ```
 data/store/
-├── plans/<plan_id>.json     # 一次提问：原话与生成的 spec，供 /api/run 判断用户是否改过参数
-├── runs/<run_id>.json       # 一次计算：spec + 结果（已序列化的 dict），供分享链接和排查问题
-└── traces/t<plan_id 或 run_id>.json  # 过程记录：每一步调了什么、返回了什么、花了多久
-└── narratives/n<run_id>.json         # 卡下面的小结：那段话，没写出来的原因（写它的大模型调用在 traces/tr<run_id>.json）
+├── plans/<plan_id>.json     # 一次提问：原话、翻出来的 spec、候选与追问、每一步的过程、引出的运行编号
+└── runs/<run_id>.json       # 一次计算：spec、结果、当时的数据状态、每一步的过程、卡的小结
 ```
 
-**三者的关系**：一次提问（plan）→ 0 次或多次计算（run，改了条件重跑就多一条；看完确认卡关掉就是 0 次）。
-run 里的 `plan_id` 指回提问，手填表单不经过提问时为空。trace 不另编号，文件名是 `t` + 它记录的那条
-plan_id / run_id（`tp2026…` 记提问、`tr2026…` 记运行）：一眼看出记的是哪一类，又能从 plan_id 直接推出
-文件名、不用建索引。对外仍按 plan_id / run_id 查（`GET /api/traces/{id}`）。
+**一件事一个文件**（2026-09-21 定）：查一次提问只看一份 `plans/…`，查一次计算只看一份 `runs/…`。
+过程、小结都写在它们属于的那条记录里，不再单独放。
+
+**两者的关系**：一次提问（plan）→ 0 次或多次计算（run，改了条件重跑就多一条；看完确认卡关掉就是 0 次）。
+run 里的 `plan_id` 指回提问，提问记录的 `runs` 列出它引出的运行，两边都能顺着走；
+表单直接提交、不经过提问的运行 `plan_id` 为空。`GET /api/traces/{plan_id 或 run_id}` 取的就是那条记录的 `steps`。
 
 ```python
 class Store(Protocol):
@@ -1573,8 +1574,9 @@ class Store(Protocol):
     def get_plan(self, plan_id: str) -> PlanRecord | None: ...
     def save_run(self, run: RunRecord) -> str: ...             # 返回 run_id
     def get_run(self, run_id: str) -> RunRecord | None: ...
-    def save_trace(self, trace: TraceRecord) -> str: ...       # 编号用 plan_id / run_id
-    def get_trace(self, record_id: str) -> TraceRecord | None: ...
+    def add_steps(self, record_id: str, steps) -> None: ...    # 过程追加到提问或运行记录里
+    def link_run(self, plan_id: str, run_id: str) -> None: ...  # 把一次运行挂到提问名下
+    def set_narrative(self, run_id: str, narrative: Narrative) -> None: ...
 ```
 
 - **一条记录一个文件**，不把所有记录塞进一个大 JSON
@@ -1591,21 +1593,26 @@ class Store(Protocol):
 - **运行记录**（第 5 步定）：spec、状态（done / failed）、结果或错误、plan_id、数据截至日、事件库版本号、耗时、创建时间。
   同步过新数据、事件库模板改过之后，同一个请求的结果会变，靠数据截至日和版本号对上当时的条件
 - 结果里的日期存成 `2026-09-11`；持有天数作 key 存成字符串 `"5"`（JSON 的限制）；NaN、无穷大存成 null
-- **过程记录**（2026-09-16 加）：`steps` 是一串 dict，形状由写入方定，store 不认识里面的内容。
-  提问这条链记：`llm.plan`（每次调用一条，重试就两条）、`resolve_stock`、`resolve_board`、`check_spec`，
-  最后 `respond` 记最终状态。运行这条链记：`check_spec`、`explain`、`research.run` 各自的耗时，
-  最后 `respond` 记状态和结果规模（表记满足条件几个、取回几行；卡记几个标的；统计记触发几次）。
-  这几步是纯代码，同样的条件和数据算出来一样，所以只记耗时和规模，条件和结果看运行记录 `runs/r<run_id>.json`。
-  卡的小结是大模型写的，写完把每次调用（`llm.narrate`，重试就两条）接在这条运行链后面。
-  两条链的 `query` 都是用户原话；不经过提问直接调 `/api/run` 的没有原话，是空串。
+- **过程**（2026-09-16 加，2026-09-21 并进记录）：`steps` 是一串 dict，形状由写入方定，store 不认识里面的内容。
+  提问记：`llm.plan`（每次调用一条，重试就两条）、`resolve_stock`、`resolve_board`、`check_spec`，
+  最后 `respond` 记最终状态；之后每调一次 `/api/check`（确认卡上改完条件、从候选里选完）追加一条 `check`，
+  带上检查完的那份条件——「用户改了什么之后才跑的」要查得到。
+  运行记：`check_spec`、`explain`、`research.run` 各自的耗时，最后 `respond` 记状态和结果规模
+  （表记满足条件几个、取回几行；卡记几个标的；统计记触发几次）。
+  这几步是纯代码，同样的条件和数据算出来一样，所以只记耗时和规模，条件和结果就在这条记录自己身上。
+  卡的小结是大模型写的，写完把每次调用（`llm.narrate`，重试就两条）接在运行记录的过程后面。
   运行链只在存下运行记录时才记——检查没过（needs_revision）那些问题本来就原样显示给用户了，不是黑箱。
   - **为什么要记**：确认卡以下是纯代码，可复现；确认卡以上（问题 → 查询单）既不可复现也看不见——
     同一个问题明天再问，提示词里的日期换算表和行业清单都变了，没有记录就还原不了当时那一次。
     2026-09-16 排查「为什么答不了牧原股份的市盈率」时，只能从加工后的字段反推大模型返回了什么，
     这件事本身就是要补这块的理由
-  - **提示词不整份存**：渲染完几千 token（字段清单、算子清单、165 个行业名、日期换算表都在里面），
-    每条提问存一份很快几兆。存 `prompt_version`（模板哈希）+ `rendered_hash`（渲染后哈希）足够定位是哪一版——
-    模板在 git 里，变量能从当天数据重建。只记 `prompt_version` 不够：同一模板在不同日期渲染出的内容不同
+  - **对话消息整份存**（`user_message`）：提问时是用户原话，改条件时是「现在的条件 + 要改的地方 + 改写规则」那一大段
+  - **系统提示词平时只记两个哈希**：渲染完 1.3 万字（字段清单、算子清单、165 个行业名、日期换算表都在里面），
+    每条提问存一份很快几兆。`prompt_version`（模板哈希）+ `rendered_hash`（渲染后哈希）足够定位是哪一版——
+    模板在 git 里，变量能从当天数据重建。只记 `prompt_version` 不够：同一模板在不同日期渲染出的内容不同。
+    **`.env` 里 `LITMUS_DEBUG=true` 时连全文一起记**（`system` 字段，一次调用约 1.3 万字），
+    排查「大模型当时看到了什么」时打开。默认关；它只影响写本地文件，发给大模型的内容不变，token 数也不变。
+    重建有个前提：行业清单、交易日历、数据截止日变了就渲染不出同一份（哈希对不上），那时只能靠这个开关
   - **原始返回整份存**：它小（几百 token），而且是唯一事后重建不出来的东西。还记 model、token 数、耗时。
     没调用输出工具（直接用文字答了、思考太长用完额度）也照样记：原始返回里是 stop_reason、它写的文字、思考了多少字
   - **输入 token 分两个数**：`input_tokens` 是没命中缓存的，`cached_tokens` 是读缓存的。火山引擎自动缓存提示词，
@@ -1615,8 +1622,7 @@ class Store(Protocol):
   - **存不下来不影响回答**：过程记录是给开发看的，用户的答案已经算好了，写失败只记一条日志
   - **页面上看**：结果页有个折叠的「技术细节」，同时显示这次运行和它对应的那次提问。
     由 `.env` 的 `LITMUS_SHOW_TRACE` 控制（默认开）。**开关只管显不显示，不管记不记**——
-    想排查的那一次往往已经发生了，等打开开关才开始记就晚了。旧记录没有 trace 时那一段不显示，
-    不当成错误
+    想排查的那一次往往已经发生了，等打开开关才开始记就晚了。记录里没有过程时那一段不显示，不当成错误
 
 以后换 SQLite：新增 `SqliteStore` 实现同一接口 → 通过同一套契约测试 → api 换一个类名，上层无需改动。
 
@@ -1749,7 +1755,7 @@ def test_mean():
 | loader | 需要 token：单位换算正确；达到单次上限时自动分页；字段名或类型不符时报错 |
 | DataSync | 需要 token：中断后续传不重复不遗漏；增量同步只补缺口；能力探测结果正确写入 manifest |
 | 同步锁与后台同步 | 离线：同一个数据目录同时只能开一个同步，结束或打开失败后锁会放掉；假同步器上按顺序跑完、同一时间一个、月份之间停下、最后一个月落盘后才点停止算完成、出错停下并记原因、概念板块出错接着跑后面的步骤、没配 token 打不开（`tests/test_sync_all.py`、`tests/test_sync_job.py`） |
-| store 契约 | 存了能原样取回；编号格式、同一秒不撞；非法编号读不到别的文件；一条记录一个文件、不留临时文件；存不进 JSON 的不留文件；过程记录用 plan_id / run_id 当编号、嵌套结构原样取回、编号不合法直接报错（`tests/contract/test_store.py`） |
+| store 契约 | 存了能原样取回；编号格式、同一秒不撞；非法编号读不到别的文件；一件事一个文件（只有 plans/ 和 runs/）、不留临时文件；存不进 JSON 的不留文件；过程追加进它属于的那条记录、嵌套结构原样取回、写进不存在的记录直接报错；一次提问引出的运行都挂在它名下、重复挂不记两遍；小结写进那次运行的记录（`tests/contract/test_store.py`） |
 | api | TestClient + 替身：请求体写错返回 `needs_revision` 而不是 422；结构、事件有问题时不读数据；中文说明、栏目路径、可选范围；计算出错存失败记录并返回编号；同步启动、不重复开、停止、查进度（`tests/test_api.py`）。本地真实数据上跑三种结果，数据量都很小（`tests/contract/test_run_api.py`） |
 | K 线 | 本地真实数据：基准日前复权价等于真实价、涨跌幅和后复权一样、送转当天真实价断崖而前复权连续、还没上市返回空表；接口参数写错 400、没有这只股票 404（`tests/contract/test_kline.py`） |
 | 页面开关 | `/api/settings` 默认开、关掉后接口照常；环境变量的解读（1 / true / yes / on 算开，其余非空算关，空用默认）（`tests/test_api.py`） |
@@ -1770,7 +1776,7 @@ def test_mean():
 | screener | 股票表 / 板块表：筛选、排序、取前 N；板块字段正确路由到板块数据表 |
 | 名称解析 | 小表格逐条覆盖六条规则、同一只只出现一次、不含北交所、含退市、全角和空格、板块去后缀、查不到时名字相近的板块（`tests/test_resolve.py`）；真实数据上「平安」多个候选、茅台的名称 / 代码 / 拼音、「招行」「中石油」、曾用名「龙净环保」、板块「光模块」查不到（`tests/contract/test_resolve.py`） |
 | describe | 每个算子的中文说法、括号与运算先后、全部算子都有说法（`tests/test_expr_describe.py`） |
-| 过程记录 | 离线：原始返回、token（含读缓存的）、耗时都带出来，没调用输出工具时实际回的文字和 token 也记下，提示词只记两个哈希且互不相同；重试时两次调用都留着、第一次的问题清单看得到；调用本身失败时记原因且没有原始返回（`tests/test_planner.py`）。真实数据 + 假大模型：按 plan_id 取回全部步骤、被拒绝的提问看得出 unsupported 是大模型自己回的、存不下来不影响回答（`tests/contract/test_plan_api.py`）。真实数据上的运行链：每一步的耗时、结果规模，个股回看记触发次数（`tests/contract/test_run_api.py`）。接口按编号取、不存在 404、`../` 读不到别的文件（`tests/test_api.py`） |
+| 过程记录 | 离线：原始返回、token（含读缓存的）、耗时都带出来，没调用输出工具时实际回的文字和 token 也记下，提示词只记两个哈希且互不相同；真实数据 + 假大模型：一次提问只落一个文件、运行挂在它名下、确认卡上改完的检查也记进去、`LITMUS_DEBUG` 打开才记系统提示词全文（`tests/contract/test_plan_api.py`）；重试时两次调用都留着、第一次的问题清单看得到；调用本身失败时记原因且没有原始返回（`tests/test_planner.py`）。真实数据 + 假大模型：按 plan_id 取回全部步骤、被拒绝的提问看得出 unsupported 是大模型自己回的、存不下来不影响回答（`tests/contract/test_plan_api.py`）。真实数据上的运行链：每一步的耗时、结果规模，个股回看记触发次数（`tests/contract/test_run_api.py`）。接口按编号取、不存在 404、`../` 读不到别的文件（`tests/test_api.py`） |
 | 大模型规划 | 离线用假客户端：转换、防线②重试、澄清、改写建议过滤、追问、确认卡上改条件（交给大模型的是现在的条件不是原问题；股票、概念板块照抄代码按代码查，不当成原话）（`tests/test_planner.py`、`tests/contract/test_plan_api.py`）。真实大模型 + 本地数据按 §9 第 7 步的验收标准逐条问（`tests/test_plan_live.py`，十来次调用、约 5 分钟，平时不跑；只核对结构，不核对措辞） |
 | prompts | 所有 prompt 能渲染；变量不缺不多；id 与文件名一致；系统提示词的变量都由代码填（`tests/test_llm_client.py`、`tests/test_planner.py`） |
 | llm.plan | 用假 LLMClient：编造字段、写错表达式、事件参数越界时带着问题重试一次，还不对返回 failed；漏填 status 按内容推断；点名的原话和猜测名写进了 `subject.codes` 按点名的名字读、不重试；澄清的选项最多三个；改写建议去掉买卖建议、百分比、太长的；追问把原问题和回答一起交给大模型（`tests/test_planner.py`）。客户端：认证方式按域名选、401 自动换、强制工具调用、跳过思考块、超时（`tests/test_llm_client.py`） |

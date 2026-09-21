@@ -61,7 +61,7 @@ from litmus.llm import (
     plan,
 )
 from litmus.spec import Mention
-from litmus.store import PlanRecord, TraceRecord
+from litmus.store import PlanRecord
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,9 @@ def make_plan(
     revise = _for_revise(spec) if spec is not None else None
     result = plan(query, context, services.llm, services.events, previous, revise)
     mentions = _with_names(result)
-    steps: list[dict[str, object]] = [call_step(call, "llm.plan") for call in result.calls]
+    steps: list[dict[str, object]] = [
+        call_step(call, "llm.plan", services.debug) for call in result.calls
+    ]
     response = _respond(result, mentions, services, steps, revised=spec is not None)
 
     detail = {
@@ -176,7 +178,7 @@ def make_plan(
     if response.status == OK and (response.spec or {}).get("output", {}).get("kind") == "card":
         response = _card(response, plan_id, services, steps)
     steps.append({"step": "respond", "status": response.status, "message": response.message})
-    _save_trace(services, plan_id, query, steps)
+    _record_steps(services, plan_id, steps)
     return response.model_copy(update={"plan_id": plan_id})
 
 
@@ -205,14 +207,12 @@ def _card(
     )
 
 
-def _save_trace(
-    services: Services, plan_id: str, query: str, steps: list[dict[str, object]]
-) -> None:
-    """记录失败不能影响回答：过程记录是给开发看的，用户的答案已经算好了。"""
+def _record_steps(services: Services, plan_id: str, steps: list[dict[str, object]]) -> None:
+    """把这次提问的每一步写进它的记录里。记录失败不能影响回答：用户的答案已经算好了。"""
     try:
-        services.store.save_trace(TraceRecord(record_id=plan_id, query=query, steps=steps))
+        services.store.add_steps(plan_id, steps)
     except Exception:  # noqa: BLE001 —— 存不下就算了，只记一条日志
-        logger.warning("提问 %s 的过程记录没能存下来", plan_id, exc_info=True)
+        logger.warning("提问 %s 的过程没能记下来", plan_id, exc_info=True)
 
 
 #: 确认卡上的条件里，这两栏是后端算出来的结果，不给大模型看

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
@@ -54,8 +55,7 @@ def llm() -> FakeLLM:
     return FakeLLM()
 
 
-@pytest.fixture
-def client(tmp_path, llm) -> TestClient:
+def make_client(tmp_path, llm, debug: bool = False) -> TestClient:
     def no_sync():
         raise AssertionError("契约测试不同步")
 
@@ -66,8 +66,14 @@ def client(tmp_path, llm) -> TestClient:
         sync_job=SyncJob(no_sync),
         data_status=DataSync(None, _market).status,
         llm=llm,
+        debug=debug,
     )
     return TestClient(create_app(services))
+
+
+@pytest.fixture
+def client(tmp_path, llm) -> TestClient:
+    return make_client(tmp_path, llm)
 
 
 def ask(client: TestClient, llm: FakeLLM, output: dict, query: str = "问题", **extra) -> dict:
@@ -429,14 +435,63 @@ def test_过程记录_被拒绝的提问也记_看得出是大模型自己回的
     assert [s["step"] for s in trace["steps"]] == ["llm.plan", "respond"]
 
 
-def test_过程记录存不下来_不影响回答(client, llm, monkeypatch):
-    """过程记录是给开发看的，用户的答案已经算好了，不能因为记不上就整个失败。"""
+def test_过程记不下来_不影响回答(client, llm, monkeypatch):
+    """过程是给开发看的，用户的答案已经算好了，不能因为记不上就整个失败。"""
     monkeypatch.setattr(
-        JsonStore, "save_trace", lambda *a, **k: (_ for _ in ()).throw(OSError("磁盘满了"))
+        JsonStore, "add_steps", lambda *a, **k: (_ for _ in ()).throw(OSError("磁盘满了"))
     )
     body = ask(client, llm, HISTORY, query="茅台放量突破年线之后怎么样")
     assert body["status"] == "ok", body
-    assert client.get(f"/api/traces/{body['plan_id']}").status_code == 404
+    assert client.get(f"/api/traces/{body['plan_id']}").json()["steps"] == []
+
+
+def test_一次提问一个文件_运行和检查都记在这次提问名下(client, llm, tmp_path):
+    body = ask(client, llm, TABLE, query="农林牧渔里今年以来涨幅前 10")
+    plan_id = body["plan_id"]
+    # 确认卡上点「打开表单」改完再检查：也记进这次提问
+    edited = {**body["spec"], "output": {**body["spec"]["output"], "limit": 20}}
+    assert (
+        client.post("/api/check", json={"spec": edited, "plan_id": plan_id}).json()["status"]
+        == "ok"
+    )
+    run_id = client.post("/api/run", json={"spec": edited, "plan_id": plan_id}).json()["run_id"]
+
+    files = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*.json"))
+    assert files == [f"plans/{plan_id}.json", f"runs/{run_id}.json"]
+
+    plan = json.loads((tmp_path / "plans" / f"{plan_id}.json").read_text())
+    assert plan["runs"] == [run_id]  # 这次提问引出的运行
+    assert [step["step"] for step in plan["steps"]] == [
+        "llm.plan",
+        "check_spec",
+        "respond",
+        "check",
+    ]
+    assert plan["steps"][-1]["spec"]["output"]["limit"] == 20  # 改完是什么条件
+    run = json.loads((tmp_path / "runs" / f"{run_id}.json").read_text())
+    assert run["plan_id"] == plan_id
+    assert [step["step"] for step in run["steps"]] == [
+        "check_spec",
+        "explain",
+        "research.run",
+        "respond",
+    ]
+
+
+def test_系统提示词平时不记_LITMUS_DEBUG打开才记(tmp_path, llm):
+    plain = make_client(tmp_path / "off", llm)
+    body = ask(plain, llm, TABLE)
+    step = next(s for s in trace_steps(plain, body["plan_id"]) if s["step"] == "llm.plan")
+    assert "system" not in step and step["rendered_hash"]  # 平时只记哈希
+
+    debug = make_client(tmp_path / "on", llm, debug=True)
+    body = ask(debug, llm, TABLE)
+    step = next(s for s in trace_steps(debug, body["plan_id"]) if s["step"] == "llm.plan")
+    assert "可用的字段" in step["system"] and len(step["system"]) > 5000
+
+
+def trace_steps(client: TestClient, record_id: str) -> list[dict]:
+    return client.get(f"/api/traces/{record_id}").json()["steps"]
 
 
 def test_确认卡上改条件_把现在的条件交给大模型_选过的概念板块不会丢(client, llm):

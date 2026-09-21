@@ -19,7 +19,7 @@ import logging
 import threading
 import time
 from collections import defaultdict
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -35,7 +35,7 @@ from litmus.expr import ExprDataError
 from litmus.llm import LLMCall, narrate
 from litmus.research import run as run_research
 from litmus.spec import Confirm, EventStudyOutput
-from litmus.store import NarrativeRecord, RunRecord, TraceRecord
+from litmus.store import Narrative, PlanRecord, RunRecord, Store
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -63,6 +63,22 @@ async def post_run(request: Request) -> RunResponse:
 
 
 def check(raw_spec: object, plan_id: str | None, services: Services) -> CheckResponse:
+    """只检查、不计算。确认卡上点「打开表单」改完、从候选里选完，页面都走这里刷新说明。
+
+    检查了什么、结果如何，记进那次提问的过程里：不然「用户改了什么之后才跑的」事后查不到。
+    """
+    response = _check(raw_spec, plan_id, services)
+    if plan_id:
+        step: dict[str, object] = {"step": "check", "status": response.status}
+        if response.spec:
+            step["spec"] = response.spec
+        if response.issues:
+            step["issues"] = [issue.message for issue in response.issues]
+        _record_steps(services, plan_id, steps=[step])
+    return response
+
+
+def _check(raw_spec: object, plan_id: str | None, services: Services) -> CheckResponse:
     status = services.data_status()
     if not status.ready:
         return CheckResponse(
@@ -113,7 +129,7 @@ def execute(raw_spec: object, plan_id: str | None, services: Services) -> RunRes
         )
         logger.exception("计算出错，运行记录 %s", run_id)
         steps.append({"step": "respond", "status": "failed", "error": error})
-        _save_trace(services, run_id, plan_id, steps)
+        _record_steps(services, run_id, plan_id, steps)
         message = f"计算时出错了，运行记录编号 {run_id}，详情见服务日志"
         return RunResponse(status="failed", run_id=run_id, message=message)
 
@@ -128,7 +144,7 @@ def execute(raw_spec: object, plan_id: str | None, services: Services) -> RunRes
         _record(spec, plan_id, status.data_through, started, status="done", result=payload)
     )
     steps.append({"step": "respond", "status": "done", **_size(payload), "ms": _ms(started)})
-    _save_trace(services, run_id, plan_id, steps)
+    _record_steps(services, run_id, plan_id, steps)
     return RunResponse(status="done", run_id=run_id, result=payload)
 
 
@@ -138,10 +154,20 @@ def _question(services: Services, plan_id: str | None) -> str | None:
     return str(record.detail.get("question") or record.query) if record else None
 
 
-def call_step(call: LLMCall, step: str) -> dict[str, object]:
-    """一次大模型调用 → 过程记录里的一步。提示词只记哈希，原始返回整份记（LLMCall 的说明）。"""
+def _question_of(store: Store, record: RunRecord) -> str | None:
+    """运行记录上的原话：从它挂着的那次提问里取，表单直接提交的没有。"""
+    plan = store.get_plan(record.plan_id) if record.plan_id else None
+    return str(plan.detail.get("question") or plan.query) if plan else None
+
+
+def call_step(call: LLMCall, step: str, debug: bool = False) -> dict[str, object]:
+    """一次大模型调用 → 过程记录里的一步。原始返回整份记，提示词只记哈希（LLMCall 的说明）。
+
+    `.env` 里 `LITMUS_DEBUG=true` 时，渲染后的系统提示词全文也记下来（一次约 1.3 万字）。
+    """
     return {
         "step": step,
+        **({"system": call.system} if debug else {}),
         "attempt": call.attempt,
         "prompt_id": call.prompt_id,
         "prompt_version": call.prompt_version,
@@ -171,27 +197,22 @@ def _size(payload: dict[str, Any]) -> dict[str, object]:
     return {"triggers": len(payload.get("triggers") or ())}
 
 
-def _save_trace(
-    services: Services, run_id: str, plan_id: str | None, steps: list[dict[str, object]]
+def _record_steps(
+    services: Services,
+    record_id: str,
+    plan_id: str | None = None,
+    steps: list[dict[str, object]] | None = None,
 ) -> None:
-    """记录失败不能影响回答：结果已经算好存好了，过程记录只是给开发看的。
+    """把这几步写进它属于的那条记录；运行还要挂到提问名下。
 
-    query 记用户原话，和提问那条过程记录一样；不经过提问直接调接口的没有原话，是空串。
+    记录失败不能影响回答：结果已经算好存好了，过程只是给开发看的。
     """
     try:
-        question = _question(services, plan_id) or ""
-        services.store.save_trace(TraceRecord(record_id=run_id, query=question, steps=steps))
+        services.store.add_steps(record_id, steps or [])
+        if plan_id and record_id.startswith("r"):
+            services.store.link_run(plan_id, record_id)
     except Exception:  # noqa: BLE001 —— 存不下就算了，只记一条日志
-        logger.warning("运行 %s 的过程记录没能存下来", run_id, exc_info=True)
-
-
-def _append_trace(services: Services, run_id: str, steps: list[dict[str, object]]) -> None:
-    """小结写完后，把写它的每次大模型调用接在这次运行的过程记录后面。失败只记日志。"""
-    try:
-        trace = services.store.get_trace(run_id) or TraceRecord(record_id=run_id, query="")
-        services.store.save_trace(replace(trace, steps=[*trace.steps, *steps]))
-    except Exception:  # noqa: BLE001
-        logger.warning("运行 %s 的小结没能记进过程记录", run_id, exc_info=True)
+        logger.warning("%s 的过程没能记下来", record_id, exc_info=True)
 
 
 @router.get("/api/run/{run_id}")
@@ -201,8 +222,11 @@ def get_run(run_id: str, request: Request) -> dict[str, object]:
     record = store.get_run(run_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"没有编号为 {run_id} 的运行记录")
-    narrative = store.get_narrative(run_id)
-    return {**asdict(record), "narrative": None if narrative is None else narrative.text}
+    # 页面只要小结那段话，写它的过程在记录的 steps 里
+    return {
+        **asdict(record),
+        "narrative": None if record.narrative is None else record.narrative.text,
+    }
 
 
 @router.post("/api/run/{run_id}/narrative")
@@ -231,16 +255,15 @@ def _write_narrative(run_id: str, services: Services) -> NarrativeResponse:
     result = record.result or {}
     if result.get("kind") != "card" or not record.spec.get("narrate"):
         raise HTTPException(status_code=400, detail="这次运行不是要写小结的卡")
-    if saved := services.store.get_narrative(run_id):
+    if saved := record.narrative:
         return NarrativeResponse(text=saved.text, error=saved.error)
     if services.llm is None:
         return NarrativeResponse(error="大模型没有配置好")
     narration = narrate(result, _question(services, record.plan_id), services.llm)
-    _append_trace(services, run_id, [call_step(call, "llm.narrate") for call in narration.calls])
+    steps = [call_step(call, "llm.narrate", services.debug) for call in narration.calls]
+    _record_steps(services, run_id, steps=steps)
     try:
-        services.store.save_narrative(
-            NarrativeRecord(run_id=run_id, text=narration.text, error=narration.error)
-        )
+        services.store.set_narrative(run_id, Narrative(text=narration.text, error=narration.error))
     except Exception:  # noqa: BLE001 —— 存不下来也把这次写好的给用户，下次再要会重写
         logger.warning("运行 %s 的小结没能存下来", run_id, exc_info=True)
     return NarrativeResponse(text=narration.text, error=narration.error)
@@ -248,14 +271,21 @@ def _write_narrative(run_id: str, services: Services) -> NarrativeResponse:
 
 @router.get("/api/traces/{record_id}")
 def get_trace(record_id: str, request: Request) -> dict[str, object]:
-    """过程记录：这次提问 / 运行的每一步调了什么、返回了什么、花了多久。
+    """一次提问 / 一次运行的过程：每一步调了什么、返回了什么、花了多久。
 
-    编号用 plan_id 或 run_id。给开发排查用——「大模型到底回了什么」以前只能靠猜。
+    编号用 plan_id 或 run_id，过程就存在那条记录里。给开发排查用——「大模型到底回了什么」以前只能靠猜。
     """
-    record = services_of(request).store.get_trace(record_id)
+    store = services_of(request).store
+    record = store.get_plan(record_id) or store.get_run(record_id)
     if record is None:
-        raise HTTPException(status_code=404, detail=f"没有编号为 {record_id} 的过程记录")
-    return asdict(record)
+        raise HTTPException(status_code=404, detail=f"没有编号为 {record_id} 的记录")
+    query = record.query if isinstance(record, PlanRecord) else _question_of(store, record) or ""
+    return {
+        "record_id": record_id,
+        "query": query,
+        "steps": record.steps,
+        "created_at": record.created_at,
+    }
 
 
 async def _read_body(request: Request) -> tuple[dict[str, Any] | None, list[Issue]]:

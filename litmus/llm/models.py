@@ -80,6 +80,8 @@ class LLMCall:
     rendered_hash: str
     #: 这一次发给大模型的用户侧消息（重试时是 planner.repair 渲染出来的那段）
     user_message: str
+    #: 渲染后的系统提示词全文。api 只在 LITMUS_DEBUG=true 时把它写进记录
+    system: str = ""
     model: str = ""
     #: 大模型返回的原始 JSON，原样存
     raw_reply: dict[str, Any] | None = None

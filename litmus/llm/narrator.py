@@ -76,14 +76,22 @@ def narrate(card: Mapping[str, Any], question: str | None, client: LLMClient) ->
         except LLMFormatError as exc:
             # 没调用工具就没有话可改，原样再问一次
             calls.append(
-                _call(prompt, rendered, attempt, message, error=str(exc), **reply_fields(exc.reply))
+                _call(
+                    prompt,
+                    rendered,
+                    attempt,
+                    message,
+                    system,
+                    error=str(exc),
+                    **reply_fields(exc.reply),
+                )
             )
             problems = []
             if attempt == 1:
                 continue
             return Narration("", tuple(calls), str(exc))
         except LLMError as exc:
-            calls.append(_call(prompt, rendered, attempt, message, error=str(exc)))
+            calls.append(_call(prompt, rendered, attempt, message, system, error=str(exc)))
             logger.warning("narrator 第 %d 次调用失败：%s", attempt, exc)
             return Narration("", tuple(calls), str(exc))
         text = reply.data.get("text") if isinstance(reply.data.get("text"), str) else ""
@@ -95,6 +103,7 @@ def narrate(card: Mapping[str, Any], question: str | None, client: LLMClient) ->
                 rendered,
                 attempt,
                 message,
+                system,
                 **reply_fields(reply),
                 problems=tuple(problems),
             )
@@ -135,12 +144,15 @@ def card_text(card: Mapping[str, Any], question: str | None) -> str:
     return f"{asked}卡：\n{card_lines}"
 
 
-def _call(prompt, rendered: str, attempt: int, message: str, **extra: object) -> LLMCall:
+def _call(
+    prompt, rendered: str, attempt: int, message: str, system: str = "", **extra: object
+) -> LLMCall:
     return LLMCall(
         attempt=attempt,
         prompt_id=prompt.id,
         prompt_version=prompt.version,
         rendered_hash=rendered,
         user_message=message,
+        system=system,
         **extra,  # type: ignore[arg-type]
     )
