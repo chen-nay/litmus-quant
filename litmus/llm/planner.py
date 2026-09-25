@@ -280,6 +280,7 @@ def plan(
             prompt_version=version,
             rendered_hash=rendered,
             user_message=message,
+            system=system,
             **extra,  # type: ignore[arg-type]
         )
         calls.append(call)
